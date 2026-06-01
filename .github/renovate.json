@@ -1,5 +1,4 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["github>cplieger/.github"],
-  "ignorePaths": ["compose.yaml"]
+  "extends": ["github>cplieger/.github"]
 }
