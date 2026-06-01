@@ -17,6 +17,6 @@ on:
 
 jobs:
   ci:
-    uses: cplieger/ci/.github/workflows/shell-ci.yaml@v1
+    uses: cplieger/ci/.github/workflows/shell-ci.yaml@19357decce18d479bf83e80a8d78b67226dfaf24 # v1
     with:
       shellcheck-paths: "./*.sh"
