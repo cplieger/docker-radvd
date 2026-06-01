@@ -1,0 +1,16 @@
+services:
+  radvd:
+    image: ghcr.io/cplieger/docker-radvd:latest
+    container_name: radvd
+    restart: unless-stopped
+
+    # radvd emits IPv6 Router Advertisements onto the LAN, so it needs host
+    # networking (or a macvlan) plus raw-socket + admin capabilities.
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+
+    # Provide your radvd.conf at /etc/radvd/radvd.conf (read-only).
+    volumes:
+      - ./radvd:/etc/radvd:ro
