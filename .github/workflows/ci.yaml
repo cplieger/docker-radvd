@@ -1,22 +1,14 @@
 name: CI
 
 on:
-  pull_request:
-    branches: [main]
-    paths-ignore:
-      - "**/*.md"
-      - "LICENSE"
-      - ".gitignore"
   push:
     branches: [main]
-    paths-ignore:
-      - "**/*.md"
-      - "LICENSE"
-      - ".gitignore"
+    paths-ignore: ["**/*.md", "LICENSE", ".gitignore"]
+  pull_request:
+    branches: [main]
+    paths-ignore: ["**/*.md", "LICENSE", ".gitignore"]
   workflow_dispatch:
 
 jobs:
   ci:
     uses: cplieger/ci/.github/workflows/shell-ci.yaml@2c6289a7dee062be6411c1cd0d3ab4f784d75f1e # v1
-    with:
-      shellcheck-paths: "./*.sh"
