@@ -3,8 +3,12 @@ name: Security
 on:
   pull_request:
     paths:
-      - "Dockerfile"
-      - ".github/workflows/security.yml"
+      - go.mod
+      - go.sum
+      - package.json
+      - package-lock.json
+      - Dockerfile
+      - .github/workflows/security.yml
   workflow_dispatch:
 
 permissions:
