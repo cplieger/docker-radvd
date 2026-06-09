@@ -1,6 +1,6 @@
 # check=error=true
 
-FROM alpine:3.23.4@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+FROM alpine:3.24.0@sha256:660e0827bd401543d81323d4886abbd08fda0fe3ba84337837d0b11a67251283
 
 # renovate: datasource=repology depName=alpine_3_23/radvd versioning=loose
 ARG RADVD_VERSION=2.20-r0
