@@ -28,6 +28,8 @@ This image is a minimal Alpine wrapper around the upstream `radvd` package, plus
 
 ## Quick start
 
+Available from both `ghcr.io/cplieger/docker-radvd` and `docker.io/cplieger/docker-radvd` — identical images and tags.
+
 ```yaml
 services:
   radvd:
