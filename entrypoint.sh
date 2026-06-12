@@ -21,19 +21,26 @@ CONF="/etc/radvd/radvd.conf"
 # check. The IgnoreIfMissing check also requires the value `on`, rejecting
 # `IgnoreIfMissing off` which would otherwise pass a substring match.
 if [ -r "$CONF" ]; then
-  grep -Eq '^[[:space:]]*IgnoreIfMissing[[:space:]]+on([[:space:]]|;|$)' "$CONF" \
-    || printf 'level=warn msg="radvd.conf missing or disabled IgnoreIfMissing on directive" path="%s"\n' "$CONF" >&2
-  grep -Eq '^[[:space:]]*AdvRASrcAddress[[:space:]]+' "$CONF" \
-    || printf 'level=warn msg="radvd.conf missing AdvRASrcAddress directive (HA failover will not work correctly)" path="%s"\n' "$CONF" >&2
+  [ -s "$CONF" ] ||
+    printf 'level=warn msg="radvd.conf is empty; radvd will start but advertise nothing" path="%s"\n' "$CONF" >&2
+  CONF_DIR=$(dirname "$CONF")
+  grep -Eq '^[[:space:]]*IgnoreIfMissing[[:space:]]+on([[:space:]]|;|$)' "$CONF_DIR"/*.conf 2> /dev/null ||
+    printf 'level=warn msg="no enabled IgnoreIfMissing on directive found in mounted radvd config" path="%s"\n' "$CONF_DIR" >&2
+  grep -Eq '^[[:space:]]*AdvRASrcAddress([[:space:]]|\{)' "$CONF_DIR"/*.conf 2> /dev/null ||
+    printf 'level=warn msg="no AdvRASrcAddress directive found in mounted radvd config (HA failover will not work correctly)" path="%s"\n' "$CONF_DIR" >&2
 elif [ -e "$CONF" ]; then
   printf 'level=error msg="radvd.conf exists but is not readable" path="%s"\n' "$CONF" >&2
+  exit 1
 else
   printf 'level=warn msg="radvd.conf not found; radvd will fail to start" path="%s"\n' "$CONF" >&2
 fi
 
 # radvd writes its own PID file at /run/radvd/radvd.pid and refuses to start
 # if the directory is missing.
-mkdir -p /run/radvd
+if ! mkdir -p /run/radvd; then
+  printf 'level=error msg="failed to create radvd PID directory; radvd cannot start" path="%s"\n' "/run/radvd" >&2
+  exit 1
+fi
 
 printf 'level=info msg="starting radvd" config="%s"\n' "$CONF" >&2
 
@@ -41,4 +48,4 @@ printf 'level=info msg="starting radvd" config="%s"\n' "$CONF" >&2
 # -n foreground, -m stderr routes upstream logs to our stderr, -d 1 is the
 # minimal verbosity that still logs startup success. Missing config is
 # caught by radvd itself with a clear error message.
-exec radvd -C "$CONF" -n -m stderr -d 1
+exec radvd -C "$CONF" -n -m stderr -d 1 -u radvd

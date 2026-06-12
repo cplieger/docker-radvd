@@ -15,8 +15,9 @@ Run [radvd](https://radvd.litech.org/) (the Linux IPv6 Router Advertisement Daem
 
 This image is a minimal Alpine wrapper around the upstream `radvd` package, plus a small POSIX entrypoint that:
 
-- **Validates HA-related directives** in `radvd.conf` (`IgnoreIfMissing on`, `AdvRASrcAddress`) — warns at startup if missing
+- **Validates HA-related directives** (`IgnoreIfMissing on`, `AdvRASrcAddress`) across the mounted config — warns at startup if missing
 - **Creates `/run/radvd`** (radvd refuses to start without it)
+- **Drops privileges** — radvd opens its raw socket as root, then runs as the unprivileged `radvd` user (`-u radvd`) for the rest of its lifetime
 - **Logs to stderr** with structured key=value lines, captured by `docker logs`
 
 ### Why this design
@@ -110,8 +111,8 @@ Background reading: [Firstyear's blog post on HA radvd on Linux](https://fy.blac
 
 | Capability | Why needed |
 |------------|-----------|
-| `NET_ADMIN` | Adding / removing IPv6 routes and neighbour discovery state |
-| `NET_RAW` | Constructing ICMPv6 Router Advertisement packets via raw sockets |
+| `NET_RAW` | **Required.** Opens the raw ICMPv6 socket used to send Router Advertisements. Without it radvd exits at startup (`open_icmpv6_socket: Operation not permitted`). |
+| `NET_ADMIN` | Lets radvd push interface-level RA/ND parameters (e.g. `CurHopLimit`) into the kernel. Not required to emit RAs, and in the default container posture these writes are blocked by a read-only `/proc/sys`; kept as the correct capability for interface management. |
 
 ### Networking
 
