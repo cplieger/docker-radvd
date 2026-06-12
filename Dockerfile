@@ -2,11 +2,11 @@
 
 FROM alpine:3.24.0@sha256:a2d49ea686c2adfe3c992e47dc3b5e7fa6e6b5055609400dc2acaeb241c829f4
 
-# renovate: datasource=repology depName=alpine_3_23/radvd versioning=loose
-ARG RADVD_VERSION=2.20-r0
-
+# No apk version pin: the digest-pinned base above fixes the apk index, so the
+# radvd version is already reproducible per base digest and floats forward on a
+# base bump instead of stranding on an Alpine release change.
 RUN apk add --no-cache \
-        radvd="${RADVD_VERSION}"
+        radvd
 
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 
