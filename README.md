@@ -144,7 +144,7 @@ If you see an RA from your radvd source address within a few seconds, it's worki
 | [shellcheck](https://www.shellcheck.net/) | Clean (entrypoint passes) |
 | [hadolint](https://github.com/hadolint/hadolint) | Clean |
 | [gitleaks](https://github.com/gitleaks/gitleaks) | No secrets detected |
-| [trivy](https://trivy.dev/) | Inherits Alpine 3.23 base image scan |
+| [trivy](https://trivy.dev/) | Inherits Alpine base image scan |
 
 The image is published with [cosign](https://github.com/sigstore/cosign) signatures and SBOM attestations. Verify a pull:
 
@@ -158,10 +158,10 @@ cosign verify ghcr.io/cplieger/docker-radvd:latest \
 
 All dependencies are updated automatically via [Renovate](https://github.com/renovatebot/renovate) and pinned by digest or version for reproducibility.
 
-| Dependency | Version | Source |
-|------------|---------|--------|
-| alpine | `3.23.4` | [Docker Hub](https://hub.docker.com/_/alpine) |
-| radvd | `2.20-r0` (Alpine 3.23 package) | [Alpine](https://pkgs.alpinelinux.org/package/v3.23/main/x86_64/radvd) |
+| Dependency | Source |
+|------------|--------|
+| alpine | [Docker Hub](https://hub.docker.com/_/alpine) |
+| radvd | [Alpine](https://pkgs.alpinelinux.org/packages?name=radvd) |
 
 ## Credits
 

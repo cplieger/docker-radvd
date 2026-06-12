@@ -6,7 +6,7 @@ inherited from [`cplieger/.github`](https://github.com/cplieger/.github).
 
 ## Layout
 
-There are only two files with real logic:
+The files with real logic are:
 
 - `Dockerfile` — installs the Alpine `radvd` package and wires up the
   `HEALTHCHECK` (`pidof radvd`) and `ENTRYPOINT`. The base image is pinned by
