@@ -156,7 +156,7 @@ cosign verify ghcr.io/cplieger/docker-radvd:latest \
 
 ## Dependencies
 
-All dependencies are updated automatically via [Renovate](https://github.com/renovatebot/renovate) and pinned by digest or version for reproducibility.
+All dependencies are updated automatically via [Renovate](https://github.com/renovatebot/renovate). The base image is pinned by SHA digest; the `radvd` apk package is installed unpinned so it tracks the digest-pinned base.
 
 | Dependency | Source |
 |------------|--------|

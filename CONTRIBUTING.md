@@ -10,8 +10,9 @@ The files with real logic are:
 
 - `Dockerfile` — installs the Alpine `radvd` package and wires up the
   `HEALTHCHECK` (`pidof radvd`) and `ENTRYPOINT`. The base image is pinned by
-  digest and `RADVD_VERSION` is pinned via a `# renovate:` comment, so version
-  bumps land as Renovate PRs — don't hand-edit them.
+  digest; the `radvd` package is installed **unpinned** so it tracks the
+  digest-pinned base — pinning the apk revision strands the build when Alpine
+  bumps releases and drops the old revision from the index.
 - `entrypoint.sh` — a POSIX `sh` script (runs on Alpine's BusyBox shell, not
   bash) that validates HA directives, creates `/run/radvd`, and `exec`s radvd
   in the foreground.
@@ -63,7 +64,7 @@ there, not here.
 Commits follow [Conventional Commits](https://www.conventionalcommits.org/);
 git-cliff parses them for release notes and the version bump (`feat:` → minor,
 `fix:`/`sec:` → patch, `chore`/`ci`/`docs` → no release). For a Dockerfile base
-or `radvd` bump, Renovate's `chore(deps):` commits handle it. Open an issue
+image bump, Renovate's `chore(deps):` commits handle it. Open an issue
 first for larger changes so the approach can be discussed.
 
 ## Conduct & security
