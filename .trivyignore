@@ -1,0 +1,6 @@
+# radvd must start as root to open the ICMPv6 raw socket (NET_RAW), then drops
+# to the unprivileged 'radvd' user at runtime via 'radvd -u radvd'. Trivy's
+# static Dockerfile scan can't see the runtime drop, so it flags the root user.
+# Listed in both the legacy AVD-DS- and current DS- ID formats.
+AVD-DS-0002
+DS-0002

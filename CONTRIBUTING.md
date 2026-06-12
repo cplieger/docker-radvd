@@ -8,14 +8,15 @@ inherited from [`cplieger/.github`](https://github.com/cplieger/.github).
 
 The files with real logic are:
 
-- `Dockerfile` — installs the Alpine `radvd` package and wires up the
+- `Dockerfile` — installs the Alpine `radvd` package, creates an unprivileged
+  `radvd` user/group for the entrypoint's privilege drop, and wires up the
   `HEALTHCHECK` (`pidof radvd`) and `ENTRYPOINT`. The base image is pinned by
   digest; the `radvd` package is installed **unpinned** so it tracks the
   digest-pinned base — pinning the apk revision strands the build when Alpine
   bumps releases and drops the old revision from the index.
 - `entrypoint.sh` — a POSIX `sh` script (runs on Alpine's BusyBox shell, not
   bash) that validates HA directives, creates `/run/radvd`, and `exec`s radvd
-  in the foreground.
+  in the foreground as the non-root `radvd` user (`-u radvd`).
 
 `compose.yaml` is the reference deployment. There is no build system, no
 tests, and no application source beyond these files.
@@ -34,7 +35,16 @@ tests, and no application source beyond these files.
   the start of a line (allowing leading whitespace) so a commented-out
   `# IgnoreIfMissing on` correctly fails the check, and the `IgnoreIfMissing`
   pattern requires the value `on` so `IgnoreIfMissing off` does not pass a
-  substring match. Keep that behaviour if you touch the patterns.
+  substring match. The checks scan every `*.conf` in the mounted directory (not
+  just `radvd.conf`) so directives in `include`d files are seen, and the
+  `AdvRASrcAddress` pattern accepts both `AdvRASrcAddress {` and the
+  no-space `AdvRASrcAddress{` form. Keep that behaviour if you touch the patterns.
+- **radvd drops to a non-root user.** The Dockerfile creates an unprivileged
+  `radvd` user/group and the entrypoint `exec`s `radvd … -u radvd`, which opens
+  the raw socket as root then drops the worker to that user. Keep the `-u radvd`
+  flag and the Dockerfile user together. radvd has **no `-g`/group flag** — it
+  derives the GID from `-u`'s primary group — so do not add one; an unrecognized
+  flag makes radvd exit before opening its socket and the container crash-loops.
 - **Logs are structured `key=value` to stderr.** Match the existing
   `level=... msg="..."` shape so `docker logs` output stays greppable.
 

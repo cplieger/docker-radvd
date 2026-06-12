@@ -7,6 +7,8 @@ FROM alpine:3.24.0@sha256:a2d49ea686c2adfe3c992e47dc3b5e7fa6e6b5055609400dc2acae
 # base bump instead of stranding on an Alpine release change.
 RUN apk add --no-cache \
         radvd
+RUN grep -q '^radvd:' /etc/group || addgroup -S radvd; \
+    grep -q '^radvd:' /etc/passwd || adduser -S -D -H -G radvd radvd
 
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 
