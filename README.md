@@ -112,7 +112,7 @@ Background reading: [Firstyear's blog post on HA radvd on Linux](https://fy.blac
 | Capability | Why needed |
 |------------|-----------|
 | `NET_RAW` | **Required.** Opens the raw ICMPv6 socket used to send Router Advertisements. Without it radvd exits at startup (`open_icmpv6_socket: Operation not permitted`). |
-| `NET_ADMIN` | Lets radvd push interface-level RA/ND parameters (e.g. `CurHopLimit`) into the kernel. Not required to emit RAs, and in the default container posture these writes are blocked by a read-only `/proc/sys`; kept as the correct capability for interface management. |
+| `NET_ADMIN` | Only needed when one of the kernel-applied interface-parameter directives (`AdvLinkMTU`, `AdvCurHopLimit`, `AdvReachableTime`, `AdvRetransTimer`) is configured AND `/proc/sys` is writable. radvd writes these to `/proc/sys/net/ipv6/{conf,neigh}/*`, which requires `CAP_NET_ADMIN`. Under a read-only `/proc/sys` (e.g. `read_only: true`) those writes are blocked and `NET_ADMIN` has no effect. **If you use radvd for pure SLAAC Router-Advertisement emission only (no kernel-applied interface parameters), you can safely remove `NET_ADMIN` and keep only `NET_RAW`.** |
 
 ### Networking
 
@@ -166,7 +166,7 @@ All dependencies are updated automatically via [Renovate](https://github.com/ren
 
 ## Credits
 
-This project packages [radvd](https://radvd.litech.org/) ([source on GitHub](https://github.com/reubenhwk/radvd)) into a container image. All credit for the daemon goes to the upstream maintainers — radvd has been the canonical Linux IPv6 RA daemon since 1996.
+This project packages [radvd](https://radvd.litech.org/) ([source on GitHub](https://github.com/radvd-project/radvd)) into a container image. All credit for the daemon goes to the upstream maintainers — radvd has been the canonical Linux IPv6 RA daemon since 1996.
 
 The HA pattern is documented in [Firstyear's blog post](https://fy.blackhats.net.au/blog/2018-11-01-high-available-radvd-on-linux/) and `radvd.conf(5)`.
 
