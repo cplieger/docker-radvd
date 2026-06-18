@@ -103,21 +103,21 @@ Background reading: [Firstyear's blog post on HA radvd on Linux](https://fy.blac
 
 ### Volumes
 
-| Mount | Description |
-|-------|-------------|
+| Mount        | Description                                              |
+| ------------ | -------------------------------------------------------- |
 | `/etc/radvd` | Directory containing your `radvd.conf`. Mount read-only. |
 
 ### Capabilities
 
-| Capability | Why needed |
-|------------|-----------|
-| `NET_RAW` | **Required.** Opens the raw ICMPv6 socket used to send Router Advertisements. Without it radvd exits at startup (`open_icmpv6_socket: Operation not permitted`). |
+| Capability  | Why needed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NET_RAW`   | **Required.** Opens the raw ICMPv6 socket used to send Router Advertisements. Without it radvd exits at startup (`open_icmpv6_socket: Operation not permitted`).                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `NET_ADMIN` | Only needed when one of the kernel-applied interface-parameter directives (`AdvLinkMTU`, `AdvCurHopLimit`, `AdvReachableTime`, `AdvRetransTimer`) is configured AND `/proc/sys` is writable. radvd writes these to `/proc/sys/net/ipv6/{conf,neigh}/*`, which requires `CAP_NET_ADMIN`. Under a read-only `/proc/sys` (e.g. `read_only: true`) those writes are blocked and `NET_ADMIN` has no effect. **If you use radvd for pure SLAAC Router-Advertisement emission only (no kernel-applied interface parameters), you can safely remove `NET_ADMIN` and keep only `NET_RAW`.** |
 
 ### Networking
 
-| Setting | Value | Reason |
-|---------|-------|--------|
+| Setting        | Value                 | Reason                                                                                      |
+| -------------- | --------------------- | ------------------------------------------------------------------------------------------- |
 | `network_mode` | `host` (or `macvlan`) | RAs are emitted via ICMPv6 on a real LAN interface; container networking would isolate them |
 
 ## Healthcheck
@@ -140,12 +140,12 @@ If you see an RA from your radvd source address within a few seconds, it's worki
 
 ## Security
 
-| Tool | Result |
-|------|--------|
-| [shellcheck](https://www.shellcheck.net/) | Clean (entrypoint passes) |
-| [hadolint](https://github.com/hadolint/hadolint) | Clean |
-| [gitleaks](https://github.com/gitleaks/gitleaks) | No secrets detected |
-| [trivy](https://trivy.dev/) | Inherits Alpine base image scan |
+| Tool                                             | Result                          |
+| ------------------------------------------------ | ------------------------------- |
+| [shellcheck](https://www.shellcheck.net/)        | Clean (entrypoint passes)       |
+| [hadolint](https://github.com/hadolint/hadolint) | Clean                           |
+| [gitleaks](https://github.com/gitleaks/gitleaks) | No secrets detected             |
+| [trivy](https://trivy.dev/)                      | Inherits Alpine base image scan |
 
 The image is published with [cosign](https://github.com/sigstore/cosign) signatures and SBOM attestations. Verify a pull:
 
@@ -159,10 +159,10 @@ cosign verify ghcr.io/cplieger/docker-radvd:latest \
 
 All dependencies are updated automatically via [Renovate](https://github.com/renovatebot/renovate). The base image is pinned by SHA digest; the `radvd` apk package is installed unpinned so it tracks the digest-pinned base.
 
-| Dependency | Source |
-|------------|--------|
-| alpine | [Docker Hub](https://hub.docker.com/_/alpine) |
-| radvd | [Alpine](https://pkgs.alpinelinux.org/packages?name=radvd) |
+| Dependency | Source                                                     |
+| ---------- | ---------------------------------------------------------- |
+| alpine     | [Docker Hub](https://hub.docker.com/_/alpine)              |
+| radvd      | [Alpine](https://pkgs.alpinelinux.org/packages?name=radvd) |
 
 ## Credits
 
