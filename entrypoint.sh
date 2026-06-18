@@ -22,7 +22,7 @@ CONF="/etc/radvd/radvd.conf"
 # `IgnoreIfMissing off` which would otherwise pass a substring match.
 if [ -r "$CONF" ]; then
   [ -s "$CONF" ] ||
-    printf 'level=warn msg="radvd.conf is empty; radvd will start but advertise nothing" path="%s"\n' "$CONF" >&2
+    printf 'level=warn msg="radvd.conf is empty; radvd will exit because no interface is configured" path="%s"\n' "$CONF" >&2
   CONF_DIR=$(dirname "$CONF")
   grep -Eq '^[[:space:]]*IgnoreIfMissing[[:space:]]+on([[:space:]]|;|$)' "$CONF_DIR"/*.conf 2> /dev/null ||
     printf 'level=warn msg="no enabled IgnoreIfMissing on directive found in mounted radvd config" path="%s"\n' "$CONF_DIR" >&2
