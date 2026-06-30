@@ -1,18 +1,15 @@
+# Example compose for docker-radvd. See the README for all configuration options and hardening.
 services:
   radvd:
     image: ghcr.io/cplieger/docker-radvd:latest
     container_name: radvd
     restart: unless-stopped
 
-    # radvd emits IPv6 Router Advertisements onto the LAN, so it needs host
-    # networking (or a macvlan) plus the raw-socket capability. NET_ADMIN is
-    # optional - only needed for kernel-applied interface-parameter directives
-    # (AdvLinkMTU, AdvCurHopLimit, ...); see README.
+    # RAs are ICMPv6 on a real LAN interface, so radvd needs host networking (or a macvlan).
     network_mode: host
     cap_add:
-      - NET_RAW    # required: raw ICMPv6 socket to emit RAs
-      - NET_ADMIN  # optional: only for kernel-applied iface params (AdvLinkMTU etc.); drop for pure RA emission
+      - NET_RAW  # required: raw ICMPv6 socket to emit RAs
+      - NET_ADMIN  # optional: only for kernel-applied iface params (AdvLinkMTU etc.); see README
 
-    # Provide your radvd.conf at /etc/radvd/radvd.conf (read-only).
     volumes:
-      - ./radvd:/etc/radvd:ro
+      - "./radvd:/etc/radvd:ro"  # provide your radvd.conf here
