@@ -18,6 +18,7 @@ This image is a minimal Alpine wrapper around the upstream `radvd` package, plus
 - **Validates HA-related directives** (`IgnoreIfMissing on`, `AdvRASrcAddress`) across the mounted config — warns at startup if missing
 - **Creates `/run/radvd`** (radvd refuses to start without it)
 - **Drops privileges** — radvd opens its raw socket as root, then runs as the unprivileged `radvd` user (`-u radvd`) for the rest of its lifetime
+- **Supervises radvd** — turns `SIGHUP` into a clean config reload, forwards `SIGTERM` for graceful shutdown, and propagates an unexpected radvd exit to Docker's restart policy (see [Reloading](#reloading-configuration))
 - **Logs to stderr** with structured key=value lines, captured by `docker logs`
 
 ### Why this design
@@ -71,11 +72,11 @@ interface eth0 {
 
 If you run radvd on two or more nodes for HA, both nodes will emit RAs by default — clients pick whichever they hear last, or alternate randomly, breaking default-route selection. The proper pattern is:
 
-1. **Manage the IPv6 VIP with keepalived** — only the MASTER owns the VIP at any moment
-2. **`AdvRASrcAddress` in `radvd.conf`** — radvd uses the VIP as the RA source address
-3. **`IgnoreIfMissing on`** — radvd tolerates the VIP being absent on the BACKUP node (stays running, just doesn't emit RAs)
+1. **Manage a floating link-local with keepalived** — only the MASTER owns it at any moment
+2. **`AdvRASrcAddress` in `radvd.conf`** — point it at that **link-local**. It must be link-local: [RFC 4861 §6.1.2](https://www.rfc-editor.org/rfc/rfc4861#section-6.1.2) requires an RA's source to be a link-local address, and hosts silently discard any RA sourced from a global address. Pointing it at a global service VIP is the classic mistake — radvd emits, `tcpdump` shows the RAs, yet no host ever autoconfigures.
+3. **`IgnoreIfMissing on`** — radvd tolerates the source address being absent on the BACKUP node (stays running, just doesn't emit RAs)
 
-Result: both radvd processes run continuously, but only the MASTER node emits RAs (because only it has the VIP). On failover, keepalived moves the VIP, and the new MASTER's radvd starts emitting RAs within seconds.
+Result: both radvd processes run continuously, but only the MASTER node emits RAs (because only it has the link-local). On failover, keepalived moves the address, and the new MASTER's radvd starts emitting RAs within seconds.
 
 Example HA `radvd.conf`:
 
@@ -98,6 +99,16 @@ interface eth0 {
 The entrypoint warns at startup if either directive is missing, so you find out before clients do. See [docker-keepalived](https://github.com/cplieger/docker-keepalived) for the sibling container.
 
 Background reading: [Firstyear's blog post on HA radvd on Linux](https://fy.blackhats.net.au/blog/2018-11-01-high-available-radvd-on-linux/) explains the pattern in detail.
+
+## Reloading configuration
+
+Reload after editing the mounted config with a `SIGHUP`:
+
+```bash
+docker kill -s HUP radvd
+```
+
+The entrypoint supervises radvd and handles this by restarting the daemon, which re-reads the config. This matters because radvd reads its config **as root at startup** but re-reads it **as the unprivileged `radvd` user** on an in-process `SIGHUP` — so if the mounted config isn't readable by that user (e.g. a `0770 root:<group>` bind mount, common in hardened deployments), radvd's own reload fails with `failed to read config file` and the process exits. Supervising the restart re-reads as root every time, so reload works regardless of the config's ownership, and the container stays up. `docker restart radvd` works too.
 
 ## Configuration reference
 

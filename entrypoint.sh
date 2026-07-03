@@ -1,13 +1,23 @@
 #!/bin/sh
-# radvd entrypoint. Runs radvd in the foreground so Docker's restart policy
-# supervises it. No wrapper-level crash loop handling, no watchdog.
+# radvd entrypoint. Supervises radvd so a SIGHUP is a reliable config reload
+# and an unexpected radvd exit propagates to Docker's restart policy.
 #
-# Paired with a keepalived sibling container that manages the IPv6 VIP. radvd
-# on both nodes references the VIP via AdvRASrcAddress in radvd.conf, so only
-# the MASTER node emits RAs; IgnoreIfMissing on tolerates the VIP being absent
-# on the BACKUP node. See radvd.conf(5) and
+# Why supervise instead of `exec radvd`: radvd reads its config as root at
+# startup (before dropping to -u radvd), but re-reads it as the unprivileged
+# radvd user on SIGHUP. If the mounted config is not readable by that user
+# (e.g. a 0770 root:<group> bind mount, common in hardened deployments), the
+# in-process reread fails with "failed to read config file" and radvd exits.
+# Worse, when that SIGHUP was delivered via `docker kill -s HUP`, Docker's
+# restart policy does not fire, so the daemon stays down. Turning SIGHUP into a
+# supervised restart re-reads the config as root every time, so reload works
+# regardless of the config's ownership while radvd itself keeps running -u.
+#
+# Paired with a keepalived sibling container that manages a floating link-local
+# address. radvd on both nodes references it via AdvRASrcAddress in radvd.conf,
+# so only the MASTER emits RAs; IgnoreIfMissing on tolerates it being absent on
+# the BACKUP. See radvd.conf(5) and
 # https://fy.blackhats.net.au/blog/2018-11-01-high-available-radvd-on-linux/
-set -eu
+set -u
 
 CONF="/etc/radvd/radvd.conf"
 
@@ -42,10 +52,55 @@ if ! mkdir -p /run/radvd; then
   exit 1
 fi
 
-printf 'level=info msg="starting radvd" config="%s"\n' "$CONF" >&2
-
-# exec so radvd becomes PID 1 and receives SIGTERM directly on docker stop.
 # -n foreground, -m stderr routes upstream logs to our stderr, -d 1 is the
-# minimal verbosity that still logs startup success. Missing config is
-# caught by radvd itself with a clear error message.
-exec radvd -C "$CONF" -n -m stderr -d 1 -u radvd
+# minimal verbosity that still logs startup success, -u radvd drops privileges
+# after the raw socket is open. Missing config is caught by radvd itself with a
+# clear error message.
+radvd_pid=""
+start_radvd() {
+  radvd -C "$CONF" -n -m stderr -d 1 -u radvd &
+  radvd_pid=$!
+}
+
+reload=0
+shutdown=0
+# SIGHUP: reload config by restarting radvd (re-reads as root, see header).
+on_hup() {
+  reload=1
+  [ -n "$radvd_pid" ] && kill -TERM "$radvd_pid" 2> /dev/null
+}
+# SIGTERM/SIGINT (docker stop): forward and exit.
+on_term() {
+  shutdown=1
+  [ -n "$radvd_pid" ] && kill -TERM "$radvd_pid" 2> /dev/null
+}
+trap on_hup HUP
+trap on_term TERM INT
+
+printf 'level=info msg="starting radvd" config="%s"\n' "$CONF" >&2
+start_radvd
+
+while :; do
+  wait "$radvd_pid"
+  status=$?
+  # A trapped signal interrupts wait before radvd has finished terminating;
+  # reap it fully so the next start does not race a dying process.
+  if kill -0 "$radvd_pid" 2> /dev/null; then
+    wait "$radvd_pid"
+    status=$?
+  fi
+
+  if [ "$shutdown" -eq 1 ]; then
+    exit 0
+  fi
+  if [ "$reload" -eq 1 ]; then
+    reload=0
+    printf 'level=info msg="reloading radvd (config re-read via restart)"\n' >&2
+    start_radvd
+    continue
+  fi
+  # radvd exited on its own (crash or fatal config error): propagate the code
+  # so Docker's restart policy recreates the container.
+  printf 'level=error msg="radvd exited; propagating exit for restart policy" status="%s"\n' "$status" >&2
+  exit "$status"
+done
