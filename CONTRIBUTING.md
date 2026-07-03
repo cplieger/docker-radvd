@@ -15,11 +15,15 @@ The files with real logic are:
   digest-pinned base — pinning the apk revision strands the build when Alpine
   bumps releases and drops the old revision from the index.
 - `entrypoint.sh` — a POSIX `sh` script (runs on Alpine's BusyBox shell, not
-  bash) that validates HA directives, creates `/run/radvd`, and `exec`s radvd
-  in the foreground as the non-root `radvd` user (`-u radvd`).
+  bash) that validates HA directives, creates `/run/radvd`, and supervises radvd
+  in the foreground as the non-root `radvd` user (`-u radvd`): it turns `SIGHUP`
+  into a config reload, forwards `SIGTERM`/`SIGINT` for graceful shutdown, and
+  propagates an unexpected radvd exit to Docker's restart policy.
 
-`compose.yaml` is the reference deployment. There is no build system, no
-tests, and no application source beyond these files.
+`compose.yaml` is the reference deployment. There is no build system and no
+application source beyond these files; the only test is a build-time smoke test
+(`tests/smoke.sh`, run in the Dockerfile `test` stage) that configtests a valid
+and a malformed config.
 
 ## Design boundaries (please preserve)
 
@@ -40,11 +44,21 @@ tests, and no application source beyond these files.
   `AdvRASrcAddress` pattern accepts both `AdvRASrcAddress {` and the
   no-space `AdvRASrcAddress{` form. Keep that behaviour if you touch the patterns.
 - **radvd drops to a non-root user.** The Dockerfile creates an unprivileged
-  `radvd` user/group and the entrypoint `exec`s `radvd … -u radvd`, which opens
+  `radvd` user/group and the entrypoint runs `radvd … -u radvd`, which opens
   the raw socket as root then drops the worker to that user. Keep the `-u radvd`
   flag and the Dockerfile user together. radvd has **no `-g`/group flag** — it
   derives the GID from `-u`'s primary group — so do not add one; an unrecognized
   flag makes radvd exit before opening its socket and the container crash-loops.
+- **The entrypoint supervises radvd — don't revert it to `exec radvd`.** radvd
+  reads its config as root at startup but re-reads it as the unprivileged
+  `radvd` user on an in-process `SIGHUP`; a config that user can't read (a
+  hardened `0770 root:<group>` bind mount) makes radvd's own reload fail
+  (`failed to read config file`) and the process exit — and a `docker kill -s
+  HUP` then wouldn't trip Docker's restart policy either. The supervisor loop
+  turns `SIGHUP` into a radvd restart (re-reads as root), forwards
+  `SIGTERM`/`SIGINT`, and propagates an unexpected radvd exit. `exec radvd` is
+  simpler but reintroduces the reload-death, so keep the supervise-and-restart
+  loop.
 - **Logs are structured `key=value` to stderr.** Match the existing
   `level=... msg="..."` shape so `docker logs` output stays greppable.
 
@@ -56,11 +70,18 @@ opening a PR:
 ```sh
 shellcheck entrypoint.sh
 hadolint Dockerfile
-docker build -t docker-radvd:dev .
+docker build -t docker-radvd:dev .   # runs tests/smoke.sh in the test stage
 ```
 
 The `Dockerfile` opens with `# check=error=true`, so BuildKit build checks are
 promoted to errors — a build with check warnings fails.
+
+If you touch the entrypoint's signal handling, exercise the supervisor by hand:
+run the built image with a valid config for an interface that exists in the
+container, then `docker kill -s HUP <container>` — it should log
+`reloading radvd` and stay `Up`, not exit. Repeat with the config directory made
+unreadable to the `radvd` user (`chown root:root` + `chmod 700`) to confirm the
+reload still succeeds where radvd's own in-process reread would fail.
 
 ## CI workflows are synced — don't edit them
 
