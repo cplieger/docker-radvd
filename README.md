@@ -11,7 +11,7 @@ Run [radvd](https://radvd.litech.org/) (the Linux IPv6 Router Advertisement Daem
 
 ## What it does
 
-[radvd](https://radvd.litech.org/) emits IPv6 Router Advertisements (RAs) onto the LAN. RAs tell IPv6 hosts the local prefix(es), the default router, DNS servers, and various other parameters needed for SLAAC (StateLess Address AutoConfiguration). Without an RA-emitter on the LAN, IPv6 hosts default to link-local-only and can't route off-segment.
+[radvd](https://radvd.litech.org/) emits IPv6 Router Advertisements (RAs) onto the LAN so hosts can do SLAAC (StateLess Address AutoConfiguration): learn the local prefix(es), default router, and DNS. Without an RA emitter on the LAN, IPv6 hosts stay link-local-only and can't route off-segment.
 
 This image is a minimal Alpine wrapper around the upstream `radvd` package, plus a small POSIX entrypoint that:
 
@@ -108,7 +108,7 @@ Reload after editing the mounted config with a `SIGHUP`:
 docker kill -s HUP radvd
 ```
 
-The entrypoint supervises radvd and handles this by restarting the daemon, which re-reads the config. This matters because radvd reads its config **as root at startup** but re-reads it **as the unprivileged `radvd` user** on an in-process `SIGHUP` — so if the mounted config isn't readable by that user (e.g. a `0770 root:<group>` bind mount, common in hardened deployments), radvd's own reload fails with `failed to read config file` and the process exits. Supervising the restart re-reads as root every time, so reload works regardless of the config's ownership, and the container stays up. `docker restart radvd` works too.
+The entrypoint restarts the daemon so it re-reads the config; `docker restart radvd` works too. This supervise-and-restart design (rather than `exec`-ing radvd) is what makes reload work regardless of the config file's ownership; see [CONTRIBUTING](CONTRIBUTING.md) for the rationale.
 
 ## Configuration reference
 
@@ -187,7 +187,7 @@ Issues and pull requests are welcome. Please open an issue first for larger chan
 
 ## Disclaimer
 
-This image is built with care and follows security best practices, but it is intended for **homelab use**. No guarantees of fitness for production environments. Use at your own risk.
+This project is built with care and follows security best practices, but it is intended for personal / self-hosted use. No guarantees of fitness for production environments. Use at your own risk.
 
 This project was built with AI-assisted tooling using [Claude Opus](https://www.anthropic.com/claude) and [Kiro](https://kiro.dev). The human maintainer defines architecture, supervises implementation, and makes all final decisions.
 
