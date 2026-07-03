@@ -36,7 +36,7 @@ if [ -r "$CONF" ]; then
   CONF_DIR=$(dirname "$CONF")
   grep -Eq '^[[:space:]]*IgnoreIfMissing[[:space:]]+on([[:space:]]|;|$)' "$CONF_DIR"/*.conf 2> /dev/null ||
     printf 'level=warn msg="no enabled IgnoreIfMissing on directive found in mounted radvd config" path="%s"\n' "$CONF_DIR" >&2
-  grep -Eq '^[[:space:]]*AdvRASrcAddress([[:space:]]|\{)' "$CONF_DIR"/*.conf 2> /dev/null ||
+  grep -Eq '^[[:space:]]*AdvRASrcAddress([[:space:]]|\{|$)' "$CONF_DIR"/*.conf 2> /dev/null ||
     printf 'level=warn msg="no AdvRASrcAddress directive found in mounted radvd config (HA failover will not work correctly)" path="%s"\n' "$CONF_DIR" >&2
 elif [ -e "$CONF" ]; then
   printf 'level=error msg="radvd.conf exists but is not readable" path="%s"\n' "$CONF" >&2
@@ -91,6 +91,7 @@ while :; do
   fi
 
   if [ "$shutdown" -eq 1 ]; then
+    printf 'level=info msg="radvd stopped on shutdown signal (SIGTERM/SIGINT)"\n' >&2
     exit 0
   fi
   if [ "$reload" -eq 1 ]; then

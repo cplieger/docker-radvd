@@ -33,6 +33,9 @@ RUN sh /tmp/tests/smoke.sh && touch /tests-passed
 FROM base AS final
 COPY --from=test /tests-passed /tests-passed
 
+# Liveness only: healthy whenever the radvd process is alive. It cannot see the
+# HA-backup 'running but emitting no RAs' state (missing source address); see the
+# README 'Healthcheck' section for the off-host rdisc6 end-to-end probe.
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \
     CMD pidof radvd >/dev/null || exit 1
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

@@ -41,8 +41,10 @@ and a malformed config.
   pattern requires the value `on` so `IgnoreIfMissing off` does not pass a
   substring match. The checks scan every `*.conf` in the mounted directory (not
   just `radvd.conf`) so directives in `include`d files are seen, and the
-  `AdvRASrcAddress` pattern accepts both `AdvRASrcAddress {` and the
-  no-space `AdvRASrcAddress{` form. Keep that behaviour if you touch the patterns.
+  `AdvRASrcAddress` pattern accepts `AdvRASrcAddress {`, the no-space
+  `AdvRASrcAddress{` form, and a bare `AdvRASrcAddress` at end-of-line (the
+  opening brace on the next line) so a valid multi-line HA config isn't
+  flagged. Keep that behaviour if you touch the patterns.
 - **radvd drops to a non-root user.** The Dockerfile creates an unprivileged
   `radvd` user/group and the entrypoint runs `radvd … -u radvd`, which opens
   the raw socket as root then drops the worker to that user. Keep the `-u radvd`
