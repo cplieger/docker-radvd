@@ -30,38 +30,70 @@ CONF="/etc/radvd/radvd.conf"
 # so commented-out directives (`# IgnoreIfMissing on`) correctly fail the
 # check. The IgnoreIfMissing check also requires the value `on`, rejecting
 # `IgnoreIfMissing off` which would otherwise pass a substring match.
-if [ -r "$CONF" ]; then
-  [ -s "$CONF" ] \
-    || printf 'level=warn msg="radvd.conf is empty; radvd will exit because no interface is configured" path="%s"\n' "$CONF" >&2
+#
+# Factored into a helper so the SIGHUP reload branch can re-emit the same
+# warnings before restarting radvd: an operator who edits the mounted config
+# and reloads via `docker kill -s HUP` would otherwise silently drop these HA
+# directives with no warning. Warn-only on every call; the empty-config warning
+# and the unreadable/missing-config paths below stay startup-only (the reload
+# branch guards on readability and never triggers the fatal exit).
+check_ha_directives() {
   CONF_DIR=$(dirname "$CONF")
   grep -Eq '^[[:space:]]*IgnoreIfMissing[[:space:]]+on([[:space:]]|;|$)' "$CONF_DIR"/*.conf 2>/dev/null \
     || printf 'level=warn msg="no enabled IgnoreIfMissing on directive found in mounted radvd config" path="%s"\n' "$CONF_DIR" >&2
   grep -Eq '^[[:space:]]*AdvRASrcAddress([[:space:]]|\{|$)' "$CONF_DIR"/*.conf 2>/dev/null \
     || printf 'level=warn msg="no AdvRASrcAddress directive found in mounted radvd config (HA failover will not work correctly)" path="%s"\n' "$CONF_DIR" >&2
-  # When AdvRASrcAddress IS set, its value must be a link-local address. RFC
+  # When AdvRASrcAddress IS set, every address it lists must be link-local. RFC
   # 4861 section 6.1.2 requires a Router Advertisement's source to be link-local
   # (fe80::/10); hosts silently discard an RA sourced from a global or ULA
   # address. Pointing AdvRASrcAddress at a global service VIP is the classic
   # mistake: radvd emits and tcpdump shows the RAs, yet no host autoconfigures.
   # Warn-only, and only when the directive is present (its absence is covered
-  # above). The scan reads each AdvRASrcAddress { ... } block and stays silent
-  # if any address is fe80:-prefixed (case-insensitive); otherwise it warns.
+  # above). The scan walks every AdvRASrcAddress { ... } block across all *.conf
+  # and warns if ANY listed address is non-link-local (case-insensitive), so a
+  # correct link-local block never masks a sibling block that holds the
+  # global-VIP mistake. The warning names each offending <file>:<address> so
+  # the operator can fix a multi-*.conf config without re-grepping by hand; the
+  # displayed file and address are sanitized (quotes and control characters
+  # neutralized) so a malformed config value cannot forge or break the
+  # structured key=value log line.
   if grep -Eq '^[[:space:]]*AdvRASrcAddress([[:space:]]|\{|$)' "$CONF_DIR"/*.conf 2>/dev/null; then
-    awk '
+    bad_src=$(awk '
+      function clean(s) {
+        gsub(/["\\]/, "?", s)
+        gsub(/[[:cntrl:]]/, "?", s)
+        return s
+      }
       { sub(/#.*/, ""); line = tolower($0) }
       FNR == 1 { inblock = 0 }
-      line ~ /^[ \t]*advrasrcaddress([ \t]|[{]|$)/ { inblock = 1 }
-      inblock {
-        if ((" " line) ~ /[ \t{;]fe80:/) {
-          found = 1
-          exit
+      {
+        if (line ~ /^[ \t]*advrasrcaddress([ \t]|[{]|$)/) { inblock = 1 }
+        if (inblock) {
+          work = line
+          sub(/^[ \t]*advrasrcaddress[ \t]*/, "", work)
+          gsub(/[{}]/, " ", work)
+          n = split(work, addrs, ";")
+          for (i = 1; i <= n; i++) {
+            tok = addrs[i]
+            sub(/^[ \t]+/, "", tok)
+            sub(/[ \t]+$/, "", tok)
+            if (tok != "" && tok !~ /^fe80:/) { bad = bad (bad ? ", " : "") clean(FILENAME) ":" clean(tok) }
+          }
+          if (line ~ /[}]/) { inblock = 0 }
         }
-        if (line ~ /[}]/) { inblock = 0 }
       }
-      END { exit(found ? 0 : 1) }
-    ' "$CONF_DIR"/*.conf 2>/dev/null \
-      || printf 'level=warn msg="AdvRASrcAddress is set to a non-link-local address; RFC 4861 requires an RA source to be link-local (fe80::/10), so hosts will silently discard these RAs" path="%s"\n' "$CONF_DIR" >&2
+      END { if (bad != "") print bad }
+    ' "$CONF_DIR"/*.conf 2>/dev/null)
+    if [ -n "$bad_src" ]; then
+      printf 'level=warn msg="AdvRASrcAddress is set to a non-link-local address; RFC 4861 requires an RA source to be link-local (fe80::/10), so hosts will silently discard these RAs" bad="%s" path="%s"\n' "$bad_src" "$CONF_DIR" >&2
+    fi
   fi
+}
+
+if [ -r "$CONF" ]; then
+  [ -s "$CONF" ] \
+    || printf 'level=warn msg="radvd.conf is empty; radvd will exit because no interface is configured" path="%s"\n' "$CONF" >&2
+  check_ha_directives
 elif [ -e "$CONF" ]; then
   printf 'level=error msg="radvd.conf exists but is not readable" path="%s"\n' "$CONF" >&2
   exit 1
@@ -129,6 +161,11 @@ while :; do
   if [ "$reload" -eq 1 ]; then
     reload=0
     printf 'level=info msg="reloading radvd (config re-read via restart)"\n' >&2
+    # Re-emit the HA-directive warnings for the (possibly edited) mounted config
+    # before restarting, matching what startup already checked. Guarded on
+    # readability so this stays warn-only — the unreadable-config fatal path is
+    # startup-only by design.
+    [ -r "$CONF" ] && check_ha_directives
     start_radvd
     continue
   fi
