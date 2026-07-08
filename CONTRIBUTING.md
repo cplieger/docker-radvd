@@ -45,6 +45,16 @@ and a malformed config.
   `AdvRASrcAddress{` form, and a bare `AdvRASrcAddress` at end-of-line (the
   opening brace on the next line) so a valid multi-line HA config isn't
   flagged. Keep that behaviour if you touch the patterns.
+- **The non-link-local check is per-block.** Beyond presence detection, the
+  `awk` scan walks every address inside every `AdvRASrcAddress` block (across
+  all `*.conf`) and warns if _any_ is not link-local (`fe80::/10`). This is
+  deliberate: a correct link-local block must not mask a sibling block that
+  points at a global VIP, so a multi-interface or multi-file config with one
+  good and one bad source still warns, and the emitted `level=warn` line names
+  each offending `<file>:<address>` in a `bad=` field so the operator can locate
+  it without re-grepping. Preserve the per-block semantics if you touch the
+  `awk` — an earlier version stopped at the first link-local address it saw and
+  could stay silent on exactly that mixed config.
 - **radvd drops to a non-root user.** The Dockerfile creates an unprivileged
   `radvd` user/group and the entrypoint runs `radvd … -u radvd`, which opens
   the raw socket as root then drops the worker to that user. Keep the `-u radvd`

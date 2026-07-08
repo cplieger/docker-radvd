@@ -108,7 +108,7 @@ Reload after editing the mounted config with a `SIGHUP`:
 docker kill -s HUP radvd
 ```
 
-The entrypoint restarts the daemon so it re-reads the config; `docker restart radvd` works too. This supervise-and-restart design (rather than `exec`-ing radvd) is what makes reload work regardless of the config file's ownership; see [CONTRIBUTING](CONTRIBUTING.md) for the rationale.
+The entrypoint restarts the daemon so it re-reads the config; `docker restart radvd` works too. On reload it also re-runs the HA-directive checks and re-emits any warnings for the (possibly edited) config, so a misconfiguration introduced by an edit shows up in `docker logs` at reload time rather than only at the next full restart. This supervise-and-restart design (rather than `exec`-ing radvd) is what makes reload work regardless of the config file's ownership; see [CONTRIBUTING](CONTRIBUTING.md) for the rationale.
 
 ## Configuration reference
 
