@@ -15,7 +15,7 @@ Run [radvd](https://radvd.litech.org/) (the Linux IPv6 Router Advertisement Daem
 
 This image is a minimal Alpine wrapper around the upstream `radvd` package, plus a small POSIX entrypoint that:
 
-- **Validates HA-related directives** (`IgnoreIfMissing on`, `AdvRASrcAddress`) across the mounted config — warns at startup if missing
+- **Validates HA-related directives** (`IgnoreIfMissing on`, `AdvRASrcAddress`) across the mounted config — warns at startup if they are missing, and also warns when `AdvRASrcAddress` is set to a non-link-local (global/ULA) address that RFC 4861 requires hosts to silently discard
 - **Creates `/run/radvd`** (radvd refuses to start without it)
 - **Drops privileges** — radvd opens its raw socket as root, then runs as the unprivileged `radvd` user (`-u radvd`) for the rest of its lifetime
 - **Supervises radvd** — turns `SIGHUP` into a clean config reload, forwards `SIGTERM` for graceful shutdown, and propagates an unexpected radvd exit to Docker's restart policy (see [Reloading](#reloading-configuration))
@@ -96,7 +96,7 @@ interface eth0 {
 };
 ```
 
-The entrypoint warns at startup if either directive is missing, so you find out before clients do. See [docker-keepalived](https://github.com/cplieger/docker-keepalived) for the sibling container.
+The entrypoint warns at startup if either directive is missing (and also if `AdvRASrcAddress` is set to a non-link-local address, the classic mistake above), so you find out before clients do. See [docker-keepalived](https://github.com/cplieger/docker-keepalived) for the sibling container.
 
 Background reading: [Firstyear's blog post on HA radvd on Linux](https://fy.blackhats.net.au/blog/2018-11-01-high-available-radvd-on-linux/) explains the pattern in detail.
 

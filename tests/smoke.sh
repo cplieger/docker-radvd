@@ -12,19 +12,21 @@ set -eu
 
 d=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 fail=0
-log() { printf '%s\n' "$*"; }
+log() { printf '%s\n' "$*"; }     # progress + final verdict -> stdout
+err() { printf '%s\n' "$*" >&2; } # failures + captured output -> stderr
 
 # 1. configtest (-c) accepts a valid config. This also proves the binary runs
 #    and links (radvd's own version flag exits non-zero, so it is not a usable
 #    liveness check).
-if ! radvd -c -C "$d/radvd.conf" > /dev/null 2>&1; then
-  log "FAIL: 'radvd -c' rejected a valid config"
+if ! out=$(radvd -c -C "$d/radvd.conf" 2>&1); then
+  err "FAIL: 'radvd -c' rejected a valid config"
+  err "$out"
   fail=1
 fi
 
 # 2. configtest (-c) rejects a malformed config (proves the parser is real).
-if radvd -c -C "$d/radvd.bad.conf" > /dev/null 2>&1; then
-  log "FAIL: 'radvd -c' accepted a malformed config"
+if radvd -c -C "$d/radvd.bad.conf" >/dev/null 2>&1; then
+  err "FAIL: 'radvd -c' accepted a malformed config"
   fail=1
 fi
 
