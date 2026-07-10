@@ -149,6 +149,44 @@ sudo rdisc6 eth0
 
 If you see an RA from your radvd source address within a few seconds, it's working.
 
+## Alerting
+
+radvd has no metrics endpoint; its operational state is in its logs. Ship the
+container's logs (stdout and stderr) to Loki (Grafana Alloy's Docker log
+discovery does this with no configuration) and evaluate this rule with
+[Loki's ruler](https://grafana.com/docs/loki/latest/alert/); firing alerts
+deliver through your Alertmanager exactly like Prometheus metric alerts.
+
+```yaml
+groups:
+  - name: radvd
+    rules:
+      - alert: RadvdConfigError
+        expr: |
+          sum by (hostname) (count_over_time(
+            {container="radvd"}
+            |~ `error parsing or activating the config file|exiting, failed to read config file` [10m]
+          )) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "radvd rejected its config"
+          description: >
+            radvd logged a config parse or activation failure. radvd exits on
+            this error and the supervising entrypoint propagates the exit, so
+            the container crash-loops and IPv6 RA emission stops until the
+            config is fixed. This applies whether the bad config is present at
+            startup or introduced by a later edit and reload, since a reload
+            restarts radvd and re-validates the config. Check your radvd.conf.
+```
+
+Thresholds and the `severity` label are starting points. The `container`
+selector and the `hostname` grouping label depend on your log collector:
+Alloy's Docker discovery provides `container`, while `hostname` comes from your
+own labeling, so adjust or drop `sum by (hostname)` to match. Route by whatever
+labels your Alertmanager uses.
+
 ## Security
 
 | Tool                                             | Result                          |
