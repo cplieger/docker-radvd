@@ -13,7 +13,7 @@ Run [radvd](https://radvd.litech.org/) (the Linux IPv6 Router Advertisement Daem
 
 [radvd](https://radvd.litech.org/) emits IPv6 Router Advertisements (RAs) onto the LAN so hosts can do SLAAC (StateLess Address AutoConfiguration): learn the local prefix(es), default router, and DNS. Without an RA emitter on the LAN, IPv6 hosts stay link-local-only and can't route off-segment.
 
-This image is a minimal Alpine wrapper around the upstream `radvd` package, plus a small POSIX entrypoint that:
+This image is a minimal Alpine wrapper around upstream `radvd`, compiled from the pinned release tarball, plus a small POSIX entrypoint that:
 
 - **Validates HA-related directives** (`IgnoreIfMissing on`, `AdvRASrcAddress`) across the mounted config — warns at startup if they are missing, and also warns when `AdvRASrcAddress` is set to a non-link-local (global/ULA) address that RFC 4861 requires hosts to silently discard
 - **Creates `/run/radvd`** (radvd refuses to start without it)
@@ -40,11 +40,11 @@ services:
     container_name: radvd
     restart: unless-stopped
 
-    # radvd emits RAs onto the LAN — needs host networking + raw / admin caps.
+    # radvd emits RAs onto the LAN — needs host networking + a raw ICMPv6 socket.
     network_mode: host
     cap_add:
-      - NET_ADMIN
-      - NET_RAW
+      - NET_RAW  # required: raw ICMPv6 socket to emit RAs
+      - NET_ADMIN  # optional: only for kernel-applied iface params (AdvLinkMTU etc.); see Capabilities
 
     volumes:
       - ./radvd:/etc/radvd:ro
@@ -206,12 +206,17 @@ cosign verify ghcr.io/cplieger/docker-radvd:latest \
 
 ## Dependencies
 
-All dependencies are updated automatically via [Renovate](https://github.com/renovatebot/renovate). The base image is pinned by SHA digest; the `radvd` apk package is installed unpinned so it tracks the digest-pinned base.
+All dependencies are updated automatically via [Renovate](https://github.com/renovatebot/renovate).
 
-| Dependency | Source                                                     |
-| ---------- | ---------------------------------------------------------- |
-| alpine     | [Docker Hub](https://hub.docker.com/_/alpine)              |
-| radvd      | [Alpine](https://pkgs.alpinelinux.org/packages?name=radvd) |
+- **radvd** is compiled from the pinned upstream release tarball (the `RADVD_VERSION` build argument, tracked by Renovate against upstream tags) and verified against a pinned SHA256 before extraction, so the shipped daemon version is explicit, reproducible, and updated by pull request instead of floating with the Alpine package index.
+- **The Alpine base image** is pinned by SHA digest. The base userland around the radvd binary (musl, busybox, and friends) floats forward at image rebuild time (`apk upgrade` in the Dockerfile), and scheduled rebuilds bound how stale a published image can get.
+
+| Dependency | Source                                                                  |
+| ---------- | ----------------------------------------------------------------------- |
+| alpine     | [Docker Hub](https://hub.docker.com/_/alpine)                           |
+| radvd      | [GitHub](https://github.com/radvd-project/radvd) (pinned source build)  |
+
+**Major-version updates:** a breaking radvd release arrives as a Renovate PR bumping `RADVD_VERSION` and ships as a new major version of this image. Before upgrading, review the [upstream changelog](https://github.com/radvd-project/radvd/blob/master/CHANGES) for `radvd.conf` syntax changes — the mounted config is the only interface that can break.
 
 ## Credits
 
