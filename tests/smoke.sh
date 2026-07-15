@@ -31,20 +31,22 @@ if radvd -c -C "$d/radvd.bad.conf" >/dev/null 2>&1; then
 fi
 
 # 3. Version assertion: the built binary reports exactly the pinned upstream
-#    version. Only runs when RADVD_EXPECTED_VERSION is set (the Dockerfile
-#    test stage passes it from ARG RADVD_VERSION); a plain local run skips it.
-#    radvd's version flag prints to stderr and exits non-zero by design, so
-#    only the output is asserted.
+#    version (RADVD_EXPECTED_VERSION, passed by the Dockerfile test stage from
+#    ARG RADVD_VERSION; a leading "v" is stripped here). A plain local run
+#    skips it; the Dockerfile guards the ARG with :? so the in-image gate can
+#    never silently skip. radvd's version flag prints to stderr and exits
+#    non-zero by design, so only the output is asserted. The version line is
+#    compared EXACTLY (not as a substring): a prefix match would accept
+#    2.21.1 or 2.210 for an expected 2.21, hiding a fetch/extract mixup.
 if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
+  expected=${RADVD_EXPECTED_VERSION#v}
   ver_out=$(radvd --version 2>&1) || true
-  case "$ver_out" in
-    *"Version: $RADVD_EXPECTED_VERSION"*) ;;
-    *)
-      err "FAIL: 'radvd --version' does not report expected version $RADVD_EXPECTED_VERSION"
-      err "$ver_out"
-      fail=1
-      ;;
-  esac
+  ver_line=$(printf '%s\n' "$ver_out" | head -n 1)
+  if [ "$ver_line" != "Version: $expected" ]; then
+    err "FAIL: 'radvd --version' does not report exactly expected version $expected"
+    err "$ver_line"
+    fail=1
+  fi
 fi
 
 [ "$fail" -eq 0 ] && log "radvd smoke: ok"

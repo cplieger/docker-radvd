@@ -87,7 +87,10 @@ COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 FROM base AS test
 ARG RADVD_VERSION
 COPY tests/ /tmp/tests/
-RUN RADVD_EXPECTED_VERSION="${RADVD_VERSION#v}" sh /tmp/tests/smoke.sh && touch /tests-passed
+# ${RADVD_VERSION:?} fails the build if the ARG wiring ever breaks, so the
+# smoke test's exact-version assertion can never be skipped in-image (the
+# leading v is stripped inside smoke.sh).
+RUN RADVD_EXPECTED_VERSION="${RADVD_VERSION:?}" sh /tmp/tests/smoke.sh && touch /tests-passed
 
 # ---------------------------------------------------------------------------
 # Final stage — the runtime image. Must remain last so the CI build gate
