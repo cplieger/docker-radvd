@@ -1,6 +1,7 @@
 # Contributing to docker-radvd
 
-This image is a minimal Alpine wrapper around the upstream `radvd` package.
+This image is a minimal Alpine wrapper around upstream `radvd`, compiled from
+the pinned release tarball.
 The notes below cover what is specific to this repo; org-wide defaults are
 inherited from [`cplieger/.github`](https://github.com/cplieger/.github).
 
@@ -8,12 +9,15 @@ inherited from [`cplieger/.github`](https://github.com/cplieger/.github).
 
 The files with real logic are:
 
-- `Dockerfile` — installs the Alpine `radvd` package, creates an unprivileged
-  `radvd` user/group for the entrypoint's privilege drop, and wires up the
-  `HEALTHCHECK` (`pidof radvd`) and `ENTRYPOINT`. The base image is pinned by
-  digest; the `radvd` package is installed **unpinned** so it tracks the
-  digest-pinned base — pinning the apk revision strands the build when Alpine
-  bumps releases and drops the old revision from the index.
+- `Dockerfile` — compiles radvd from the pinned upstream release tarball
+  (`RADVD_VERSION` + `RADVD_SHA256` build args; the tarball is verified
+  fail-closed against the SHA256 before extraction) in a discarded builder
+  stage, copies the stripped `radvd`/`radvdump` binaries onto the digest-pinned
+  Alpine base, creates an unprivileged `radvd` user/group for the entrypoint's
+  privilege drop, and wires up the `HEALTHCHECK` (`pidof radvd`) and
+  `ENTRYPOINT`. Renovate bumps `RADVD_VERSION` against upstream tags; the
+  SHA256 must be recomputed by hand on each bump (the bump PR body carries the
+  command).
 - `entrypoint.sh` — a POSIX `sh` script (runs on Alpine's BusyBox shell, not
   bash) that validates HA directives, creates `/run/radvd`, and supervises radvd
   in the foreground as the non-root `radvd` user (`-u radvd`): it turns `SIGHUP`
@@ -21,9 +25,12 @@ The files with real logic are:
   propagates an unexpected radvd exit to Docker's restart policy.
 
 `compose.yaml` is the reference deployment. There is no build system and no
-application source beyond these files; the only test is a build-time smoke test
-(`tests/smoke.sh`, run in the Dockerfile `test` stage) that configtests a valid
-and a malformed config.
+application source beyond these files. Two smoke tests cover the two failure
+modes: a build-time test (`tests/smoke.sh`, run in the Dockerfile `test` stage)
+that configtests a valid and a malformed config, and a runtime signal-contract
+test (`scripts/smoke.sh`, run against the assembled image by the repo-local
+`.github/workflows/smoke.yml`) that exercises the supervisor's lifecycle
+contract.
 
 ## Design boundaries (please preserve)
 
@@ -88,12 +95,22 @@ docker build -t docker-radvd:dev .   # runs tests/smoke.sh in the test stage
 The `Dockerfile` opens with `# check=error=true`, so BuildKit build checks are
 promoted to errors — a build with check warnings fails.
 
-If you touch the entrypoint's signal handling, exercise the supervisor by hand:
-run the built image with a valid config for an interface that exists in the
-container, then `docker kill -s HUP <container>` — it should log
-`reloading radvd` and stay `Up`, not exit. Repeat with the config directory made
-unreadable to the `radvd` user (`chown root:root` + `chmod 700`) to confirm the
-reload still succeeds where radvd's own in-process reread would fail.
+If you touch the entrypoint's signal handling, run the signal-contract smoke
+test against a locally built image:
+
+```sh
+docker build -t docker-radvd:smoke .
+scripts/smoke.sh docker-radvd:smoke
+```
+
+It exercises the supervisor's whole lifecycle contract with no network
+attached (`--network none`; `IgnoreIfMissing on` keeps radvd alive with the
+interface absent, so no RA is ever emitted): startup validation, HUP reload,
+the same reload with the config directory made root-only (where radvd's own
+in-process reread would fail — the field failure the supervisor exists to
+prevent), graceful SIGTERM shutdown, and unexpected-exit propagation to the
+restart policy. CI runs the same script on every PR via the repo-local
+`.github/workflows/smoke.yml` (not synced from `cplieger/ci`).
 
 ## CI workflows are synced — don't edit them
 

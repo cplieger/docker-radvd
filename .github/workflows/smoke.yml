@@ -1,0 +1,35 @@
+# Repo-local (NOT synced from cplieger/ci): runtime signal-contract smoke test.
+# The central `ci / validate` gate checks the Dockerfile *builds* (and the
+# build-time tests/smoke.sh covers config parsing); this proves the assembled
+# image honors the supervising entrypoint's lifecycle contract — HUP reload
+# (including under a root-only config dir, the failure commit 8e7a792 fixed),
+# graceful SIGTERM shutdown, and unexpected-exit propagation — via
+# scripts/smoke.sh. Kept separate from the synced CI template so a future sync
+# can't clobber it.
+name: Smoke
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Build image
+        run: docker build -t docker-radvd:smoke .
+
+      - name: Run signal-contract smoke test
+        run: scripts/smoke.sh docker-radvd:smoke
