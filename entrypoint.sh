@@ -75,8 +75,11 @@ check_ha_directives() {
   # silently skipped non-link-local check. Probe the glob first and bail out
   # with one structured warning when the config cannot be scanned; every
   # readable-config path below is unchanged.
-  if ! cat "$CONF_DIR"/*.conf >/dev/null 2>&1; then
-    printf 'level=warn msg="unable to scan mounted radvd config; HA-directive validation is incomplete" path="%s"\n' "$CONF_DIR" >&2
+  if ! scan_err=$(cat "$CONF_DIR"/*.conf 2>&1 >/dev/null); then
+    # First error line only, quotes and control characters neutralized so a
+    # malformed filename cannot forge or break the structured log line.
+    scan_err=$(printf '%s\n' "$scan_err" | head -n 1 | tr -cd '[:print:]' | tr '"' "'")
+    printf 'level=warn msg="unable to scan mounted radvd config; HA-directive validation is incomplete" err="%s" path="%s"\n' "$scan_err" "$CONF_DIR" >&2
     return 0
   fi
   # Comment-stripped directive-presence grep across every *.conf (see the
