@@ -69,7 +69,10 @@ check_ha_directives() {
         rest = line
         for (;;) {
           if (!inblock) {
-            if (rest !~ /^[ \t]*advrasrcaddress([ \t]|[{]|$)/) { break }
+            if (rest !~ /^[ \t]*advrasrcaddress([ \t]|[{]|$)/) {
+              if (!match(rest, /;[ \t]*advrasrcaddress([ \t]|[{]|$)/)) { break }
+              rest = substr(rest, RSTART + 1)
+            }
             inblock = 1
           }
           work = rest
@@ -88,7 +91,7 @@ check_ha_directives() {
             tok = addrs[i]
             sub(/^[ \t]+/, "", tok)
             sub(/[ \t]+$/, "", tok)
-            if (tok != "" && tok !~ /^fe80:/) { bad = bad (bad ? ", " : "") clean(FILENAME) ":" clean(tok) }
+            if (tok != "" && tok !~ /^fe[89ab][0-9a-f]:/) { bad = bad (bad ? ", " : "") clean(FILENAME) ":" clean(tok) }
           }
           if (!closed) { break }
           inblock = 0
