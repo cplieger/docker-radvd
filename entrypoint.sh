@@ -70,7 +70,7 @@ check_ha_directives() {
         for (;;) {
           if (!inblock) {
             if (rest !~ /^[ \t]*advrasrcaddress([ \t]|[{]|$)/) {
-              if (!match(rest, /;[ \t]*advrasrcaddress([ \t]|[{]|$)/)) { break }
+              if (!match(rest, /[;{}][ \t]*advrasrcaddress([ \t]|[{]|$)/)) { break }
               rest = substr(rest, RSTART + 1)
             }
             inblock = 1
