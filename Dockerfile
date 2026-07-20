@@ -71,8 +71,7 @@ FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6ee
 # apk upgrade: the pinned base ships some packages (e.g. libssl3) stale;
 # upgrading floats them forward on each rebuild.
 RUN apk upgrade --no-cache
-RUN grep -q '^radvd:' /etc/group || addgroup -S radvd; \
-    grep -q '^radvd:' /etc/passwd || adduser -S -D -H -G radvd radvd
+RUN addgroup -S radvd && adduser -S -D -H -G radvd radvd
 
 COPY --from=builder /out/usr/sbin/ /usr/sbin/
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
@@ -104,5 +103,5 @@ COPY --from=test /tests-passed /tests-passed
 # HA-backup 'running but emitting no RAs' state (missing source address); see the
 # README 'Healthcheck' section for the off-host rdisc6 end-to-end probe.
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \
-    CMD pidof radvd >/dev/null || exit 1
+    CMD ["pidof", "radvd"]
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

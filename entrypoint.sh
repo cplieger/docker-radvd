@@ -41,15 +41,14 @@ check_ha_directives() {
   CONF_DIR=$(dirname "$CONF")
   grep -Eq '^[[:space:]]*IgnoreIfMissing[[:space:]]+on([[:space:]]|;|$)' "$CONF_DIR"/*.conf 2>/dev/null \
     || printf 'level=warn msg="no enabled IgnoreIfMissing on directive found in mounted radvd config" path="%s"\n' "$CONF_DIR" >&2
-  grep -Eq '^[[:space:]]*AdvRASrcAddress([[:space:]]|\{|$)' "$CONF_DIR"/*.conf 2>/dev/null \
-    || printf 'level=warn msg="no AdvRASrcAddress directive found in mounted radvd config (HA failover will not work correctly)" path="%s"\n' "$CONF_DIR" >&2
   # When AdvRASrcAddress IS set, every address it lists must be link-local. RFC
   # 4861 section 6.1.2 requires a Router Advertisement's source to be link-local
   # (fe80::/10); hosts silently discard an RA sourced from a global or ULA
   # address. Pointing AdvRASrcAddress at a global service VIP is the classic
   # mistake: radvd emits and tcpdump shows the RAs, yet no host autoconfigures.
-  # Warn-only, and only when the directive is present (its absence is covered
-  # above). The scan walks every AdvRASrcAddress { ... } block across all *.conf
+  # Warn-only, and only when the directive is present (its absence is warned
+  # about in the else branch below). The scan walks every
+  # AdvRASrcAddress { ... } block across all *.conf
   # and warns if ANY listed address is non-link-local (case-insensitive), so a
   # correct link-local block never masks a sibling block that holds the
   # global-VIP mistake. The warning names each offending <file>:<address> so
@@ -71,6 +70,11 @@ check_ha_directives() {
         if (inblock) {
           work = line
           sub(/^[ \t]*advrasrcaddress[ \t]*/, "", work)
+          # Stop scanning at the block close so a trailing same-line
+          # directive (e.g. `}; MinRtrAdvInterval 30;`) is not parsed
+          # as an address.
+          closed = (work ~ /[}]/)
+          if (closed) { sub(/[}].*/, "", work) }
           gsub(/[{}]/, " ", work)
           n = split(work, addrs, ";")
           for (i = 1; i <= n; i++) {
@@ -79,7 +83,7 @@ check_ha_directives() {
             sub(/[ \t]+$/, "", tok)
             if (tok != "" && tok !~ /^fe80:/) { bad = bad (bad ? ", " : "") clean(FILENAME) ":" clean(tok) }
           }
-          if (line ~ /[}]/) { inblock = 0 }
+          if (closed) { inblock = 0 }
         }
       }
       END { if (bad != "") print bad }
@@ -87,6 +91,8 @@ check_ha_directives() {
     if [ -n "$bad_src" ]; then
       printf 'level=warn msg="AdvRASrcAddress is set to a non-link-local address; RFC 4861 requires an RA source to be link-local (fe80::/10), so hosts will silently discard these RAs" bad="%s" path="%s"\n' "$bad_src" "$CONF_DIR" >&2
     fi
+  else
+    printf 'level=warn msg="no AdvRASrcAddress directive found in mounted radvd config (HA failover will not work correctly)" path="%s"\n' "$CONF_DIR" >&2
   fi
 }
 
@@ -165,7 +171,11 @@ while :; do
     # before restarting, matching what startup already checked. Guarded on
     # readability so this stays warn-only — the unreadable-config fatal path is
     # startup-only by design.
-    [ -r "$CONF" ] && check_ha_directives
+    if [ -r "$CONF" ]; then
+      check_ha_directives
+    else
+      printf 'level=warn msg="config not readable at reload; skipping HA-directive validation (radvd will report its own config error)" path="%s"\n' "$CONF" >&2
+    fi
     start_radvd
     continue
   fi
