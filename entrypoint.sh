@@ -69,6 +69,16 @@ trap on_term TERM INT
 # branch guards on readability and never triggers the fatal exit).
 check_ha_directives() {
   CONF_DIR=$(dirname "$CONF")
+  # Degraded-validation guard: the sed|grep and awk scans below discard read
+  # errors (2>/dev/null), so a vanished, unreadable, or non-regular *.conf
+  # would otherwise surface as a misleading missing-directive warning or a
+  # silently skipped non-link-local check. Probe the glob first and bail out
+  # with one structured warning when the config cannot be scanned; every
+  # readable-config path below is unchanged.
+  if ! cat "$CONF_DIR"/*.conf >/dev/null 2>&1; then
+    printf 'level=warn msg="unable to scan mounted radvd config; HA-directive validation is incomplete" path="%s"\n' "$CONF_DIR" >&2
+    return 0
+  fi
   # Comment-stripped directive-presence grep across every *.conf (see the
   # gate rationale above check_ha_directives).
   has_directive() {
