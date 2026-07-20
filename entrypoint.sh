@@ -75,6 +75,23 @@ check_ha_directives() {
   # silently skipped non-link-local check. Probe the glob first and bail out
   # with one structured warning when the config cannot be scanned; every
   # readable-config path below is unchanged.
+  #
+  # Require every match to be a regular file BEFORE the cat probe opens it:
+  # reading a FIFO or device node (e.g. a symlink to /dev/zero) never reaches
+  # EOF, so using a full read as the type probe would hang PID 1 at startup or
+  # HUP reload instead of degrading to the warn below. An unmatched glob
+  # leaves the literal pattern, which also fails -f and routes here. The
+  # filename is sanitized like the cat error below so a malformed name cannot
+  # forge or break the structured log line.
+  for conf_file in "$CONF_DIR"/*.conf; do
+    if ! [ -f "$conf_file" ]; then
+      scan_err=$(printf '%s' "not a regular config file: $conf_file" | tr -d '[:cntrl:]' | tr '"\\' "''")
+      printf 'level=warn msg="unable to scan mounted radvd config; HA-directive validation is incomplete" err="%s" path="%s"\n' "$scan_err" "$CONF_DIR" >&2
+      return 0
+    fi
+  done
+  # All matches are regular files: a failed read here is a real permission or
+  # I/O error worth surfacing, never an endless stream.
   if ! scan_err=$(cat "$CONF_DIR"/*.conf 2>&1 >/dev/null); then
     # First error line only, quotes, backslashes and control characters
     # neutralized (matching the awk clean() convention below) so a malformed
