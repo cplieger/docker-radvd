@@ -83,24 +83,29 @@ check_ha_directives() {
   # leaves the literal pattern, which also fails -f and routes here. The
   # filename is sanitized like the cat error below so a malformed name cannot
   # forge or break the structured log line.
+  #
+  # One degraded-validation warning for every unscannable-config path.
+  # Sanitizes the error text first (first line only; quotes and backslashes
+  # become '?', matching the awk clean() convention below; control characters
+  # are deleted via [:cntrl:] rather than kept via -cd [:print:] because
+  # BusyBox tr (v1.37.0) does not implement the print class and would treat
+  # it as a literal character set, garbling the message) so a malformed
+  # filename or error message cannot forge or break the structured log line.
+  warn_scan_degraded() {
+    # shellcheck disable=SC1003 # not an escape attempt: tr maps `"` and `\` to literal `?` (verified on BusyBox v1.37.0)
+    scan_err=$(printf '%s\n' "$1" | head -n 1 | tr -d '[:cntrl:]' | tr '"\\' '??')
+    printf 'level=warn msg="unable to scan mounted radvd config; HA-directive validation is incomplete" err="%s" path="%s"\n' "$scan_err" "$CONF_DIR" >&2
+  }
   for conf_file in "$CONF_DIR"/*.conf; do
     if ! [ -f "$conf_file" ]; then
-      scan_err=$(printf '%s' "not a regular config file: $conf_file" | tr -d '[:cntrl:]' | tr '"\\' "''")
-      printf 'level=warn msg="unable to scan mounted radvd config; HA-directive validation is incomplete" err="%s" path="%s"\n' "$scan_err" "$CONF_DIR" >&2
+      warn_scan_degraded "not a regular config file: $conf_file"
       return 0
     fi
   done
   # All matches are regular files: a failed read here is a real permission or
   # I/O error worth surfacing, never an endless stream.
   if ! scan_err=$(cat "$CONF_DIR"/*.conf 2>&1 >/dev/null); then
-    # First error line only, quotes, backslashes and control characters
-    # neutralized (matching the awk clean() convention below) so a malformed
-    # filename cannot forge or break the structured log line. Control chars
-    # are deleted via [:cntrl:] rather than kept via -cd [:print:]: BusyBox
-    # tr (v1.37.0) does not implement the print class and would treat it as
-    # a literal character set, garbling the message.
-    scan_err=$(printf '%s\n' "$scan_err" | head -n 1 | tr -d '[:cntrl:]' | tr '"\\' "''")
-    printf 'level=warn msg="unable to scan mounted radvd config; HA-directive validation is incomplete" err="%s" path="%s"\n' "$scan_err" "$CONF_DIR" >&2
+    warn_scan_degraded "$scan_err"
     return 0
   fi
   # Comment-stripped directive-presence grep across every *.conf (see the
