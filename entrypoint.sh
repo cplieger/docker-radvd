@@ -21,6 +21,29 @@ set -u
 
 CONF="/etc/radvd/radvd.conf"
 
+# Arm the signal handlers before any preflight work so a HUP/TERM landing
+# during validation is latched instead of lost (as PID 1, default-disposition
+# signals from the host are not delivered): a TERM here still exits 0
+# gracefully and a HUP still triggers one clean restart cycle, via the pre-pid
+# latch in start_radvd.
+radvd_pid=""
+reload=0
+shutdown=0
+# SIGHUP: reload config by restarting radvd (re-reads as root, see header).
+on_hup() {
+  reload=1
+  printf 'level=info msg="SIGHUP received; restarting radvd to reload config"\n' >&2
+  [ -n "$radvd_pid" ] && kill -TERM "$radvd_pid" 2>/dev/null
+}
+# SIGTERM/SIGINT (docker stop): forward and exit.
+on_term() {
+  shutdown=1
+  printf 'level=info msg="shutdown signal received; stopping radvd"\n' >&2
+  [ -n "$radvd_pid" ] && kill -TERM "$radvd_pid" 2>/dev/null
+}
+trap on_hup HUP
+trap on_term TERM INT
+
 # Sanity-check the HA directives. radvd would happily start without them and
 # emit RAs from both MASTER and BACKUP simultaneously, wrecking SLAAC default-
 # route selection on downstream clients. Warn-only — a single-node operator
@@ -34,6 +57,9 @@ CONF="/etc/radvd/radvd.conf"
 # valid, and a statement boundary (start of line, `;`, `{` or `}`) must precede
 # the directive name. The IgnoreIfMissing check also requires the value `on`,
 # rejecting `IgnoreIfMissing off` which would otherwise pass a substring match.
+# Gates match case-insensitively (grep -i): radvd's flex scanner is declared
+# caseless, so `ignoreifmissing ON` is valid config, and the awk scan below
+# already lowercases its input to match.
 #
 # Factored into a helper so the SIGHUP reload branch can re-emit the same
 # warnings before restarting radvd: an operator who edits the mounted config
@@ -46,7 +72,7 @@ check_ha_directives() {
   # Comment-stripped directive-presence grep across every *.conf (see the
   # gate rationale above check_ha_directives).
   has_directive() {
-    sed 's/#.*//' "$CONF_DIR"/*.conf 2>/dev/null | grep -Eq "$1"
+    sed 's/#.*//' "$CONF_DIR"/*.conf 2>/dev/null | grep -Eqi "$1"
   }
   has_directive '(^|[;{}])[[:space:]]*IgnoreIfMissing[[:space:]]+on([[:space:]]|;|$)' \
     || printf 'level=warn msg="no enabled IgnoreIfMissing on directive found in mounted radvd config" path="%s"\n' "$CONF_DIR" >&2
@@ -72,7 +98,10 @@ check_ha_directives() {
         gsub(/[[:cntrl:]]/, "?", s)
         return s
       }
-      { sub(/#.*/, ""); line = tolower($0) }
+      # Strip CR so the trailing \r of a CRLF config is not parsed as an
+      # address token (the sed|grep gates already tolerate CRLF via
+      # [[:space:]]).
+      { sub(/#.*/, ""); gsub(/\r/, ""); line = tolower($0) }
       FNR == 1 { inblock = 0 }
       {
         rest = line
@@ -139,7 +168,6 @@ fi
 # minimal verbosity that still logs startup success, -u radvd drops privileges
 # after the raw socket is open. Missing config is caught by radvd itself with a
 # clear error message.
-radvd_pid=""
 start_radvd() {
   radvd -C "$CONF" -n -m stderr -d 1 -u radvd &
   radvd_pid=$!
@@ -151,23 +179,6 @@ start_radvd() {
     kill -TERM "$radvd_pid" 2>/dev/null
   fi
 }
-
-reload=0
-shutdown=0
-# SIGHUP: reload config by restarting radvd (re-reads as root, see header).
-on_hup() {
-  reload=1
-  printf 'level=info msg="SIGHUP received; restarting radvd to reload config"\n' >&2
-  [ -n "$radvd_pid" ] && kill -TERM "$radvd_pid" 2>/dev/null
-}
-# SIGTERM/SIGINT (docker stop): forward and exit.
-on_term() {
-  shutdown=1
-  printf 'level=info msg="shutdown signal received; stopping radvd"\n' >&2
-  [ -n "$radvd_pid" ] && kill -TERM "$radvd_pid" 2>/dev/null
-}
-trap on_hup HUP
-trap on_term TERM INT
 
 printf 'level=info msg="starting radvd" config="%s"\n' "$CONF" >&2
 start_radvd
