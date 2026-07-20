@@ -66,13 +66,20 @@ check_ha_directives() {
       { sub(/#.*/, ""); line = tolower($0) }
       FNR == 1 { inblock = 0 }
       {
-        if (line ~ /^[ \t]*advrasrcaddress([ \t]|[{]|$)/) { inblock = 1 }
-        if (inblock) {
-          work = line
+        rest = line
+        for (;;) {
+          if (!inblock) {
+            if (rest !~ /^[ \t]*advrasrcaddress([ \t]|[{]|$)/) { break }
+            inblock = 1
+          }
+          work = rest
           sub(/^[ \t]*advrasrcaddress[ \t]*/, "", work)
           # Stop scanning at the block close so a trailing same-line
           # directive (e.g. `}; MinRtrAdvInterval 30;`) is not parsed
-          # as an address.
+          # as an address; the remainder is then re-scanned so a sibling
+          # AdvRASrcAddress block opening on the same line is still
+          # validated (the comment above promises a correct block never
+          # masks a sibling holding the global-VIP mistake).
           closed = (work ~ /[}]/)
           if (closed) { sub(/[}].*/, "", work) }
           gsub(/[{}]/, " ", work)
@@ -83,7 +90,9 @@ check_ha_directives() {
             sub(/[ \t]+$/, "", tok)
             if (tok != "" && tok !~ /^fe80:/) { bad = bad (bad ? ", " : "") clean(FILENAME) ":" clean(tok) }
           }
-          if (closed) { inblock = 0 }
+          if (!closed) { break }
+          inblock = 0
+          sub(/^[^}]*[}][ \t]*;?/, "", rest)
         }
       }
       END { if (bad != "") print bad }
