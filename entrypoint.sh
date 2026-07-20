@@ -26,10 +26,14 @@ CONF="/etc/radvd/radvd.conf"
 # route selection on downstream clients. Warn-only — a single-node operator
 # may legitimately deploy without HA.
 #
-# Patterns are anchored to the start of a line (allowing leading whitespace)
-# so commented-out directives (`# IgnoreIfMissing on`) correctly fail the
-# check. The IgnoreIfMissing check also requires the value `on`, rejecting
-# `IgnoreIfMissing off` which would otherwise pass a substring match.
+# Directive-presence gates strip comments first (matching the awk scan's own
+# `sub(/#.*/, "")`), so a commented-out `# IgnoreIfMissing on` still fails the
+# check, while a directive may appear mid-line: radvd's grammar is whitespace-
+# insensitive, so a one-line nested config like
+# `interface eth0 { IgnoreIfMissing on; AdvRASrcAddress { fe80::1; }; };` is
+# valid, and a statement boundary (start of line, `;`, `{` or `}`) must precede
+# the directive name. The IgnoreIfMissing check also requires the value `on`,
+# rejecting `IgnoreIfMissing off` which would otherwise pass a substring match.
 #
 # Factored into a helper so the SIGHUP reload branch can re-emit the same
 # warnings before restarting radvd: an operator who edits the mounted config
@@ -39,7 +43,12 @@ CONF="/etc/radvd/radvd.conf"
 # branch guards on readability and never triggers the fatal exit).
 check_ha_directives() {
   CONF_DIR=$(dirname "$CONF")
-  grep -Eq '^[[:space:]]*IgnoreIfMissing[[:space:]]+on([[:space:]]|;|$)' "$CONF_DIR"/*.conf 2>/dev/null \
+  # Comment-stripped directive-presence grep across every *.conf (see the
+  # gate rationale above check_ha_directives).
+  has_directive() {
+    sed 's/#.*//' "$CONF_DIR"/*.conf 2>/dev/null | grep -Eq "$1"
+  }
+  has_directive '(^|[;{}])[[:space:]]*IgnoreIfMissing[[:space:]]+on([[:space:]]|;|$)' \
     || printf 'level=warn msg="no enabled IgnoreIfMissing on directive found in mounted radvd config" path="%s"\n' "$CONF_DIR" >&2
   # When AdvRASrcAddress IS set, every address it lists must be link-local. RFC
   # 4861 section 6.1.2 requires a Router Advertisement's source to be link-local
@@ -56,7 +65,7 @@ check_ha_directives() {
   # displayed file and address are sanitized (quotes and control characters
   # neutralized) so a malformed config value cannot forge or break the
   # structured key=value log line.
-  if grep -Eq '^[[:space:]]*AdvRASrcAddress([[:space:]]|\{|$)' "$CONF_DIR"/*.conf 2>/dev/null; then
+  if has_directive '(^|[;{}])[[:space:]]*AdvRASrcAddress([[:space:]]|\{|$)'; then
     bad_src=$(awk '
       function clean(s) {
         gsub(/["\\]/, "?", s)
@@ -148,11 +157,13 @@ shutdown=0
 # SIGHUP: reload config by restarting radvd (re-reads as root, see header).
 on_hup() {
   reload=1
+  printf 'level=info msg="SIGHUP received; restarting radvd to reload config"\n' >&2
   [ -n "$radvd_pid" ] && kill -TERM "$radvd_pid" 2>/dev/null
 }
 # SIGTERM/SIGINT (docker stop): forward and exit.
 on_term() {
   shutdown=1
+  printf 'level=info msg="shutdown signal received; stopping radvd"\n' >&2
   [ -n "$radvd_pid" ] && kill -TERM "$radvd_pid" 2>/dev/null
 }
 trap on_hup HUP
