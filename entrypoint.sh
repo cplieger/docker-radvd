@@ -21,15 +21,45 @@ set -u
 
 CONF="/etc/radvd/radvd.conf"
 
+# Arm the signal handlers before any preflight work so a HUP/TERM landing
+# during validation is latched instead of lost (as PID 1, default-disposition
+# signals from the host are not delivered): a TERM here still exits 0
+# gracefully and a HUP still triggers one clean restart cycle, via the pre-pid
+# latch in start_radvd.
+radvd_pid=""
+reload=0
+shutdown=0
+# SIGHUP: reload config by restarting radvd (re-reads as root, see header).
+on_hup() {
+  reload=1
+  printf 'level=info msg="SIGHUP received; restarting radvd to reload config"\n' >&2
+  [ -n "$radvd_pid" ] && kill -TERM "$radvd_pid" 2>/dev/null
+}
+# SIGTERM/SIGINT (docker stop): forward and exit.
+on_term() {
+  shutdown=1
+  printf 'level=info msg="shutdown signal received; stopping radvd"\n' >&2
+  [ -n "$radvd_pid" ] && kill -TERM "$radvd_pid" 2>/dev/null
+}
+trap on_hup HUP
+trap on_term TERM INT
+
 # Sanity-check the HA directives. radvd would happily start without them and
 # emit RAs from both MASTER and BACKUP simultaneously, wrecking SLAAC default-
 # route selection on downstream clients. Warn-only — a single-node operator
 # may legitimately deploy without HA.
 #
-# Patterns are anchored to the start of a line (allowing leading whitespace)
-# so commented-out directives (`# IgnoreIfMissing on`) correctly fail the
-# check. The IgnoreIfMissing check also requires the value `on`, rejecting
-# `IgnoreIfMissing off` which would otherwise pass a substring match.
+# Directive-presence gates strip comments first (matching the awk scan's own
+# `sub(/#.*/, "")`), so a commented-out `# IgnoreIfMissing on` still fails the
+# check, while a directive may appear mid-line: radvd's grammar is whitespace-
+# insensitive, so a one-line nested config like
+# `interface eth0 { IgnoreIfMissing on; AdvRASrcAddress { fe80::1; }; };` is
+# valid, and a statement boundary (start of line, `;`, `{` or `}`) must precede
+# the directive name. The IgnoreIfMissing check also requires the value `on`,
+# rejecting `IgnoreIfMissing off` which would otherwise pass a substring match.
+# Gates match case-insensitively (grep -i): radvd's flex scanner is declared
+# caseless, so `ignoreifmissing ON` is valid config, and the awk scan below
+# already lowercases its input to match.
 #
 # Factored into a helper so the SIGHUP reload branch can re-emit the same
 # warnings before restarting radvd: an operator who edits the mounted config
@@ -39,17 +69,61 @@ CONF="/etc/radvd/radvd.conf"
 # branch guards on readability and never triggers the fatal exit).
 check_ha_directives() {
   CONF_DIR=$(dirname "$CONF")
-  grep -Eq '^[[:space:]]*IgnoreIfMissing[[:space:]]+on([[:space:]]|;|$)' "$CONF_DIR"/*.conf 2>/dev/null \
+  # Degraded-validation guard: the sed|grep and awk scans below discard read
+  # errors (2>/dev/null), so a vanished, unreadable, or non-regular *.conf
+  # would otherwise surface as a misleading missing-directive warning or a
+  # silently skipped non-link-local check. Probe the glob first and bail out
+  # with one structured warning when the config cannot be scanned; every
+  # readable-config path below is unchanged.
+  #
+  # Require every match to be a regular file BEFORE the cat probe opens it:
+  # reading a FIFO or device node (e.g. a symlink to /dev/zero) never reaches
+  # EOF, so using a full read as the type probe would hang PID 1 at startup or
+  # HUP reload instead of degrading to the warn below. An unmatched glob
+  # leaves the literal pattern, which also fails -f and routes here. The
+  # filename is sanitized like the cat error below so a malformed name cannot
+  # forge or break the structured log line.
+  #
+  # One degraded-validation warning for every unscannable-config path.
+  # Sanitizes the error text first (control characters stripped first, joining
+  # any embedded newlines, then quotes/backslashes neutralized to '?' matching
+  # the awk clean() convention below, capped at 200 chars; control characters
+  # are deleted via [:cntrl:] rather than kept via -cd [:print:] because
+  # BusyBox tr (v1.37.0) does not implement the print class and would treat
+  # it as a literal character set, garbling the message) so a malformed
+  # filename or error message cannot forge or break the structured log line.
+  warn_scan_degraded() {
+    # shellcheck disable=SC1003 # not an escape attempt: tr maps `"` and `\` to literal `?` (verified on BusyBox v1.37.0)
+    scan_err=$(printf '%s\n' "$1" | tr -d '[:cntrl:]' | tr '"\\' '??' | cut -c1-200)
+    printf 'level=warn msg="unable to scan mounted radvd config; HA-directive validation is incomplete" err="%s" path="%s"\n' "$scan_err" "$CONF_DIR" >&2
+  }
+  for conf_file in "$CONF_DIR"/*.conf; do
+    if ! [ -f "$conf_file" ]; then
+      warn_scan_degraded "not a regular config file: $conf_file"
+      return 0
+    fi
+  done
+  # All matches are regular files: a failed read here is a real permission or
+  # I/O error worth surfacing, never an endless stream.
+  if ! scan_err=$(cat "$CONF_DIR"/*.conf 2>&1 >/dev/null); then
+    warn_scan_degraded "$scan_err"
+    return 0
+  fi
+  # Comment-stripped directive-presence grep across every *.conf (see the
+  # gate rationale above check_ha_directives).
+  has_directive() {
+    sed 's/#.*//' "$CONF_DIR"/*.conf 2>/dev/null | grep -Eqi "$1"
+  }
+  has_directive '(^|[;{}])[[:space:]]*IgnoreIfMissing[[:space:]]+on([[:space:]]|;|$)' \
     || printf 'level=warn msg="no enabled IgnoreIfMissing on directive found in mounted radvd config" path="%s"\n' "$CONF_DIR" >&2
-  grep -Eq '^[[:space:]]*AdvRASrcAddress([[:space:]]|\{|$)' "$CONF_DIR"/*.conf 2>/dev/null \
-    || printf 'level=warn msg="no AdvRASrcAddress directive found in mounted radvd config (HA failover will not work correctly)" path="%s"\n' "$CONF_DIR" >&2
   # When AdvRASrcAddress IS set, every address it lists must be link-local. RFC
   # 4861 section 6.1.2 requires a Router Advertisement's source to be link-local
   # (fe80::/10); hosts silently discard an RA sourced from a global or ULA
   # address. Pointing AdvRASrcAddress at a global service VIP is the classic
   # mistake: radvd emits and tcpdump shows the RAs, yet no host autoconfigures.
-  # Warn-only, and only when the directive is present (its absence is covered
-  # above). The scan walks every AdvRASrcAddress { ... } block across all *.conf
+  # Warn-only, and only when the directive is present (its absence is warned
+  # about in the else branch below). The scan walks every
+  # AdvRASrcAddress { ... } block across all *.conf
   # and warns if ANY listed address is non-link-local (case-insensitive), so a
   # correct link-local block never masks a sibling block that holds the
   # global-VIP mistake. The warning names each offending <file>:<address> so
@@ -57,29 +131,49 @@ check_ha_directives() {
   # displayed file and address are sanitized (quotes and control characters
   # neutralized) so a malformed config value cannot forge or break the
   # structured key=value log line.
-  if grep -Eq '^[[:space:]]*AdvRASrcAddress([[:space:]]|\{|$)' "$CONF_DIR"/*.conf 2>/dev/null; then
+  if has_directive '(^|[;{}])[[:space:]]*AdvRASrcAddress([[:space:]]|\{|$)'; then
     bad_src=$(awk '
       function clean(s) {
         gsub(/["\\]/, "?", s)
         gsub(/[[:cntrl:]]/, "?", s)
         return s
       }
-      { sub(/#.*/, ""); line = tolower($0) }
+      # Strip CR so the trailing \r of a CRLF config is not parsed as an
+      # address token (the sed|grep gates already tolerate CRLF via
+      # [[:space:]]).
+      { sub(/#.*/, ""); gsub(/\r/, ""); line = tolower($0) }
       FNR == 1 { inblock = 0 }
       {
-        if (line ~ /^[ \t]*advrasrcaddress([ \t]|[{]|$)/) { inblock = 1 }
-        if (inblock) {
-          work = line
+        rest = line
+        for (;;) {
+          if (!inblock) {
+            if (rest !~ /^[ \t]*advrasrcaddress([ \t]|[{]|$)/) {
+              if (!match(rest, /[;{}][ \t]*advrasrcaddress([ \t]|[{]|$)/)) { break }
+              rest = substr(rest, RSTART + 1)
+            }
+            inblock = 1
+          }
+          work = rest
           sub(/^[ \t]*advrasrcaddress[ \t]*/, "", work)
+          # Stop scanning at the block close so a trailing same-line
+          # directive (e.g. `}; MinRtrAdvInterval 30;`) is not parsed
+          # as an address; the remainder is then re-scanned so a sibling
+          # AdvRASrcAddress block opening on the same line is still
+          # validated (the comment above promises a correct block never
+          # masks a sibling holding the global-VIP mistake).
+          closed = (work ~ /[}]/)
+          if (closed) { sub(/[}].*/, "", work) }
           gsub(/[{}]/, " ", work)
           n = split(work, addrs, ";")
           for (i = 1; i <= n; i++) {
             tok = addrs[i]
             sub(/^[ \t]+/, "", tok)
             sub(/[ \t]+$/, "", tok)
-            if (tok != "" && tok !~ /^fe80:/) { bad = bad (bad ? ", " : "") clean(FILENAME) ":" clean(tok) }
+            if (tok != "" && tok !~ /^fe[89ab][0-9a-f]:/) { bad = bad (bad ? ", " : "") clean(FILENAME) ":" clean(tok) }
           }
-          if (line ~ /[}]/) { inblock = 0 }
+          if (!closed) { break }
+          inblock = 0
+          sub(/^[^}]*[}][ \t]*;?/, "", rest)
         }
       }
       END { if (bad != "") print bad }
@@ -87,6 +181,8 @@ check_ha_directives() {
     if [ -n "$bad_src" ]; then
       printf 'level=warn msg="AdvRASrcAddress is set to a non-link-local address; RFC 4861 requires an RA source to be link-local (fe80::/10), so hosts will silently discard these RAs" bad="%s" path="%s"\n' "$bad_src" "$CONF_DIR" >&2
     fi
+  else
+    printf 'level=warn msg="no AdvRASrcAddress directive found in mounted radvd config (HA failover will not work correctly)" path="%s"\n' "$CONF_DIR" >&2
   fi
 }
 
@@ -112,7 +208,6 @@ fi
 # minimal verbosity that still logs startup success, -u radvd drops privileges
 # after the raw socket is open. Missing config is caught by radvd itself with a
 # clear error message.
-radvd_pid=""
 start_radvd() {
   radvd -C "$CONF" -n -m stderr -d 1 -u radvd &
   radvd_pid=$!
@@ -124,21 +219,6 @@ start_radvd() {
     kill -TERM "$radvd_pid" 2>/dev/null
   fi
 }
-
-reload=0
-shutdown=0
-# SIGHUP: reload config by restarting radvd (re-reads as root, see header).
-on_hup() {
-  reload=1
-  [ -n "$radvd_pid" ] && kill -TERM "$radvd_pid" 2>/dev/null
-}
-# SIGTERM/SIGINT (docker stop): forward and exit.
-on_term() {
-  shutdown=1
-  [ -n "$radvd_pid" ] && kill -TERM "$radvd_pid" 2>/dev/null
-}
-trap on_hup HUP
-trap on_term TERM INT
 
 printf 'level=info msg="starting radvd" config="%s"\n' "$CONF" >&2
 start_radvd
@@ -165,7 +245,11 @@ while :; do
     # before restarting, matching what startup already checked. Guarded on
     # readability so this stays warn-only — the unreadable-config fatal path is
     # startup-only by design.
-    [ -r "$CONF" ] && check_ha_directives
+    if [ -r "$CONF" ]; then
+      check_ha_directives
+    else
+      printf 'level=warn msg="config not readable at reload; skipping HA-directive validation (radvd will report its own config error)" path="%s"\n' "$CONF" >&2
+    fi
     start_radvd
     continue
   fi

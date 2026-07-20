@@ -42,12 +42,16 @@ contract.
   `AdvRASrcAddress` checks emit `level=warn` lines to stderr and keep going.
   Single-node operators legitimately run without HA, so do not turn these into
   hard failures.
-- **grep patterns are anchored on purpose.** The directive checks anchor to
-  the start of a line (allowing leading whitespace) so a commented-out
-  `# IgnoreIfMissing on` correctly fails the check, and the `IgnoreIfMissing`
-  pattern requires the value `on` so `IgnoreIfMissing off` does not pass a
-  substring match. The checks scan every `*.conf` in the mounted directory (not
-  just `radvd.conf`) so directives in `include`d files are seen, and the
+- **grep patterns gate on statement boundaries on purpose.** The directive
+  checks strip comments first (so a commented-out `# IgnoreIfMissing on`
+  correctly fails the check) and then require a statement boundary — start
+  of line, `;`, `{` or `}` — before the directive name, so a directive
+  mid-line in a one-line nested config
+  (`interface eth0 { IgnoreIfMissing on; ... };`) is still seen. The
+  `IgnoreIfMissing` pattern requires the value `on` so `IgnoreIfMissing off`
+  does not pass a substring match. The checks scan every `*.conf` in the
+  mounted directory (not just `radvd.conf`) so directives in `include`d files
+  are seen, and the
   `AdvRASrcAddress` pattern accepts `AdvRASrcAddress {`, the no-space
   `AdvRASrcAddress{` form, and a bare `AdvRASrcAddress` at end-of-line (the
   opening brace on the next line) so a valid multi-line HA config isn't

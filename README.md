@@ -137,7 +137,7 @@ The built-in healthcheck verifies the radvd process is running:
 
 ```dockerfile
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \
-    CMD pidof radvd >/dev/null || exit 1
+    CMD ["pidof", "radvd"]
 ```
 
 This catches "process crashed" but not "RAs aren't being emitted because the source address is missing" (that's the HA case where radvd intentionally stays running but silent). For end-to-end verification, run an off-host probe that listens for RAs on the LAN segment:

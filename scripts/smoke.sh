@@ -65,7 +65,7 @@ cp tests/radvd.conf "$TMPDIR_FIXTURE/radvd.conf"
 
 # Create + inject config + start; wait until radvd runs inside.
 start_container() {
-  name=$1
+  local name=$1 ready
   docker create --name "$name" --network none --cap-add NET_RAW "$IMAGE" >/dev/null
   docker cp "$TMPDIR_FIXTURE" "$name:/etc/radvd" >/dev/null
   docker start "$name" >/dev/null
@@ -83,6 +83,22 @@ start_container() {
   [ -n "$ready" ] || fail "$name: radvd never came up"
 }
 
+# Poll up to 10s until the container's reload log-line count reaches $2 and
+# radvd runs with a PID set different from $3; prints the new PID set (empty
+# on timeout) for the caller to assert on.
+wait_for_reload() {
+  local name=$1 want_count=$2 prev_pid=$3 pid=""
+  for _ in $(seq 1 10); do
+    if [ "$(docker logs "$name" 2>&1 | grep -c 'msg="reloading radvd (config re-read via restart)"')" -ge "$want_count" ]; then
+      pid=$(docker exec "$name" pidof radvd 2>/dev/null || true)
+      [ -n "$pid" ] && [ "$pid" != "$prev_pid" ] && break
+      pid=""
+    fi
+    sleep 1
+  done
+  printf '%s' "$pid"
+}
+
 # --- 1. startup + shipped healthcheck ---------------------------------------
 printf '[smoke] starting %s (network none, fixture config)\n' "$C1"
 start_container "$C1"
@@ -97,16 +113,7 @@ printf '[smoke] PASS  startup: radvd up, preflight warned, healthcheck probe ok\
 # --- 2. HUP reload (world-readable config) -----------------------------------
 pid_before=$(docker exec "$C1" pidof radvd) || fail "cannot read radvd pid"
 docker kill -s HUP "$C1" >/dev/null
-pid_after=""
-for _ in $(seq 1 10); do
-  logs=$(docker logs "$C1" 2>&1)
-  if grep -q 'msg="reloading radvd (config re-read via restart)"' <<<"$logs"; then
-    pid_after=$(docker exec "$C1" pidof radvd 2>/dev/null || true)
-    [ -n "$pid_after" ] && [ "$pid_after" != "$pid_before" ] && break
-    pid_after=""
-  fi
-  sleep 1
-done
+pid_after=$(wait_for_reload "$C1" 1 "$pid_before")
 [ -n "$pid_after" ] || fail "HUP did not reload radvd (no reload log, or PID unchanged)"
 [ "$(docker inspect -f '{{.State.Running}}' "$C1")" = "true" ] || fail "container not running after HUP reload"
 [ "$(docker logs "$C1" 2>&1 | grep -c 'no AdvRASrcAddress directive found')" -ge 2 ] \
@@ -119,15 +126,7 @@ mode=$(docker exec "$C1" stat -c '%a %U' /etc/radvd)
 [ "$mode" = "700 root" ] || fail "restricted-perms setup did not take effect (got: $mode)"
 pid_before=$pid_after
 docker kill -s HUP "$C1" >/dev/null
-pid_after=""
-for _ in $(seq 1 10); do
-  if [ "$(docker logs "$C1" 2>&1 | grep -c 'msg="reloading radvd (config re-read via restart)"')" -ge 2 ]; then
-    pid_after=$(docker exec "$C1" pidof radvd 2>/dev/null || true)
-    [ -n "$pid_after" ] && [ "$pid_after" != "$pid_before" ] && break
-    pid_after=""
-  fi
-  sleep 1
-done
+pid_after=$(wait_for_reload "$C1" 2 "$pid_before")
 [ -n "$pid_after" ] || fail "HUP under a root-only config did not reload radvd"
 [ "$(docker inspect -f '{{.State.Running}}' "$C1")" = "true" ] || fail "container died on HUP under a root-only config (the 8e7a792 regression)"
 docker logs "$C1" 2>&1 | grep -q 'failed to read config file' \
