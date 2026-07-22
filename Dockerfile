@@ -61,6 +61,38 @@ RUN wget -q --tries=3 --timeout=30 \
     && install -D -m 755 radvdump /out/usr/sbin/radvdump
 
 # ---------------------------------------------------------------------------
+# Embedded SBOM fragment. Syft inventories the final image from Alpine's APK
+# database only, so the source-built payload (/usr/sbin/radvd + radvdump) is
+# invisible to the signed release SBOM and to vulnerability scanners.
+# Generate a CycloneDX fragment from the same Renovate-tracked version ARG
+# the build uses — a Renovate bump keeps the SBOM correct with zero extra
+# maintenance — and ship it in the runtime image (see the COPY in the runtime
+# stage), where the release pipeline's centrally enabled Syft sbom-cataloger
+# picks it up (cplieger/ci wiring; no per-repo .syft.yaml).
+# CPE: the NVD CPE dictionary carries exactly one vendor:product for radvd —
+# radvd.litech:radvd (non-deprecated, exact 2.21 entry, refs pointing at
+# github.com/radvd-project/radvd); the sometimes-guessed
+# litech:router_advertisement_daemon has no dictionary entry at all.
+# ---------------------------------------------------------------------------
+RUN cat > /out/radvd.cdx.json <<EOF
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "version": 1,
+  "components": [
+    {
+      "bom-ref": "pkg:github/radvd-project/radvd@${RADVD_VERSION}",
+      "type": "application",
+      "name": "radvd",
+      "version": "${RADVD_VERSION#v}",
+      "purl": "pkg:github/radvd-project/radvd@${RADVD_VERSION}",
+      "cpe": "cpe:2.3:a:radvd.litech:radvd:${RADVD_VERSION#v}:*:*:*:*:*:*:*"
+    }
+  ]
+}
+EOF
+
+# ---------------------------------------------------------------------------
 # Runtime stage — same digest-pinned base as before the source-build
 # conversion; only how radvd is obtained changed (COPY from the builder
 # instead of installing the Alpine package). radvd links against nothing
@@ -74,12 +106,18 @@ RUN apk upgrade --no-cache
 RUN addgroup -S radvd && adduser -S -D -H -G radvd radvd
 
 COPY --from=builder /out/usr/sbin/ /usr/sbin/
+# CycloneDX SBOM fragment for the source-built radvd (generated in the
+# builder stage from the Renovate-tracked version ARG). Placed where the
+# release pipeline's Syft sbom-cataloger inventories it, so SBOMs and
+# scanners see radvd alongside the APK packages.
+COPY --from=builder /out/radvd.cdx.json /usr/share/sbom/radvd.cdx.json
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # ---------------------------------------------------------------------------
 # Test stage — runs the build-time smoke test (binary runs + configtest
 # accepts a valid config and rejects a malformed one, plus the built binary
-# reports exactly the pinned RADVD_VERSION). A failure here fails the
+# and the embedded SBOM fragment both report exactly the pinned
+# RADVD_VERSION). A failure here fails the
 # centralized `ci / validate` docker build gate, because the final stage
 # below depends on this stage's marker.
 # ---------------------------------------------------------------------------
