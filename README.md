@@ -15,23 +15,23 @@ Run [radvd](https://radvd.litech.org/) (the Linux IPv6 Router Advertisement Daem
 
 This image is a minimal Alpine wrapper around upstream `radvd`, compiled from the pinned release tarball, plus a small POSIX entrypoint that:
 
-- **Validates HA-related directives** (`IgnoreIfMissing on`, `AdvRASrcAddress`) across the mounted config — warns at startup if they are missing, and also warns when `AdvRASrcAddress` is set to a non-link-local (global/ULA) address that RFC 4861 requires hosts to silently discard
+- **Validates HA-related directives** (`IgnoreIfMissing on`, `AdvRASrcAddress`) across the mounted config: warns at startup if they are missing, and also when `AdvRASrcAddress` is set to a non-link-local (global/ULA) address that RFC 4861 requires hosts to silently discard
 - **Creates `/run/radvd`** (radvd refuses to start without it)
-- **Drops privileges** — radvd opens its raw socket as root, then runs as the unprivileged `radvd` user (`-u radvd`) for the rest of its lifetime
-- **Supervises radvd** — turns `SIGHUP` into a clean config reload, forwards `SIGTERM` for graceful shutdown, and propagates an unexpected radvd exit to Docker's restart policy (see [Reloading](#reloading-configuration))
+- **Drops privileges**: radvd opens its raw socket as root, then runs as the unprivileged `radvd` user (`-u radvd`) for the rest of its lifetime
+- **Supervises radvd**: turns `SIGHUP` into a clean config reload, forwards `SIGTERM` for graceful shutdown, and propagates an unexpected radvd exit to Docker's restart policy (see [Reloading](#reloading-configuration))
 - **Logs to stderr** with structured key=value lines, captured by `docker logs`
 
 ### Why this design
 
-- **Generic upstream-only** — no env-var-to-config translation, no bundled prefixes; you supply your own `radvd.conf`
-- **Bind-mount only** — single read-only `:ro` mount of `/etc/radvd`
-- **Entrypoint warns on HA misconfig** — running radvd on two nodes without `AdvRASrcAddress` + `IgnoreIfMissing on` makes BOTH nodes emit RAs, which wrecks SLAAC default-route selection on downstream clients. The entrypoint warns at startup (it doesn't fail — single-node operators may legitimately deploy without HA)
-- **Healthcheck** — `pidof radvd` (CMD form, no shell needed)
-- **Multi-arch** — `linux/amd64` and `linux/arm64`
+- **Generic upstream-only**: no env-var-to-config translation, no bundled prefixes; you supply your own `radvd.conf`
+- **Bind-mount only**: single read-only `:ro` mount of `/etc/radvd`
+- **Entrypoint warns on HA misconfig**: warn-only, never fatal, since single-node operators legitimately deploy without HA (see [High-availability with keepalived](#high-availability-with-keepalived))
+- **Healthcheck**: `pidof radvd` (CMD form, no shell needed)
+- **Multi-arch**: `linux/amd64` and `linux/arm64`
 
 ## Quick start
 
-Available from both `ghcr.io/cplieger/docker-radvd` and `docker.io/cplieger/docker-radvd` — identical images and tags.
+Available from both `ghcr.io/cplieger/docker-radvd` and `docker.io/cplieger/docker-radvd`; identical images and tags.
 
 ```yaml
 services:
@@ -40,14 +40,14 @@ services:
     container_name: radvd
     restart: unless-stopped
 
-    # radvd emits RAs onto the LAN — needs host networking + a raw ICMPv6 socket.
+    # radvd emits RAs onto the LAN, so it needs host networking and a raw ICMPv6 socket.
     network_mode: host
     cap_add:
       - NET_RAW  # required: raw ICMPv6 socket to emit RAs
       - NET_ADMIN  # optional: only for kernel-applied iface params (AdvLinkMTU etc.); see Capabilities
 
     volumes:
-      - ./radvd:/etc/radvd:ro
+      - "./radvd:/etc/radvd:ro"
 ```
 
 Minimal `radvd.conf` (single-node, advertises a /64):
@@ -70,11 +70,11 @@ interface eth0 {
 
 ## High-availability with keepalived
 
-If you run radvd on two or more nodes for HA, both nodes will emit RAs by default — clients pick whichever they hear last, or alternate randomly, breaking default-route selection. The proper pattern is:
+If you run radvd on two or more nodes for HA, both nodes will emit RAs by default: clients pick whichever they hear last, or alternate randomly, breaking default-route selection. The proper pattern is:
 
-1. **Manage a floating link-local with keepalived** — only the MASTER owns it at any moment
-2. **`AdvRASrcAddress` in `radvd.conf`** — point it at that **link-local**. It must be link-local: [RFC 4861 §6.1.2](https://www.rfc-editor.org/rfc/rfc4861#section-6.1.2) requires an RA's source to be a link-local address, and hosts silently discard any RA sourced from a global address. Pointing it at a global service VIP is the classic mistake — radvd emits, `tcpdump` shows the RAs, yet no host ever autoconfigures.
-3. **`IgnoreIfMissing on`** — radvd tolerates the source address being absent on the BACKUP node (stays running, just doesn't emit RAs)
+1. **Manage a floating link-local with keepalived**: only the MASTER owns it at any moment
+2. **`AdvRASrcAddress` in `radvd.conf`**: point it at that **link-local**. It must be link-local: [RFC 4861 §6.1.2](https://www.rfc-editor.org/rfc/rfc4861#section-6.1.2) requires an RA's source to be a link-local address, and hosts silently discard any RA sourced from a global address. Pointing it at a global service VIP is the classic mistake: radvd emits, `tcpdump` shows the RAs, yet no host ever autoconfigures.
+3. **`IgnoreIfMissing on`**: radvd tolerates the source address being absent on the BACKUP node (stays running, just doesn't emit RAs)
 
 Result: both radvd processes run continuously, but only the MASTER node emits RAs (because only it has the link-local). On failover, keepalived moves the address, and the new MASTER's radvd starts emitting RAs within seconds.
 
@@ -120,10 +120,10 @@ The entrypoint restarts the daemon so it re-reads the config; `docker restart ra
 
 ### Capabilities
 
-| Capability  | Why needed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NET_RAW`   | **Required.** Opens the raw ICMPv6 socket used to send Router Advertisements. Without it radvd exits at startup (`open_icmpv6_socket: Operation not permitted`).                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `NET_ADMIN` | Only needed when one of the kernel-applied interface-parameter directives (`AdvLinkMTU`, `AdvCurHopLimit`, `AdvReachableTime`, `AdvRetransTimer`) is configured AND `/proc/sys` is writable. radvd writes these to `/proc/sys/net/ipv6/{conf,neigh}/*`, which requires `CAP_NET_ADMIN`. Under a read-only `/proc/sys` (e.g. `read_only: true`) those writes are blocked and `NET_ADMIN` has no effect. **If you use radvd for pure SLAAC Router-Advertisement emission only (no kernel-applied interface parameters), you can safely remove `NET_ADMIN` and keep only `NET_RAW`.** |
+| Capability | Why needed |
+| --- | --- |
+| `NET_RAW` | **Required.** Opens the raw ICMPv6 socket used to send Router Advertisements. Without it radvd exits at startup (`open_icmpv6_socket: Operation not permitted`). |
+| `NET_ADMIN` | Only needed when a kernel-applied interface-parameter directive (`AdvLinkMTU`, `AdvCurHopLimit`, `AdvReachableTime`, `AdvRetransTimer`) is configured AND `/proc/sys` is writable: radvd writes them to `/proc/sys/net/ipv6/{conf,neigh}/*`, which requires `CAP_NET_ADMIN`, and a read-only `/proc/sys` (e.g. `read_only: true`) blocks the writes so `NET_ADMIN` has no effect. **For pure SLAAC Router-Advertisement emission (no kernel-applied interface parameters), remove `NET_ADMIN` and keep only `NET_RAW`.** |
 
 ### Networking
 
@@ -133,12 +133,7 @@ The entrypoint restarts the daemon so it re-reads the config; `docker restart ra
 
 ## Healthcheck
 
-The built-in healthcheck verifies the radvd process is running:
-
-```dockerfile
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \
-    CMD ["pidof", "radvd"]
-```
+The built-in healthcheck runs `pidof radvd` every 30s (5s timeout, 3 retries, 15s start period) and marks the container unhealthy when the radvd process is gone.
 
 This catches "process crashed" but not "RAs aren't being emitted because the source address is missing" (that's the HA case where radvd intentionally stays running but silent). For end-to-end verification, run an off-host probe that listens for RAs on the LAN segment:
 
@@ -189,12 +184,7 @@ labels your Alertmanager uses.
 
 ## Security
 
-| Tool                                             | Result                          |
-| ------------------------------------------------ | ------------------------------- |
-| [shellcheck](https://www.shellcheck.net/)        | Clean (entrypoint passes)       |
-| [hadolint](https://github.com/hadolint/hadolint) | Clean                           |
-| [gitleaks](https://github.com/gitleaks/gitleaks) | No secrets detected             |
-| [trivy](https://trivy.dev/)                      | Inherits Alpine base image scan |
+radvd opens its raw ICMPv6 socket as root, then drops to the unprivileged `radvd` user for the rest of its lifetime; the config mount is read-only. CI lints the entrypoint with [shellcheck](https://www.shellcheck.net/) and the Dockerfile with [hadolint](https://github.com/hadolint/hadolint), scans for leaked secrets with [gitleaks](https://github.com/gitleaks/gitleaks), and scans the image with [trivy](https://trivy.dev/); current scan results live in the repository's Security tab.
 
 The image is published with [cosign](https://github.com/sigstore/cosign) signatures and SBOM attestations. Verify a pull:
 
@@ -208,7 +198,7 @@ cosign verify ghcr.io/cplieger/docker-radvd:latest \
 
 All dependencies are updated automatically via [Renovate](https://github.com/renovatebot/renovate).
 
-- **radvd** is compiled from the pinned upstream release tarball (the `RADVD_VERSION` build argument, tracked by Renovate against upstream tags) and verified against a pinned SHA256 before extraction, so the shipped daemon version is explicit, reproducible, and updated by pull request instead of floating with the Alpine package index.
+- **radvd** is compiled from the pinned upstream release tarball (the `RADVD_VERSION` build argument, tracked by Renovate against upstream tags) and verified against a pinned SHA256 before extraction. The shipped daemon version is explicit and updates by pull request instead of floating with the Alpine package index.
 - **The Alpine base image** is pinned by SHA digest. The base userland around the radvd binary (musl, busybox, and friends) floats forward at image rebuild time (`apk upgrade` in the Dockerfile), and scheduled rebuilds bound how stale a published image can get.
 
 | Dependency | Source                                                                  |
@@ -216,13 +206,11 @@ All dependencies are updated automatically via [Renovate](https://github.com/ren
 | alpine     | [Docker Hub](https://hub.docker.com/_/alpine)                           |
 | radvd      | [GitHub](https://github.com/radvd-project/radvd) (pinned source build)  |
 
-**Major-version updates:** a breaking radvd release arrives as a Renovate PR bumping `RADVD_VERSION` and ships as a new major version of this image. Before upgrading, review the [upstream changelog](https://github.com/radvd-project/radvd/blob/master/CHANGES) for `radvd.conf` syntax changes — the mounted config is the only interface that can break.
+**Major-version updates:** a breaking radvd release arrives as a Renovate PR bumping `RADVD_VERSION` and ships as a new major version of this image. Before upgrading, review the [upstream changelog](https://github.com/radvd-project/radvd/blob/master/CHANGES) for `radvd.conf` syntax changes; the mounted config is the only interface that can break.
 
 ## Credits
 
-This project packages [radvd](https://radvd.litech.org/) ([source on GitHub](https://github.com/radvd-project/radvd)) into a container image. All credit for the daemon goes to the upstream maintainers — radvd has been the canonical Linux IPv6 RA daemon since 1996.
-
-The HA pattern is documented in [Firstyear's blog post](https://fy.blackhats.net.au/blog/2018-11-01-high-available-radvd-on-linux/) and `radvd.conf(5)`.
+This project packages [radvd](https://radvd.litech.org/) ([source on GitHub](https://github.com/radvd-project/radvd)) into a container image. All credit for the daemon goes to the upstream maintainers; radvd has been the canonical Linux IPv6 RA daemon since 1996.
 
 ## Contributing
 
@@ -236,4 +224,4 @@ This project was built with AI-assisted tooling using [Claude](https://claude.co
 
 ## License
 
-This project is licensed under the [GNU General Public License v3.0](LICENSE).
+GPL-3.0. See [LICENSE](LICENSE).
