@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# The harness testing itself: extraction shapes, fatal reachability, and the
-# forgot-report guard.
+# The harness testing itself — CANONICAL COPY in cplieger/ci
+# (configs/shell/harness_test.sh), synced to each adopting repo's
+# tests/shell/harness_test.sh alongside lib.sh. DO NOT edit the synced copy in an
+# app repo — change it here and let the sync land it.
+#
+# Extraction shapes, fatal reachability, and the forgot-report guard.
 #
 # Every other file in this directory trusts lib.sh for one load-bearing property:
 # a test that failed to load real code CANNOT keep running and report passes.
