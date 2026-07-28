@@ -49,15 +49,34 @@ _reported=0
 # would otherwise exit 0 after its last assertion and the runner would count a
 # clean pass — a complete false green from a one-line deletion.
 #
-# The PID guard is load-bearing, not defensive. Command substitutions and `( )`
-# subshells do reset the EXIT trap, but an ASYNC child (`cmd &`) INHERITS it: a
-# stubbed background process that dies before its exec would otherwise run this
-# handler with the parent's $WORK and _reported=0 — printing a spurious
-# forgot-report error and `rm -rf`-ing the parent's live scratch dir mid-run.
-# Measured on the radvd latch suite before this guard: the error fired on 26 of 30
-# cases and a canary in $WORK was deleted on the first iteration. Only the process
-# that INSTALLED the trap may act on it.
-_LIB_OWNER_PID=$$
+# The PID guard is load-bearing, not defensive: only the process that INSTALLED the
+# trap may act on it. Without it, a child that reaches this handler runs it with the
+# parent's $WORK and _reported=0 — printing a spurious forgot-report error and
+# `rm -rf`-ing the parent's live scratch dir mid-run. Measured on the radvd latch
+# suite before the guard: the error fired on 26 of 30 cases and a canary in $WORK
+# was deleted on the first iteration.
+#
+# That symptom is real; the MECHANISM originally recorded here was not. This comment
+# claimed an async child (`cmd &`) INHERITS the EXIT trap while `( )` and `$( )`
+# reset it. Re-measured 2026-07 on bash 5.2.37, nothing tested inherits it: not a
+# backgrounded function (returning, exiting, or failing its `exec` — the radvd stub's
+# exact shape), not a backgrounded subshell, builtin or external, and not a plain
+# subshell, command substitution, or pipeline segment. So the construct that actually
+# reached the handler is unconfirmed, and a reader should not build on the old model.
+# The guard stays because its contract holds regardless of which construct triggers
+# it, and harness_test.sh now pins that contract directly by invoking this handler
+# from a differing BASHPID rather than by trying to reproduce the trigger.
+#
+# The owner is recorded as ${BASHPID:-$$}, not $$: inside a `( ... )` subshell $$ is
+# still the OUTER shell's pid, so a suite that sources this file inside a subshell
+# would install the trap while recording a pid that is not its own — and then the
+# handler's own guard would disable it in the very process that installed it. Both
+# duties silently stopped: the forgot-report guard never fired and $WORK leaked
+# (measured 2026-07 with `bash -c '( . lib.sh; new_workdir; ok x )'`, which exited 0
+# with the scratch dir still on disk). BASHPID needs bash >= 4.0; on an older bash the
+# `:-$$` fallback degrades to the original behaviour rather than erroring, which is the
+# right trade here (the CI runners and every dev box in the fleet are bash 5).
+_LIB_OWNER_PID=${BASHPID:-$$}
 _lib_on_exit() {
   _lib_status=$?
   [ "${BASHPID:-$$}" = "$_LIB_OWNER_PID" ] || return 0
