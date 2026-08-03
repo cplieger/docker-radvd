@@ -31,6 +31,10 @@ reload=0
 shutdown=0
 # SIGHUP: reload config by restarting radvd (re-reads as root, see header).
 on_hup() {
+  if [ "$shutdown" -eq 1 ]; then
+    printf 'level=info msg="SIGHUP received during shutdown; reload ignored"\n' >&2
+    return
+  fi
   reload=1
   printf 'level=info msg="SIGHUP received; restarting radvd to reload config"\n' >&2
   [ -n "$radvd_pid" ] && kill -TERM "$radvd_pid" 2>/dev/null
