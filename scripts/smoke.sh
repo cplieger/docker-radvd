@@ -17,6 +17,9 @@
 #   5. propagation  an unexpected radvd death (SIGKILL to the daemon) exits the
 #                   container with the propagated code (137) so a restart
 #                   policy would fire
+#   6. validation   an invalid RADVD_DEBUG_LEVEL fails closed — the entrypoint
+#                   exits 1 with a sanitized structured error line before
+#                   radvd ever starts
 #
 # The container runs with --network none and a config for an interface that
 # does not exist ("IgnoreIfMissing on" keeps radvd alive), so no Router
@@ -36,11 +39,12 @@ cd "$(dirname "$0")/.."
 IMAGE="${1:-docker-radvd:smoke}"
 C1="radvd-smoke-$$"
 C2="radvd-smoke-kill-$$"
+C3="radvd-smoke-badlevel-$$"
 TMPDIR_FIXTURE=""
 
 fail() {
   printf 'SMOKE FAIL: %s\n' "$*" >&2
-  for c in "$C1" "$C2"; do
+  for c in "$C1" "$C2" "$C3"; do
     if docker inspect "$c" >/dev/null 2>&1; then
       printf -- '--- %s logs (tail) ---\n' "$c" >&2
       docker logs "$c" 2>&1 | tail -25 >&2 || true
@@ -50,7 +54,7 @@ fail() {
 }
 
 cleanup() {
-  docker rm -f "$C1" "$C2" >/dev/null 2>&1 || true
+  docker rm -f "$C1" "$C2" "$C3" >/dev/null 2>&1 || true
   [ -n "$TMPDIR_FIXTURE" ] && rm -rf "$TMPDIR_FIXTURE"
 }
 trap cleanup EXIT
@@ -97,6 +101,17 @@ wait_for_reload() {
     sleep 1
   done
   printf '%s' "$pid"
+}
+
+# Poll up to 10s until the container stops running; fails with $2 if it never does.
+wait_until_stopped() {
+  local name=$1 what=$2 running="true"
+  for _ in $(seq 1 10); do
+    running=$(docker inspect -f '{{.State.Running}}' "$name")
+    [ "$running" = "false" ] && break
+    sleep 1
+  done
+  [ "$running" = "false" ] || fail "$what"
 }
 
 # --- 1. startup + shipped healthcheck ---------------------------------------
@@ -146,16 +161,24 @@ start_container "$C2"
 # pidof returns both radvd pids (root parent + dropped -u worker); word
 # splitting inside the container shell is deliberate so kill gets each pid.
 docker exec "$C2" sh -c 'kill -KILL $(pidof radvd)'
-running="true"
-for _ in $(seq 1 10); do
-  running=$(docker inspect -f '{{.State.Running}}' "$C2")
-  [ "$running" = "false" ] && break
-  sleep 1
-done
-[ "$running" = "false" ] || fail "container still running after radvd was SIGKILLed"
+wait_until_stopped "$C2" "container still running after radvd was SIGKILLed"
 ec=$(docker inspect -f '{{.State.ExitCode}}' "$C2")
 [ "$ec" = "137" ] || fail "propagated exit code $ec, want 137 (128+SIGKILL)"
 docker logs "$C2" 2>&1 | grep -q 'radvd exited; propagating exit for restart policy' || fail "missing exit-propagation log line"
 printf '[smoke] PASS  propagation: radvd death exits container with 137\n'
+
+# --- 6. fail-closed RADVD_DEBUG_LEVEL validation -------------------------------
+printf '[smoke] starting %s (invalid RADVD_DEBUG_LEVEL scenario)\n' "$C3"
+docker create --name "$C3" --network none --cap-add NET_RAW \
+  -e 'RADVD_DEBUG_LEVEL=9"bogus' "$IMAGE" >/dev/null
+docker cp "$TMPDIR_FIXTURE" "$C3:/etc/radvd" >/dev/null
+docker start "$C3" >/dev/null
+wait_until_stopped "$C3" "container still running with an invalid RADVD_DEBUG_LEVEL"
+ec=$(docker inspect -f '{{.State.ExitCode}}' "$C3")
+[ "$ec" = "1" ] || fail "invalid RADVD_DEBUG_LEVEL exit code $ec, want 1"
+docker logs "$C3" 2>&1 | grep -q 'msg="invalid RADVD_DEBUG_LEVEL' || fail "missing invalid-RADVD_DEBUG_LEVEL error line"
+docker logs "$C3" 2>&1 | grep -q 'value="9?bogus"' || fail "sanitizer did not neutralize the quote in the echoed value"
+docker logs "$C3" 2>&1 | grep -q 'msg="starting radvd"' && fail "radvd was started despite an invalid RADVD_DEBUG_LEVEL"
+printf '[smoke] PASS  validation: invalid RADVD_DEBUG_LEVEL fails closed (exit 1, sanitized error)\n'
 
 printf '[smoke] OK — all signal-contract assertions passed for %s\n' "$IMAGE"
