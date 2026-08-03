@@ -27,6 +27,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # No step in this job pushes with checkout-persisted credentials;
+          # do not leave the token in .git/config (zizmor: artipacked).
+          persist-credentials: false
 
       - name: Build image
         run: docker build -t docker-radvd:smoke .
