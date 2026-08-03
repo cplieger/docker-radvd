@@ -2,13 +2,11 @@
 
 # renovate: datasource=github-tags depName=radvd-project/radvd
 ARG RADVD_VERSION=v2.21
-# When RADVD_VERSION is bumped, update this SHA256 to match the new dist
-# tarball. Renovate can't recompute it (github-tags exposes the git sha, not
-# the tarball hash), so it labels the bump PR `manual-sha-bump` and puts this
-# command in the PR body — run it, paste the result here, push:
-# curl -sL https://github.com/radvd-project/radvd/releases/download/v<N>/radvd-<N>.tar.gz | sha256sum
-# Upstream publishes the same hash as radvd-<N>.tar.gz.sha256 next to the
-# release asset — cross-check against it.
+# github-tags exposes the git sha, not the tarball hash, so the marker below
+# drives the repin postUpgradeTask, which recomputes this SHA256 in the same
+# commit as a RADVD_VERSION bump. Upstream publishes the same hash as
+# radvd-<N>.tar.gz.sha256 next to the release asset — cross-check against it.
+# repin: dep=radvd-project/radvd url=https://github.com/radvd-project/radvd/releases/download/{version}/radvd-{version_nov}.tar.gz
 ARG RADVD_SHA256=09e5cf7712397463fd35ebca71f3c05f7d31cff9246513f12d03a359c40b089c
 
 # ---------------------------------------------------------------------------

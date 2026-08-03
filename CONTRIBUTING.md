@@ -15,9 +15,10 @@ The files with real logic are:
   stage, copies the stripped `radvd`/`radvdump` binaries onto the digest-pinned
   Alpine base, creates an unprivileged `radvd` user/group for the entrypoint's
   privilege drop, and wires up the `HEALTHCHECK` (`pidof radvd`) and
-  `ENTRYPOINT`. Renovate bumps `RADVD_VERSION` against upstream tags; the
-  SHA256 must be recomputed by hand on each bump (the bump PR body carries the
-  command).
+  `ENTRYPOINT`. Renovate bumps `RADVD_VERSION` against upstream tags, and the
+  `# repin:` marker above the `RADVD_SHA256` arg lets Renovate's
+  `postUpgradeTasks` recompute the SHA256 from the release asset inside the same
+  bump commit, so no manual step is needed.
 - `entrypoint.sh`: a POSIX `sh` script (runs on Alpine's BusyBox shell, not
   bash) that validates HA directives, creates `/run/radvd`, and supervises radvd
   in the foreground as the non-root `radvd` user (`-u radvd`): it turns `SIGHUP`
