@@ -48,6 +48,38 @@ on_term() {
 trap on_hup HUP
 trap on_term TERM INT
 
+# Sanitize a value for interpolation into a structured key=value log line:
+# strip control characters (joining embedded newlines), neutralize quotes and
+# backslashes to '?' (matching the awk clean() convention in
+# check_ha_directives), and cap at $2 chars so a malformed value cannot forge
+# or break the line. Control characters are deleted via [:cntrl:] rather than
+# kept via -cd [:print:] because BusyBox tr (v1.37.0) does not implement the
+# print class and would treat it as a literal character set.
+sanitize_log_value() {
+  # shellcheck disable=SC1003 # not an escape attempt: tr maps `"` and `\` to literal `?` (verified on BusyBox v1.37.0)
+  printf '%s\n' "$1" | tr -d '[:cntrl:]' | tr '"\\' '??' | cut -c1-"$2"
+}
+
+# Verbosity of radvd itself (the entrypoint's own level= lines are unaffected).
+# radvd's startup banner, warnings, errors, and shutdown notices log
+# unconditionally; -d 1 adds the config "syntax ok" confirmation plus noisy
+# per-wakeup main-loop debug lines ("polling for ..."), and higher levels get
+# progressively chattier. Default 0 keeps `docker logs` quiet without losing
+# any failure diagnostics. Fail-closed on an invalid value: a typo'd level is
+# an operator error better caught at startup than silently run at an
+# unintended verbosity. The echoed value is sanitized (control characters
+# stripped, quotes and backslashes neutralized, length-capped) so a malformed
+# env value cannot forge or break the structured log line.
+RADVD_DEBUG_LEVEL="${RADVD_DEBUG_LEVEL:-0}"
+case "$RADVD_DEBUG_LEVEL" in
+  [0-5]) ;;
+  *)
+    bad_level=$(sanitize_log_value "$RADVD_DEBUG_LEVEL" 32)
+    printf 'level=error msg="invalid RADVD_DEBUG_LEVEL; expected an integer 0-5" value="%s"\n' "$bad_level" >&2
+    exit 1
+    ;;
+esac
+
 # Sanity-check the HA directives. radvd would happily start without them and
 # emit RAs from both MASTER and BACKUP simultaneously, wrecking SLAAC default-
 # route selection on downstream clients. Warn-only — a single-node operator
@@ -89,16 +121,10 @@ check_ha_directives() {
   # forge or break the structured log line.
   #
   # One degraded-validation warning for every unscannable-config path.
-  # Sanitizes the error text first (control characters stripped first, joining
-  # any embedded newlines, then quotes/backslashes neutralized to '?' matching
-  # the awk clean() convention below, capped at 200 chars; control characters
-  # are deleted via [:cntrl:] rather than kept via -cd [:print:] because
-  # BusyBox tr (v1.37.0) does not implement the print class and would treat
-  # it as a literal character set, garbling the message) so a malformed
-  # filename or error message cannot forge or break the structured log line.
+  # Sanitizes via sanitize_log_value (200-char cap) so a malformed filename
+  # or error message cannot forge or break the structured log line.
   warn_scan_degraded() {
-    # shellcheck disable=SC1003 # not an escape attempt: tr maps `"` and `\` to literal `?` (verified on BusyBox v1.37.0)
-    scan_err=$(printf '%s\n' "$1" | tr -d '[:cntrl:]' | tr '"\\' '??' | cut -c1-200)
+    scan_err=$(sanitize_log_value "$1" 200)
     printf 'level=warn msg="unable to scan mounted radvd config; HA-directive validation is incomplete" err="%s" path="%s"\n' "$scan_err" "$CONF_DIR" >&2
   }
   for conf_file in "$CONF_DIR"/*.conf; do
@@ -208,12 +234,13 @@ if ! mkdir -p /run/radvd; then
   exit 1
 fi
 
-# -n foreground, -m stderr routes upstream logs to our stderr, -d 1 is the
-# minimal verbosity that still logs startup success, -u radvd drops privileges
-# after the raw socket is open. Missing config is caught by radvd itself with a
-# clear error message.
+# -n foreground, -m stderr routes upstream logs to our stderr, -d sets radvd's
+# verbosity from RADVD_DEBUG_LEVEL (validated above; radvd's startup banner and
+# all warnings/errors log even at 0), -u radvd drops privileges after the raw
+# socket is open. Missing config is caught by radvd itself with a clear error
+# message.
 start_radvd() {
-  radvd -C "$CONF" -n -m stderr -d 1 -u radvd &
+  radvd -C "$CONF" -n -m stderr -d "$RADVD_DEBUG_LEVEL" -u radvd &
   radvd_pid=$!
   # A signal delivered before radvd_pid was assigned set the flag but skipped
   # the kill; deliver it now so an early stop/reload is not swallowed. Runs on
@@ -224,7 +251,7 @@ start_radvd() {
   fi
 }
 
-printf 'level=info msg="starting radvd" config="%s"\n' "$CONF" >&2
+printf 'level=info msg="starting radvd" config="%s" debug_level="%s"\n' "$CONF" "$RADVD_DEBUG_LEVEL" >&2
 start_radvd
 
 while :; do

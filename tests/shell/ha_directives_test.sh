@@ -36,8 +36,14 @@ set -u
 new_workdir >/dev/null
 
 load_function check_ha_directives
-# The same extraction, kept as a file for run_check's bounded subshell below.
+# warn_scan_degraded delegates to the top-level sanitize_log_value, so the
+# extraction needs it too — without it the degraded-scan path dies with
+# "command not found" and the sanitizer assertion reports a wrong outcome rather
+# than a missing dependency.
+load_function sanitize_log_value
+# The same extractions, kept as files for run_check's bounded subshell below.
 SRC=$(extract_function check_ha_directives "$WORK/check_ha_directives.sh") || exit 1
+SANITIZER=$(extract_function sanitize_log_value "$WORK/sanitize_log_value.sh") || exit 1
 
 LOG="$WORK/log"
 
@@ -56,9 +62,10 @@ run_check() {
   timeout 5 bash -c '
     set -u
     . "$1"
-    CONF=$2
+    . "$2"
+    CONF=$3
     check_ha_directives
-  ' _ "$SRC" "$CONF" 2>"$LOG" || _rc=$?
+  ' _ "$SANITIZER" "$SRC" "$CONF" 2>"$LOG" || _rc=$?
 }
 
 logged() {

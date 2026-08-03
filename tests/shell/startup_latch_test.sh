@@ -46,6 +46,12 @@ load_function start_radvd
 radvd() { exec sleep 20; }
 
 CONF=/dev/null
+# start_radvd passes RADVD_DEBUG_LEVEL to radvd's -d. In the boot path the value
+# is assigned and validated at top level before this function is ever reached, so
+# the extraction needs it supplied here for the same reason CONF is: under set -u
+# an unbound one aborts the function before it backgrounds anything, which reads
+# as a signal-latch failure rather than as the missing variable it is.
+RADVD_DEBUG_LEVEL=0
 SIGNALS="$WORK/signals"
 
 # Record every signal the function sends, then forward it for real.

@@ -23,7 +23,7 @@ This image is a minimal Alpine wrapper around upstream `radvd`, compiled from th
 
 ### Why this design
 
-- **Generic upstream-only**: no env-var-to-config translation, no bundled prefixes; you supply your own `radvd.conf`
+- **Generic upstream-only**: no env-var-to-config translation, no bundled prefixes; you supply your own `radvd.conf`. The one env var, `RADVD_DEBUG_LEVEL`, tunes radvd's log verbosity only (see [Configuration reference](#configuration-reference))
 - **Bind-mount only**: single read-only `:ro` mount of `/etc/radvd`
 - **Entrypoint warns on HA misconfig**: warn-only, never fatal, since single-node operators legitimately deploy without HA (see [High-availability with keepalived](#high-availability-with-keepalived))
 - **Healthcheck**: `pidof radvd` (CMD form, no shell needed)
@@ -112,6 +112,15 @@ The entrypoint restarts the daemon so it re-reads the config; `docker restart ra
 
 ## Configuration reference
 
+### Environment variables
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `RADVD_DEBUG_LEVEL` | `0` | radvd's `-d` debug level, `0`–`5`. At `0` radvd still logs its startup banner and every warning and error; `1` adds a config `syntax ok` confirmation plus a per-wakeup `polling for ...` line that is noisy under `docker logs`; higher levels are progressively chattier. An invalid value fails startup with a clear error rather than running at an unintended verbosity. |
+
+Everything else about the daemon comes from the mounted `radvd.conf`; this variable
+only controls how much radvd logs.
+
 ### Volumes
 
 | Mount        | Description                                              |
@@ -160,7 +169,7 @@ groups:
         expr: |
           sum by (hostname) (count_over_time(
             {container="radvd"}
-            |~ `error parsing or activating the config file|exiting, failed to read config file` [10m]
+            |~ `exiting, failed to read config file|exiting, permissions on conf_file invalid|does not exist or is not set up properly \(setup_iface=|invalid RADVD_DEBUG_LEVEL|radvd.conf exists but is not readable|failed to create radvd PID directory` [10m]
           )) > 0
         for: 0m
         labels:
@@ -174,7 +183,17 @@ groups:
             config is fixed. This applies whether the bad config is present at
             startup or introduced by a later edit and reload, since a reload
             restarts radvd and re-validates the config. Check your radvd.conf.
+            The pattern also matches the entrypoint's own fatal startup errors
+            (an invalid RADVD_DEBUG_LEVEL, an unreadable radvd.conf, a failed
+            /run/radvd creation), which crash-loop the container the same way
+            before radvd ever starts.
 ```
+
+Every pattern above is a string radvd 2.21 or the entrypoint actually emits,
+checked against upstream's `radvd.c`. Note that `properly \(setup_iface=` is
+anchored on the opening parenthesis so it matches only the fatal form; the
+`ignoring the interface (setup_iface=` warning that radvd logs when
+`IgnoreIfMissing on` is set is a normal HA-backup state, not an alert.
 
 Thresholds and the `severity` label are starting points. The `container`
 selector and the `hostname` grouping label depend on your log collector:
