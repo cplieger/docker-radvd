@@ -229,7 +229,7 @@ All dependencies are updated automatically via [Renovate](https://github.com/ren
 
 ## Credits
 
-This project packages [radvd](https://radvd.litech.org/) ([source on GitHub](https://github.com/radvd-project/radvd)) into a container image. All credit for the daemon goes to the upstream maintainers; radvd has been the canonical Linux IPv6 RA daemon since 1996.
+This project packages [radvd](https://radvd.litech.org/) ([source on GitHub](https://github.com/radvd-project/radvd)) into a container image. radvd carries its own BSD-style permissive license (see its `COPYRIGHT` file). All credit for the daemon goes to the upstream maintainers; radvd has been the canonical Linux IPv6 RA daemon since 1996.
 
 ## Contributing
 
@@ -243,4 +243,4 @@ This project was built with AI-assisted tooling using [Claude](https://claude.co
 
 ## License
 
-GPL-3.0. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE).
