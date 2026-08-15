@@ -100,7 +100,14 @@ FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6ee
 
 # apk upgrade: the pinned base ships some packages (e.g. libssl3) stale;
 # upgrading floats them forward on each rebuild.
-RUN apk upgrade --no-cache
+# PKG_REFRESH busts the cache for this layer. Without it BuildKit restores the
+# layer verbatim on every rebuild, so the `apk upgrade` below floats nothing
+# forward after the first build and the image keeps shipping the packages that
+# were current then. The central release/CI/scan builds pass today's UTC date.
+# The `echo` is load-bearing: BuildKit keys a RUN on the build args it actually
+# CONSUMES, so a merely-declared ARG would change nothing.
+ARG PKG_REFRESH=static
+RUN echo "OS package refresh: ${PKG_REFRESH}" && apk upgrade --no-cache
 RUN addgroup -S radvd && adduser -S -D -H -G radvd radvd
 
 COPY --from=builder /out/usr/sbin/ /usr/sbin/
