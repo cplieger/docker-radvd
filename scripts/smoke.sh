@@ -114,6 +114,28 @@ wait_until_stopped() {
   [ "$running" = "false" ] || fail "$what"
 }
 
+# Poll up to 10s until $2 appears in the container's logs; fails with $3 if it
+# never does.
+#
+# Required for any line written during shutdown. `docker stop` returns once the
+# container has exited, but the json-file log driver can still be behind it, so
+# a single grep reads a truncated log and reports a line the container did in
+# fact write. Measured 2026-08-15: the scenario-4 assertion failed on main while
+# the very failure dump it printed contained the line it had just missed, and
+# the same commit had passed on its PR branch seven minutes earlier. An absence
+# assertion cannot be polled, so keep those single-shot and place them AFTER a
+# wait_for_log on the same container has proven the log flushed.
+wait_for_log() {
+  local name=$1 pattern=$2 what=$3
+  for _ in $(seq 1 10); do
+    if docker logs "$name" 2>&1 | grep -q "$pattern"; then
+      return 0
+    fi
+    sleep 1
+  done
+  fail "$what"
+}
+
 # --- 1. startup + shipped healthcheck ---------------------------------------
 printf '[smoke] starting %s (network none, fixture config)\n' "$C1"
 start_container "$C1"
@@ -152,7 +174,7 @@ printf '[smoke] PASS  hardened reload: root-only config reloaded cleanly (pid %s
 docker stop "$C1" >/dev/null
 ec=$(docker inspect -f '{{.State.ExitCode}}' "$C1")
 [ "$ec" = "0" ] || fail "docker stop exit code $ec, want 0"
-docker logs "$C1" 2>&1 | grep -q 'radvd stopped on shutdown signal' || fail "missing graceful shutdown log line"
+wait_for_log "$C1" 'radvd stopped on shutdown signal' "missing graceful shutdown log line"
 printf '[smoke] PASS  shutdown: SIGTERM exits 0 with graceful log\n'
 
 # --- 5. unexpected radvd death propagates to the container --------------------
@@ -164,7 +186,7 @@ docker exec "$C2" sh -c 'kill -KILL $(pidof radvd)'
 wait_until_stopped "$C2" "container still running after radvd was SIGKILLed"
 ec=$(docker inspect -f '{{.State.ExitCode}}' "$C2")
 [ "$ec" = "137" ] || fail "propagated exit code $ec, want 137 (128+SIGKILL)"
-docker logs "$C2" 2>&1 | grep -q 'radvd exited; propagating exit for restart policy' || fail "missing exit-propagation log line"
+wait_for_log "$C2" 'radvd exited; propagating exit for restart policy' "missing exit-propagation log line"
 printf '[smoke] PASS  propagation: radvd death exits container with 137\n'
 
 # --- 6. fail-closed RADVD_DEBUG_LEVEL validation -------------------------------
@@ -176,8 +198,10 @@ docker start "$C3" >/dev/null
 wait_until_stopped "$C3" "container still running with an invalid RADVD_DEBUG_LEVEL"
 ec=$(docker inspect -f '{{.State.ExitCode}}' "$C3")
 [ "$ec" = "1" ] || fail "invalid RADVD_DEBUG_LEVEL exit code $ec, want 1"
-docker logs "$C3" 2>&1 | grep -q 'msg="invalid RADVD_DEBUG_LEVEL' || fail "missing invalid-RADVD_DEBUG_LEVEL error line"
-docker logs "$C3" 2>&1 | grep -q 'value="9?bogus"' || fail "sanitizer did not neutralize the quote in the echoed value"
+wait_for_log "$C3" 'msg="invalid RADVD_DEBUG_LEVEL' "missing invalid-RADVD_DEBUG_LEVEL error line"
+wait_for_log "$C3" 'value="9?bogus"' "sanitizer did not neutralize the quote in the echoed value"
+# Absence assertion: single-shot on purpose, and safe here only because the two
+# wait_for_log calls above already proved this container's log is flushed.
 docker logs "$C3" 2>&1 | grep -q 'msg="starting radvd"' && fail "radvd was started despite an invalid RADVD_DEBUG_LEVEL"
 printf '[smoke] PASS  validation: invalid RADVD_DEBUG_LEVEL fails closed (exit 1, sanitized error)\n'
 
