@@ -50,6 +50,15 @@ logged() {
   grep -Fq "$1" "$LOG"
 }
 
+# The README's RadvdConfigError alert rule is an exact-string contract between the
+# entrypoint's fatal lines and an operator's Loki rule, so read BOTH sides: pull the
+# rule's own `|~` pattern out of the README and match the captured output against it
+# as the regex Loki will use. Scoped to this one rule rather than grepping the file,
+# because a file-wide match can pass against a pattern that has drifted onto another
+# line; an empty extraction fails the assertions below rather than matching silently.
+ALERT_RULE=$(sed -n '/alert: RadvdConfigError/,/^        for:/p' "$REPO_ROOT/README.md" \
+  | sed -n 's/^[[:space:]]*|~ `\(.*\)` \[[0-9]\+[a-z]\]$/\1/p')
+
 # --- 1. a readable, non-empty config routes to the HA validation ------------------
 setup
 printf 'interface eth0 { IgnoreIfMissing on; };\n' >"$CONF"
@@ -60,7 +69,7 @@ run_triage
 
 # --- 2. an EMPTY config warns (radvd will exit: no interface configured) ----------
 # The warn and the validation both run: emptiness is a foretold radvd failure, not
-# a reason to skip the scan of any sibling *.conf.
+# a reason to skip the HA-directive scan.
 setup
 : >"$CONF"
 run_triage
@@ -85,14 +94,27 @@ run_triage
 setup
 printf 'interface eth0 { IgnoreIfMissing on; };\n' >"$CONF"
 if [ "$(id -u)" -eq 0 ]; then
-  skip "an existing but unreadable config aborts boot (exit 1)" "root reads a chmod-000 file, so the refusal is unreachable"
+  skip "an existing but unreadable config aborts boot (exit 1) and matches the README's alert rule" "root reads a chmod-000 file, so the refusal is unreachable"
 else
   chmod 000 "$CONF"
   run_triage
   [ "$_rc" -eq 1 ] && logged 'msg="radvd.conf exists but is not readable' && ! logged 'HA_CHECK_CALLED' \
     && ok "an existing but unreadable config aborts boot with exit 1 and the error names it" \
     || no "unreadable config fatal" "rc=$_rc, log: $(cat "$LOG")"
+  [ -n "$ALERT_RULE" ] && grep -Eq "$ALERT_RULE" "$LOG" \
+    && ok "the unreadable-config fatal line matches the README's RadvdConfigError alert pattern" \
+    || no "alert contract (unreadable config)" "rule='$ALERT_RULE', log: $(cat "$LOG")"
   chmod 644 "$CONF"
 fi
+
+# --- 5. the third fatal's phrase is asserted at the SOURCE -------------------------
+# `failed to create radvd PID directory` is the one alternative in the README's alert
+# rule that no unit path drives (the mkdir only fails on a read-only /run), so this
+# is a source-side check: the shipped script must still emit the phrase the rule
+# matches. Rewording one side without the other silently stops the operator's alert.
+[ -n "$ALERT_RULE" ] && grep -q 'printf .*failed to create radvd PID directory' "$ENTRYPOINT" \
+  && printf 'failed to create radvd PID directory\n' | grep -Eq "$ALERT_RULE" \
+  && ok "the PID-directory fatal phrase is emitted by the shipped script and matched by the alert rule" \
+  || no "alert contract (PID directory, source-side)" "rule='$ALERT_RULE'"
 
 report

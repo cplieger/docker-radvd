@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# check_ha_directives(): the 118-line validator behind the HA warnings.
+# check_ha_directives(): the validator behind the HA warnings, and the bulk of
+# entrypoint.sh.
 #
 # Everything here is warn-only by design (a single-node operator legitimately
 # deploys without HA), so what a test pins is WHICH warning fires for which config
@@ -7,9 +8,9 @@
 # against a valid config is how a real one gets ignored.
 #
 # The function's only input is the CONF global (entrypoint.sh assigns it plainly,
-# never readonly); it derives CONF_DIR itself. Every case builds a fresh config
-# dir and points CONF into it. No stubs: dirname, sed, grep, awk, cat, tr and cut
-# run for real against fixture files.
+# never readonly), which is the one file radvd itself is given with -C. Every case
+# builds a fresh config dir and points CONF into it. No stubs: sed, grep, awk, cat,
+# tr and cut run for real against fixture files.
 #
 # DIALECT NOTE: the shipped file is #!/bin/sh under BusyBox ash with BusyBox
 # sed/grep/awk in the image; this suite runs it under bash with the runner's own
@@ -97,6 +98,23 @@ run_check
   && ok "a valid one-line nested config is silent (mid-line directives found)" \
   || no "one-line config" "rc=$_rc, log: $(cat "$LOG")"
 
+# The bare name at end-of-line, with the opening brace on the next line. CONTRIBUTING
+# records this spelling as deliberately accepted, so it must stay silent.
+setup
+printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvRASrcAddress\n  {\n    fe80::1;\n  };\n};\n' >"$CONF"
+run_check
+[ "$_rc" -eq 0 ] && [ ! -s "$LOG" ] \
+  && ok "a bare AdvRASrcAddress at end-of-line with the brace on the next line is silent" \
+  || no "bare name at EOL" "rc=$_rc, log: $(cat "$LOG")"
+
+# The no-space form, also recorded in CONTRIBUTING as deliberately accepted.
+setup
+printf 'interface eth0 { IgnoreIfMissing on; AdvRASrcAddress{fe80::1;}; };\n' >"$CONF"
+run_check
+[ "$_rc" -eq 0 ] && [ ! -s "$LOG" ] \
+  && ok "the no-space AdvRASrcAddress{...} form is silent" \
+  || no "no-space form" "rc=$_rc, log: $(cat "$LOG")"
+
 # --- 3. case-insensitive, because radvd's flex scanner is caseless ----------------
 setup
 printf 'INTERFACE eth0 { IGNOREIFMISSING ON; ADVRASRCADDRESS { FE80::1; }; };\n' >"$CONF"
@@ -166,16 +184,14 @@ logged 'msg="AdvRASrcAddress is set to a non-link-local address' && logged '2001
   || no "GUA source warned" "log: $(cat "$LOG")"
 
 # --- 9. a correct block must not MASK a broken sibling ----------------------------
-# Across files: eth0's correct block in a.conf, the global-VIP mistake in b.conf.
-# The warning has to name the offending file, or a multi-file operator re-greps by
-# hand.
+# Two blocks in one radvd.conf: eth0's correct block, then the global-VIP mistake on
+# a later line. A correct block seen first must not stop the scan.
 setup
-printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvRASrcAddress { fe80::1; };\n};\n' >"$DIR/a.conf"
-printf 'interface eth1 {\n  IgnoreIfMissing on;\n  AdvRASrcAddress { fd00::78; };\n};\n' >"$DIR/b.conf"
+printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvRASrcAddress { fe80::1; };\n};\ninterface eth1 {\n  IgnoreIfMissing on;\n  AdvRASrcAddress { fd00::78; };\n};\n' >"$CONF"
 run_check
-logged 'msg="AdvRASrcAddress is set to a non-link-local address' && logged 'b.conf:fd00::78' \
-  && ok "a broken sibling FILE is not masked by a correct one, and is named file:address" \
-  || no "cross-file sibling" "log: $(cat "$LOG")"
+logged 'msg="AdvRASrcAddress is set to a non-link-local address' && logged 'fd00::78' \
+  && ok "a broken sibling block on a later line is not masked by a correct one, and is named" \
+  || no "multi-block sibling" "log: $(cat "$LOG")"
 
 # Same line: a correct block followed by a wrong one. Only the same-line re-scan
 # branch of the awk state machine reaches the second block.
@@ -206,94 +222,39 @@ logged 'msg="no AdvRASrcAddress directive found' \
   || no "missing AdvRASrcAddress" "log: $(cat "$LOG")"
 
 # --- 12. an unscannable config degrades to ONE warning, and PID 1 must not hang ---
-# A FIFO matching *.conf: without the regular-file probe the cat probe reads it to
-# an EOF that never comes, wedging boot (and every HUP reload) with no log line.
-# run_check's timeout turns that hang into a failure here.
+# A FIFO at radvd.conf: without the regular-file probe the read that follows drains
+# it to an EOF that never comes, wedging boot (and every HUP reload) with no log
+# line. run_check's timeout turns that hang into a failure here.
 setup
-printf 'interface eth0 { IgnoreIfMissing on; AdvRASrcAddress { fe80::1; }; };\n' >"$CONF"
-mkfifo "$DIR/pipe.conf"
+rm -f "$CONF"
+mkfifo "$CONF"
 run_check
 [ "$_rc" -eq 0 ] && logged 'msg="unable to scan mounted radvd config' \
   && [ "$(warn_count)" -eq 1 ] && ! logged 'no enabled IgnoreIfMissing' \
-  && ok "a FIFO in the mount degrades to one scan warning, without hanging or misdiagnosing" \
+  && ok "a FIFO at radvd.conf degrades to one scan warning, without hanging or misdiagnosing" \
   || no "FIFO degraded" "rc=$_rc, log: $(cat "$LOG")"
 
-# A subdirectory matching *.conf — the root-safe shape of the same guard.
-setup
-printf 'interface eth0 { IgnoreIfMissing on; AdvRASrcAddress { fe80::1; }; };\n' >"$CONF"
-mkdir "$DIR/sub.conf"
-run_check
-[ "$_rc" -eq 0 ] && logged 'msg="unable to scan mounted radvd config' && [ "$(warn_count)" -eq 1 ] \
-  && ok "a directory named *.conf degrades to one scan warning instead of a misleading one" \
-  || no "dir degraded" "rc=$_rc, log: $(cat "$LOG")"
-
-# An empty config dir: the unmatched glob stays literal, fails -f, same guard.
-setup
-rm -f "$CONF"
-run_check
-[ "$_rc" -eq 0 ] && logged 'msg="unable to scan mounted radvd config' \
-  && ok "an empty config dir (unmatched glob) degrades to the scan warning" \
-  || no "unmatched glob" "rc=$_rc, log: $(cat "$LOG")"
-
-# The unreadable-file arm of the same guard reaches the CAT probe, not the -f
-# probe — but root reads a chmod-000 file, so the branch cannot be provoked as
-# root and asserting it would fail for a root maintainer while passing in CI.
+# The unreadable-file arm of the same guard reaches the READ, not the -f probe —
+# but root reads a chmod-000 file, so the branch cannot be provoked as root and
+# asserting it would fail for a root maintainer while passing in CI.
 setup
 printf 'interface eth0 { IgnoreIfMissing on; AdvRASrcAddress { fe80::1; }; };\n' >"$CONF"
 if [ "$(id -u)" -eq 0 ]; then
-  skip "unreadable *.conf routes to the cat-probe warning" "root reads a chmod-000 file, so the refusal is unreachable"
+  skip "an unreadable radvd.conf routes to the degraded-scan warning" "root reads a chmod-000 file, so the refusal is unreachable"
 else
   chmod 000 "$CONF"
   run_check
   [ "$_rc" -eq 0 ] && logged 'msg="unable to scan mounted radvd config' \
-    && ok "an unreadable *.conf degrades via the cat probe instead of misdiagnosing" \
+    && ok "an unreadable radvd.conf degrades via the failed read instead of misdiagnosing" \
     || no "unreadable degraded" "rc=$_rc, log: $(cat "$LOG")"
   chmod 644 "$CONF"
 fi
 
-# --- 13. the degraded warning survives a hostile filename -------------------------
-# Two properties, and the second needs bait a quote cannot supply: the quote is
-# neutralized (to ? — the awk clean() convention), and an embedded NEWLINE cannot
-# forge a second structured-log line. A quote-only fixture leaves the
-# control-character filter unexercised, so a name carrying both is the bait.
-# The oracle is the SUBSTITUTED form, positively: the newline is DELETED by
-# `tr -d [:cntrl:]` and the quotes MAPPED to `?`, so the sanitized name collapses to
-# one predictable token. A negative "no quote anywhere" test cannot work here -- the
-# log line's own err="/path=" delimiters are quotes -- and asserting only the absence
-# of the forged fragment left the case unable to fail (the raw literal cannot appear
-# whether the filters run or not).
-setup
-printf 'interface eth0 { IgnoreIfMissing on; AdvRASrcAddress { fe80::1; }; };\n' >"$CONF"
-_hostile=$(printf 'x"\nlevel=error msg="forged.conf')
-mkdir "$DIR/$_hostile"
-run_check
-[ "$_rc" -eq 0 ] && logged 'msg="unable to scan mounted radvd config' \
-  && [ "$(wc -l <"$LOG")" -eq 1 ] \
-  && grep -Fq 'x?level=error msg=?forged.conf' "$LOG" \
-  && ok "a quote and an embedded newline in a filename are neutralized; the warning stays one line" \
-  || no "sanitizer outcome" "lines=$(wc -l <"$LOG"), log: $(cat "$LOG")"
-
-# --- 14. the awk scanner's own clean() reaches hostile data ------------------------
-# Everything above routes through warn_scan_degraded; the awk scanner has a SECOND
-# sanitizer for the bad= field, applied to BOTH the filename and the address token,
-# and no case reached it -- every hostile-name fixture so far was a directory, which
-# returns at the regular-file probe before awk ever runs. These two cases reach it,
-# one per call site, because clean() around the filename and clean() around the
-# token are independently deletable.
-setup
-rm -f "$CONF"
-_hostile_conf="$DIR/$(printf 'bad".conf')"
-printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvRASrcAddress { fd00::78; };\n};\n' >"$_hostile_conf"
-run_check
-[ "$_rc" -eq 0 ] && logged 'msg="AdvRASrcAddress is set to a non-link-local address' \
-  && [ "$(wc -l <"$LOG")" -eq 1 ] && ! grep -Fq 'bad".conf' "$LOG" \
-  && grep -q 'bad?.conf' "$LOG" \
-  && ok "the awk scanner neutralizes a quote in the offending FILENAME it names in bad=" \
-  || no "awk clean() on FILENAME" "lines=$(wc -l <"$LOG"), log: $(cat "$LOG")"
-
-# The ADDRESS TOKEN half: a quote inside the address survives tokenization (the
-# splitter cuts on ';' and trims only space/tab), so it reaches bad= as part of the
-# token and clean() is the only thing standing between it and the log line.
+# --- 13. the awk scanner's own clean() reaches hostile data ------------------------
+# The bad= field names operator-supplied address tokens, so clean() is the only
+# thing standing between a config value and the structured log line. A quote inside
+# the address survives tokenization (the splitter cuts on ';' and trims only
+# space/tab), so it reaches bad= as part of the token.
 setup
 printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvRASrcAddress { fd00::"78; };\n};\n' >"$CONF"
 run_check
@@ -304,18 +265,25 @@ run_check
   || no "awk clean() on the address token" "lines=$(wc -l <"$LOG"), log: $(cat "$LOG")"
 
 # The control-character arm of the SAME clean(), which the quote mapping cannot
-# cover: a filename carrying an embedded newline, as a real readable *.conf this
-# time (it still ends in .conf, so it passes -f and reaches awk rather than
-# short-circuiting into warn_scan_degraded). The one-line oracle is what the cntrl
-# substitution holds together.
+# cover: a control byte inside the address token. The one-line oracle is what the
+# cntrl substitution holds together.
 setup
-rm -f "$CONF"
-_cntrl_conf="$DIR/$(printf 'x\nlevel=error msg="forged.conf')"
-printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvRASrcAddress { fd00::78; };\n};\n' >"$_cntrl_conf"
+printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvRASrcAddress { fd00::\017 78; };\n};\n' >"$CONF"
 run_check
 [ "$_rc" -eq 0 ] && logged 'msg="AdvRASrcAddress is set to a non-link-local address' \
-  && [ "$(wc -l <"$LOG")" -eq 1 ] && ! grep -Fq 'msg="forged' "$LOG" \
-  && ok "an embedded newline in a scanned filename cannot forge a second bad= log line" \
+  && [ "$(wc -l <"$LOG")" -eq 1 ] && ! grep -q 'fd00::'"$(printf '\017')" "$LOG" \
+  && ok "a control byte inside the address token is neutralized and the warning stays one line" \
   || no "awk clean() control-character arm" "lines=$(wc -l <"$LOG"), log: $(cat "$LOG")"
+
+# --- 14. a directive SPLIT across lines is still seen ------------------------------
+# radvd's lexer discards newlines, so `IgnoreIfMissing` with its value `on;` on the
+# next line is valid config. The gates match a newline-folded stream for that reason;
+# a line-oriented gate reads this valid config as missing HA directives.
+setup
+printf 'interface eth0 {\n  IgnoreIfMissing\n  on;\n  AdvRASrcAddress { fe80::1; };\n};\n' >"$CONF"
+run_check
+[ "$_rc" -eq 0 ] && [ ! -s "$LOG" ] \
+  && ok "IgnoreIfMissing with its value on the next line is silent (newlines are folded)" \
+  || no "line-spanning directive" "rc=$_rc, log: $(cat "$LOG")"
 
 report

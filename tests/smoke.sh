@@ -78,7 +78,7 @@ if [ -e "$SBOM" ] || [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
       fail=1
     }
     if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
-      grep -q "\"version\": \"${RADVD_EXPECTED_VERSION#v}\"" "$SBOM" || {
+      grep -Fq "\"version\": \"${RADVD_EXPECTED_VERSION#v}\"" "$SBOM" || {
         err "FAIL: embedded SBOM fragment does not carry pinned version ${RADVD_EXPECTED_VERSION#v}"
         fail=1
       }

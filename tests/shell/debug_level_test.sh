@@ -55,6 +55,15 @@ logged() {
   grep -Fq "$1" "$LOG"
 }
 
+# The README's RadvdConfigError alert rule is an exact-string contract between this
+# fatal line and an operator's Loki rule, so read BOTH sides: pull the rule's own
+# `|~` pattern out of the README and match the captured output against it as the
+# regex Loki will use. Scoped to this one rule rather than grepping the file, because
+# a file-wide match can pass against a pattern that has drifted onto another line; an
+# empty extraction fails the assertion below rather than matching silently.
+ALERT_RULE=$(sed -n '/alert: RadvdConfigError/,/^        for:/p' "$REPO_ROOT/README.md" \
+  | sed -n 's/^[[:space:]]*|~ `\(.*\)` \[[0-9]\+[a-z]\]$/\1/p')
+
 # --- 1. unset defaults to 0, the quiet level -------------------------------------
 # The whole point of the change: a container nobody configured gets quiet logs.
 run_level
@@ -102,6 +111,9 @@ run_level '9"bogus'
 [ "$_rc" -eq 1 ] && logged 'value="9?bogus"' \
   && ok "a quote in the value is neutralized to ? rather than closing the field" \
   || no "quote neutralized" "rc=$_rc, log: $(cat "$LOG")"
+[ -n "$ALERT_RULE" ] && grep -Eq "$ALERT_RULE" "$LOG" \
+  && ok "the invalid-level fatal line matches the README's RadvdConfigError alert pattern" \
+  || no "alert contract (invalid level)" "rule='$ALERT_RULE', log: $(cat "$LOG")"
 
 run_level '9
 level=error msg="forged"'

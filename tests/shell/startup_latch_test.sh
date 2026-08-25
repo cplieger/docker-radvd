@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# start_radvd(): the pre-pid signal latch.
+# The signal path's two unit-testable pieces: start_radvd()'s pre-pid latch, and
+# on_hup()'s refusal to reload during a shutdown.
 #
 # The entrypoint arms its HUP/TERM traps before the config validation so a signal
 # landing in that window is not lost — but the handlers can only kill a child that
@@ -40,6 +41,7 @@ set -u
 new_workdir >/dev/null
 
 load_function start_radvd
+load_function on_hup
 
 # The stub: the function body backgrounds `radvd ... &`, so exec makes the
 # subshell BE the sleeper, and $! names it.
@@ -53,6 +55,7 @@ CONF=/dev/null
 # as a signal-latch failure rather than as the missing variable it is.
 RADVD_DEBUG_LEVEL=0
 SIGNALS="$WORK/signals"
+LOG="$WORK/log"
 
 # Record every signal the function sends, then forward it for real.
 kill() {
@@ -101,6 +104,40 @@ start
 signalled "$radvd_pid" \
   && ok "a reload latched during validation is delivered as TERM so the loop restarts it" \
   || no "reload latch" "no TERM recorded for $radvd_pid; signals=[$(tr '\n' ' ' <"$SIGNALS")]"
+reap "$radvd_pid"
+
+# --- 4. control: a HUP outside a shutdown does reload -----------------------------
+# Without it, case 5 below would pass against an on_hup that ignores every HUP.
+# The throwaway child stands in for radvd for the same reason the cases above use
+# one: the recorder FORWARDS the signal, and radvd_pid=$$ would deliver the TERM to
+# the process running this file, aborting it before report.
+sleep 20 &
+radvd_pid=$!
+shutdown=0 reload=0
+: >"$SIGNALS"
+on_hup 2>"$LOG"
+[ "$reload" -eq 1 ] && signalled "$radvd_pid" \
+  && grep -Fq 'msg="SIGHUP received; restarting radvd to reload config"' "$LOG" \
+  && ok "a HUP outside a shutdown sets the reload flag and TERMs the daemon" \
+  || no "hup control" "reload=$reload, signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
+reap "$radvd_pid"
+
+# --- 5. a HUP that lands DURING a shutdown is ignored -------------------------------
+# Both handlers TERM the same child, so without the early return the late HUP sets
+# reload=1 and the supervisor loop restarts the daemon on_term is stopping — the
+# container comes back up out of a `docker stop`. Three assertions, none redundant:
+# the early return (nothing signalled), the flag order (reload untouched), and the
+# report (the operator sees why the reload did not happen).
+sleep 20 &
+radvd_pid=$!
+shutdown=1 reload=0
+: >"$SIGNALS"
+on_hup 2>"$LOG"
+[ ! -s "$SIGNALS" ] && [ "$reload" -eq 0 ] \
+  && grep -Fq 'msg="SIGHUP received during shutdown; reload ignored"' "$LOG" \
+  && command kill -0 "$radvd_pid" 2>/dev/null \
+  && ok "a HUP during shutdown is logged and ignored: no signal, no reload flag, child untouched" \
+  || no "hup during shutdown" "reload=$reload, signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
 reap "$radvd_pid"
 
 report

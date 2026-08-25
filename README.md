@@ -15,7 +15,7 @@ Run [radvd](https://radvd.litech.org/) (the Linux IPv6 Router Advertisement Daem
 
 This image is a minimal Alpine wrapper around upstream `radvd`, compiled from the pinned release tarball, plus a small POSIX entrypoint that:
 
-- **Validates HA-related directives** (`IgnoreIfMissing on`, `AdvRASrcAddress`) across the mounted config: warns at startup if they are missing, and also when `AdvRASrcAddress` is set to a non-link-local (global/ULA) address that RFC 4861 requires hosts to silently discard
+- **Validates HA-related directives** (`IgnoreIfMissing on`, `AdvRASrcAddress`) in the mounted `radvd.conf`: warns at startup if they are missing, and also when `AdvRASrcAddress` is set to a non-link-local (global/ULA) address that RFC 4861 requires hosts to silently discard
 - **Creates `/run/radvd`** (radvd refuses to start without it)
 - **Drops privileges**: radvd opens its raw socket as root, then runs as the unprivileged `radvd` user (`-u radvd`) for the rest of its lifetime
 - **Supervises radvd**: turns `SIGHUP` into a clean config reload, forwards `SIGTERM` for graceful shutdown, and propagates an unexpected radvd exit to Docker's restart policy (see [Reloading](#reloading-configuration))
@@ -96,7 +96,7 @@ interface eth0 {
 };
 ```
 
-The entrypoint warns at startup if either directive is missing (and also if `AdvRASrcAddress` is set to a non-link-local address, the classic mistake above), so you find out before clients do. See [docker-keepalived](https://github.com/cplieger/docker-keepalived) for the sibling container.
+The entrypoint warns at startup if either directive is missing (and also if `AdvRASrcAddress` is set to a non-link-local address, the classic mistake above), so you find out before clients do. To see whether a node is actually emitting, the image ships upstream's own RA decoder: `docker exec radvd radvdump` on the peer node shows whether the BACKUP is emitting while the MASTER holds the link-local, which is the failure this pattern exists to prevent. See [docker-keepalived](https://github.com/cplieger/docker-keepalived) for the sibling container.
 
 Background reading: [Firstyear's blog post on HA radvd on Linux](https://fy.blackhats.net.au/blog/2018-11-01-high-available-radvd-on-linux/) explains the pattern in detail.
 
@@ -132,7 +132,27 @@ only controls how much radvd logs.
 | Capability | Why needed |
 | --- | --- |
 | `NET_RAW` | **Required.** Opens the raw ICMPv6 socket used to send Router Advertisements. Without it radvd exits at startup (`open_icmpv6_socket: Operation not permitted`). |
-| `NET_ADMIN` | Only needed when a kernel-applied interface-parameter directive (`AdvLinkMTU`, `AdvCurHopLimit`, `AdvReachableTime`, `AdvRetransTimer`) is configured AND `/proc/sys` is writable: radvd writes them to `/proc/sys/net/ipv6/{conf,neigh}/*`, which requires `CAP_NET_ADMIN`, and a read-only `/proc/sys` (e.g. `read_only: true`) blocks the writes so `NET_ADMIN` has no effect. **For pure SLAAC Router-Advertisement emission (no kernel-applied interface parameters), remove `NET_ADMIN` and keep only `NET_RAW`.** |
+| `NET_ADMIN` | Not needed for Router-Advertisement emission, and inert in a default container: Docker mounts `/proc/sys` read-only in every unprivileged container, so the writes radvd makes for kernel-applied interface-parameter directives (`AdvLinkMTU`, `AdvCurHopLimit`, `AdvReachableTime`, `AdvRetransTimer`) to `/proc/sys/net/ipv6/{conf,neigh}/*` fail whether the capability is granted or not. It becomes meaningful only if you make `/proc/sys` writable yourself (`read_only: true` is a different thing — it governs the container's own rootfs). **For pure SLAAC Router-Advertisement emission, keep only `NET_RAW`.** |
+
+#### Hardened profile
+
+Under `read_only: true`, `/run` must be a writable `tmpfs`: radvd writes its PID
+file to the compiled-in `/run/radvd/radvd.pid`, and the entrypoint creates that
+directory at startup, so without it the container exits 1 with
+`failed to create radvd PID directory` before radvd ever starts. Add to the
+service in the [Quick start](#quick-start) example:
+
+```yaml
+    read_only: true
+    tmpfs:
+      - /run:size=1m
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_RAW
+    security_opt:
+      - no-new-privileges:true
+```
 
 ### Networking
 
@@ -142,9 +162,9 @@ only controls how much radvd logs.
 
 ## Healthcheck
 
-The built-in healthcheck runs `pidof radvd` every 30s (5s timeout, 3 retries, 15s start period) and marks the container unhealthy when the radvd process is gone.
+The built-in healthcheck runs `pidof radvd` every 30s (5s timeout, 3 retries, 15s start period), so a container whose daemon is up reports `healthy`. It is a liveness probe only, and it is not what reacts to a crash: when radvd dies the supervising entrypoint propagates the exit and the container stops within a second, so a crash is handled by your `restart` policy rather than by the container ageing into `unhealthy`.
 
-This catches "process crashed" but not "RAs aren't being emitted because the source address is missing" (that's the HA case where radvd intentionally stays running but silent). For end-to-end verification, run an off-host probe that listens for RAs on the LAN segment:
+Neither the probe nor that exit propagation covers "RAs aren't being emitted because the source address is missing" (that's the HA case where radvd intentionally stays running but silent). The image ships upstream's own RA decoder, `radvdump`, so `docker exec radvd radvdump` is a first look at what is on the wire — run it on the peer node to confirm the BACKUP is staying silent; whether it sees this container's own RAs depends on multicast loopback. For end-to-end verification, run an off-host probe that listens for RAs on the LAN segment:
 
 ```bash
 # On any IPv6 host on the LAN:

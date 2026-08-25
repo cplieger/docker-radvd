@@ -4,8 +4,9 @@
 # entrypoint.sh header and CONTRIBUTING "Design boundaries"). The build-time
 # tests/smoke.sh covers config parsing; this covers the running container:
 #
-#   1. startup      radvd comes up under the supervisor and the shipped
-#                   HEALTHCHECK probe passes inside the assembled image
+#   1. startup      radvd comes up under the supervisor, Docker reports the
+#                   shipped HEALTHCHECK healthy, and the daemon has dropped to
+#                   the unprivileged radvd user
 #   2. HUP reload   `docker kill -s HUP` restarts radvd (new PID), re-runs the
 #                   HA-directive validation on the mounted config, and the
 #                   container stays Up
@@ -62,8 +63,8 @@ trap cleanup EXIT
 command -v docker >/dev/null 2>&1 || fail "docker is required"
 docker image inspect "$IMAGE" >/dev/null 2>&1 || fail "image $IMAGE not found (docker build -t docker-radvd:smoke . first)"
 
-# Fixture: only the valid config (tests/ also holds radvd.bad.conf, which the
-# entrypoint's *.conf directory scan must not see).
+# Fixture: only the valid config (tests/ also holds radvd.bad.conf, which is not
+# the file the daemon is given with -C).
 TMPDIR_FIXTURE=$(mktemp -d)
 cp tests/radvd.conf "$TMPDIR_FIXTURE/radvd.conf"
 
@@ -144,8 +145,23 @@ grep -q 'msg="starting radvd"' <<<"$logs" || fail "missing startup log line"
 # tests/radvd.conf carries IgnoreIfMissing but no AdvRASrcAddress, so startup
 # validation must emit exactly this warning (proves the preflight ran).
 grep -q 'no AdvRASrcAddress directive found' <<<"$logs" || fail "startup HA validation warning not emitted"
-docker exec "$C1" sh -c 'pidof radvd >/dev/null' || fail "shipped HEALTHCHECK probe fails in the assembled image"
-printf '[smoke] PASS  startup: radvd up, preflight warned, healthcheck probe ok\n'
+# Read Docker's own verdict instead of re-running the predicate: the shipped probe is
+# exec form, so a shell-form `docker exec ... pidof radvd` would verify neither the
+# probe nor its wiring, and start_container already required the predicate itself.
+# The first probe lands one 30s interval after start, so this has to poll.
+health=""
+for _ in $(seq 1 12); do
+  health=$(docker inspect -f '{{.State.Health.Status}}' "$C1")
+  [ "$health" = "healthy" ] && break
+  sleep 5
+done
+[ "$health" = "healthy" ] || fail "shipped HEALTHCHECK never reported healthy (last status: $health)"
+# The daemon runs as two processes (a root parent plus the dropped -u radvd worker),
+# so the drop is evidenced by the PRESENCE of a radvd-owned one, never by the absence
+# of a root-owned one. Dropping `-u radvd` from the entrypoint fails this by name.
+owners=$(docker exec "$C1" ps -o user,comm | awk '$2 ~ /radvd/ { print $1 }' | sort -u)
+grep -qx 'radvd' <<<"$owners" || fail "no radvd-owned radvd process; observed owners: $(tr '\n' ' ' <<<"$owners")"
+printf '[smoke] PASS  startup: radvd up, preflight warned, healthcheck healthy, privileges dropped\n'
 
 # --- 2. HUP reload (world-readable config) -----------------------------------
 pid_before=$(docker exec "$C1" pidof radvd) || fail "cannot read radvd pid"

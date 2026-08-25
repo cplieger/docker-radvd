@@ -45,25 +45,26 @@ contract.
   hard failures.
 - **grep patterns gate on statement boundaries on purpose.** The directive
   checks strip comments first (so a commented-out `# IgnoreIfMissing on`
-  correctly fails the check) and then require a statement boundary (start
-  of line, `;`, `{` or `}`) before the directive name, so a directive
+  correctly fails the check), fold newlines to spaces (radvd's lexer discards
+  them, so a directive whose value sits on the next line is still one
+  statement), and then require a statement boundary (start of the stream, `;`,
+  `{` or `}`) before the directive name, so a directive
   mid-line in a one-line nested config
   (`interface eth0 { IgnoreIfMissing on; ... };`) is still seen. The
   `IgnoreIfMissing` pattern requires the value `on` so `IgnoreIfMissing off`
-  does not pass a substring match. The checks scan every `*.conf` in the
-  mounted directory (not just `radvd.conf`) so directives in `include`d files
-  are seen, and the
+  does not pass a substring match. The checks scan the `radvd.conf` the daemon
+  itself is given with `-C`, and the
   `AdvRASrcAddress` pattern accepts `AdvRASrcAddress {`, the no-space
   `AdvRASrcAddress{` form, and a bare `AdvRASrcAddress` at end-of-line (the
   opening brace on the next line) so a valid multi-line HA config isn't
   flagged. Keep that behaviour if you touch the patterns.
 - **The non-link-local check is per-block.** Beyond presence detection, the
-  `awk` scan walks every address inside every `AdvRASrcAddress` block (across
-  all `*.conf`) and warns if _any_ is not link-local (`fe80::/10`). This is
+  `awk` scan walks every address inside every `AdvRASrcAddress` block and warns
+  if _any_ is not link-local (`fe80::/10`). This is
   deliberate: a correct link-local block must not mask a sibling block that
-  points at a global VIP, so a multi-interface or multi-file config with one
+  points at a global VIP, so a multi-interface config with one
   good and one bad source still warns, and the emitted `level=warn` line names
-  each offending `<file>:<address>` in a `bad=` field so the operator can locate
+  each offending address in a `bad=` field so the operator can locate
   it without re-grepping. Preserve the per-block semantics if you touch the
   `awk`; an earlier version stopped at the first link-local address it saw and
   could stay silent on exactly that mixed config.
@@ -77,8 +78,12 @@ contract.
   reads its config as root at startup but re-reads it as the unprivileged
   `radvd` user on an in-process `SIGHUP`; a config that user can't read (a
   hardened `0770 root:<group>` bind mount) makes radvd's own reload fail
-  (`failed to read config file`) and the process exit; a `docker kill -s
-  HUP` then wouldn't trip Docker's restart policy either. The supervisor loop
+  (`failed to read config file`) and the process exit. Under the
+  `restart: unless-stopped` policy `compose.yaml` ships, a `docker kill -s HUP`
+  then wouldn't trip Docker's restart policy either — Docker treats a container
+  stopped by a signal it delivered as manually stopped, which `unless-stopped`
+  honours; under `always` or `on-failure` the container would come back, so how
+  bad the reload death is depends on the operator's policy. The supervisor loop
   turns `SIGHUP` into a radvd restart (re-reads as root), forwards
   `SIGTERM`/`SIGINT`, and propagates an unexpected radvd exit. `exec radvd` is
   simpler but reintroduces the reload-death, so keep the supervise-and-restart
@@ -117,12 +122,16 @@ prevent), graceful SIGTERM shutdown, and unexpected-exit propagation to the
 restart policy. CI runs the same script on every PR via the repo-local
 `.github/workflows/smoke.yml` (not synced from `cplieger/ci`).
 
-## CI workflows are synced; don't edit them
+## Most CI workflows are not this repo's to edit
 
-The files under `.github/workflows/` carry a `DO NOT EDIT` header and are
-synced from `cplieger/ci`. Build, release, signing (cosign), and SBOM logic
-all live in that central repo; changing pipeline behaviour means changing it
-there, not here.
+`ci.yaml`, `release.yaml` and `scorecard.yml` carry a `Synced from cplieger/ci …
+— DO NOT EDIT` header: build, release, signing (cosign) and SBOM logic all live
+in that central repo, so changing pipeline behaviour means changing it there.
+`smoke.yml` is the one workflow this repo owns, and its own header says why it is
+deliberately kept out of the synced template. `codeql.yml` and `security.yml`
+carry no header but are byte-identical across the fleet's image repos — they are
+uniform thin callers of `cplieger/ci` reusable workflows, so change them in
+`cplieger/ci` or fleet-wide rather than here.
 
 ## Commits and PRs
 
