@@ -79,7 +79,11 @@ COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 
 FROM base AS test
 ARG RADVD_VERSION
-COPY tests/ /tmp/tests/
+COPY tests/smoke.sh tests/radvd.conf tests/radvd.bad.conf /tmp/tests/
+# The smoke test reads the README's own alert-rule pattern and matches radvd's
+# config-rejection output against it, so the published rule and the pinned
+# upstream strings cannot drift apart unnoticed.
+COPY README.md /tmp/README.md
 # ${RADVD_VERSION:?} fails the build if the ARG wiring breaks, so the in-image version assertion cannot be silently skipped.
 RUN RADVD_EXPECTED_VERSION="${RADVD_VERSION:?}" sh /tmp/tests/smoke.sh && touch /tests-passed
 

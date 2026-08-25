@@ -35,16 +35,28 @@ on_term() {
 trap on_hup HUP
 trap on_term TERM INT
 
-# Sanitize a value for interpolation into a structured key=value log line:
-# strip control characters (joining embedded newlines), neutralize quotes and
-# backslashes to '?' (matching the awk clean() convention in
-# check_ha_directives), and cap at $2 chars so a malformed value cannot forge
-# or break the line. Control characters are deleted via [:cntrl:] rather than
-# kept via -cd [:print:] because BusyBox tr (v1.37.0) does not implement the
-# print class and would treat it as a literal character set.
+# Sanitize a value for interpolation into a structured key=value log line: map
+# `"` and `\` to '?' (the awk clean() convention in check_ha_directives), then
+# every byte outside printable ASCII to a space under LC_ALL=C, then cap at $2
+# chars, appending [truncated] so a cut value cannot be read as a complete one.
+# Both stages replace 1:1 rather than delete: deletion shifts offsets and can
+# splice two fragments into one token of the bad= list. The explicit \040-\176
+# range stands in for [:print:], which BusyBox tr (v1.37.0) does not implement,
+# and LC_ALL=C makes what it covers a property of the code and not of the
+# container's locale — closing the C1 (U+0080-U+009F), Bidi_Control and
+# U+2028/U+2029 classes a [:cntrl:] pass cannot see, at the cost of flattening
+# legitimate non-ASCII too (both callers' values are ASCII by domain). Every
+# surviving byte is then single-byte printable ASCII, so the cap cannot split a
+# rune.
 sanitize_log_value() {
   # shellcheck disable=SC1003 # not an escape attempt: tr maps `"` and `\` to literal `?` (verified on BusyBox v1.37.0)
-  printf '%s\n' "$1" | tr -d '[:cntrl:]' | tr '"\\' '??' | cut -c1-"$2"
+  _clean=$(printf '%s' "$1" | tr '"\\' '??' | LC_ALL=C tr -c '\040-\176' ' ')
+  _capped=$(printf '%s' "$_clean" | cut -c1-"$2")
+  if [ "${#_clean}" -gt "${#_capped}" ]; then
+    printf '%s[truncated]' "$_capped"
+  else
+    printf '%s' "$_capped"
+  fi
 }
 
 # radvd's own -d verbosity, per-level detail in the README's configuration
@@ -86,6 +98,12 @@ check_ha_directives() {
   if ! conf_snapshot=$(cat "$CONF" 2>&1); then
     warn_scan_degraded "$conf_snapshot"
     return 0
+  fi
+  # The snapshot rather than [ -s "$CONF" ]: a config of nothing but newlines is
+  # non-empty on disk and still configures no interface, and a second stat would
+  # break the one-read invariant above.
+  if [ -z "$conf_snapshot" ]; then
+    printf 'level=warn msg="radvd.conf is empty; radvd will exit because no interface is configured" path="%s"\n' "$CONF" >&2
   fi
   has_directive() {
     printf '%s\n' "$conf_snapshot" | sed 's/#.*//' | tr '\n' ' ' | grep -Eqi "$1"
@@ -145,6 +163,7 @@ check_ha_directives() {
       END { if (bad != "") print bad }
     ')
     if [ -n "$bad_src" ]; then
+      bad_src=$(sanitize_log_value "$bad_src" 200)
       printf 'level=warn msg="AdvRASrcAddress is set to a non-link-local address; RFC 4861 requires an RA source to be link-local (fe80::/10), so hosts will silently discard these RAs" bad="%s" path="%s"\n' "$bad_src" "$CONF" >&2
     fi
   else
@@ -153,8 +172,6 @@ check_ha_directives() {
 }
 
 if [ -r "$CONF" ]; then
-  [ -s "$CONF" ] \
-    || printf 'level=warn msg="radvd.conf is empty; radvd will exit because no interface is configured" path="%s"\n' "$CONF" >&2
   check_ha_directives
 elif [ -e "$CONF" ]; then
   printf 'level=error msg="radvd.conf exists but is not readable" path="%s"\n' "$CONF" >&2
@@ -209,14 +226,8 @@ while :; do
     reload=0
     printf 'level=info msg="reloading radvd (config re-read via restart)"\n' >&2
     # Re-emit the HA-directive warnings for the (possibly edited) mounted config
-    # before restarting, matching what startup already checked. Guarded on
-    # readability so this stays warn-only — the unreadable-config fatal path is
-    # startup-only by design.
-    if [ -r "$CONF" ]; then
-      check_ha_directives
-    else
-      printf 'level=warn msg="config not readable at reload; skipping HA-directive validation (radvd will report its own config error)" path="%s"\n' "$CONF" >&2
-    fi
+    # before restarting, matching what startup already checked.
+    check_ha_directives
     start_radvd
     continue
   fi

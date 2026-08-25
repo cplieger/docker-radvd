@@ -44,7 +44,6 @@ services:
     network_mode: host
     cap_add:
       - NET_RAW  # required: raw ICMPv6 socket to emit RAs
-      - NET_ADMIN  # optional: only for kernel-applied iface params (AdvLinkMTU etc.); see Capabilities
 
     volumes:
       - "./radvd:/etc/radvd:ro"

@@ -27,9 +27,32 @@ if ! out=$(radvd -c -C "$d/radvd.conf" 2>&1); then
 fi
 
 # 2. configtest (-c) rejects a malformed config (proves the parser is real).
-if radvd -c -C "$d/radvd.bad.conf" >/dev/null 2>&1; then
+if bad_out=$(radvd -c -C "$d/radvd.bad.conf" 2>&1); then
   err "FAIL: 'radvd -c' accepted a malformed config"
   fail=1
+fi
+
+# The README's RadvdConfigError rule matches radvd's OWN fatal strings, which are
+# fixed by the pinned version and bumped by Renovate, so read both sides: pull the
+# rule's own |~ pattern out of the README and match radvd's actual reply against it
+# as the regex Loki will use. The extraction is the same expression the shell unit
+# tests use on the entrypoint's half of the same contract. Skipped in a plain local
+# run, where the README is not beside the tests.
+RULE_SRC=/tmp/README.md
+if [ -r "$RULE_SRC" ]; then
+  # The sed script matches the README's literal `|~ `pattern` [5m]` line, backticks
+  # included, so the single quotes are required: nothing here may expand.
+  # shellcheck disable=SC2016
+  rule=$(sed -n '/alert: RadvdConfigError/,/^        for:/p' "$RULE_SRC" \
+    | sed -n 's/^[[:space:]]*|~ `\(.*\)` \[[0-9]\+[a-z]\]$/\1/p')
+  if [ -z "$rule" ]; then
+    err "FAIL: could not extract the RadvdConfigError pattern from $RULE_SRC"
+    fail=1
+  elif ! printf '%s\n' "$bad_out" | grep -Eq "$rule"; then
+    err "FAIL: radvd's config-rejection output does not match the README's RadvdConfigError pattern"
+    err "$bad_out"
+    fail=1
+  fi
 fi
 
 # 3. Version assertion: the built binary reports exactly the pinned upstream

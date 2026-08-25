@@ -126,14 +126,36 @@ run_level '9\bogus'
   && ok "a backslash in the value is neutralized to ?" \
   || no "backslash neutralized" "rc=$_rc, log: $(cat "$LOG")"
 
-# --- 6. the echoed value is length-capped ----------------------------------------
+# The three classes a control-character pass cannot see, each arriving as a
+# multi-byte sequence rather than as a C0 byte: C1 (U+0085 NEL), Bidi_Control
+# (U+202E) and the line separator U+2028. runesafe's README is the fleet's written
+# policy on what must not survive the trip to a log sink; this tier applies it with
+# a printable-ASCII range map, so each byte of the sequence becomes one space.
+run_level "$(printf '9\302\205bogus')"
+[ "$_rc" -eq 1 ] && logged 'value="9  bogus"' \
+  && ok "a C1 control (U+0085) is flattened instead of reaching the log sink" \
+  || no "C1 neutralized" "rc=$_rc, log: $(cat "$LOG")"
+
+run_level "$(printf '9\342\200\256bogus')"
+[ "$_rc" -eq 1 ] && logged 'value="9   bogus"' \
+  && ok "a Bidi_Control (U+202E) cannot reorder the rendered log line" \
+  || no "Bidi_Control neutralized" "rc=$_rc, log: $(cat "$LOG")"
+
+run_level "$(printf '9\342\200\250bogus')"
+[ "$_rc" -eq 1 ] && logged 'value="9   bogus"' \
+  && ok "U+2028 cannot split the record in a viewer that honours it as a terminator" \
+  || no "U+2028 neutralized" "rc=$_rc, log: $(cat "$LOG")"
+
+# --- 6. the echoed value is length-capped, and says when it was cut ----------------
 # An env var has no useful length bound; the cap is what stops one typo from
 # writing an unbounded line. 32 chars of payload, so the assertion is the cap and
-# not the sanitizer.
+# not the sanitizer. The marker is not decoration: without it a 32-character level
+# an operator really typed is byte-identical to the head of a 200-character one.
 run_level "$(printf 'A%.0s' $(seq 1 200))"
 capped=$(sed -n 's/.*value="\([^"]*\)".*/\1/p' "$LOG")
-[ "$_rc" -eq 1 ] && [ "${#capped}" -eq 32 ] \
-  && ok "the echoed value is capped at 32 characters" \
-  || no "value capped" "rc=$_rc, len=${#capped}, log: $(cat "$LOG")"
+payload=${capped%"[truncated]"}
+[ "$_rc" -eq 1 ] && [ "${#payload}" -eq 32 ] && [ "$payload" != "$capped" ] \
+  && ok "the echoed value is capped at 32 characters and marked as truncated" \
+  || no "value capped" "rc=$_rc, value='$capped', log: $(cat "$LOG")"
 
 report

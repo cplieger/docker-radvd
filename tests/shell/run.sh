@@ -44,12 +44,8 @@ for t in ./*_test.sh; do
     exit 1
   fi
   printf '=== %s\n' "$(basename "$t")"
-  if bash "$t"; then
-    ran=$((ran + 1))
-  else
-    ran=$((ran + 1))
-    failed=$((failed + 1))
-  fi
+  ran=$((ran + 1))
+  bash "$t" || failed=$((failed + 1))
   printf '\n'
 done
 

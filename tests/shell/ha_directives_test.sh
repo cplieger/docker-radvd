@@ -19,8 +19,9 @@
 # the assertions stay POSIX-shaped and assert OUTCOMES (which warning line,
 # silence, one parseable line), never a tool-specific substitution. The one place
 # the dialects are known to diverge is the sanitizer path (BusyBox tr v1.37.0 has
-# no [:print:], which is why the shipped code deletes [:cntrl:] instead), so those
-# cases assert the resulting log line's shape rather than the exact bytes.
+# no [:print:], which is why the shipped code spells the printable range as
+# \040-\176 under LC_ALL=C instead), so those cases assert the resulting log
+# line's shape rather than the exact bytes.
 #
 # Lint directives, each against a stated guarantee rather than an assumption:
 #   SC2015 - the `cond && ok || no` form cannot mis-fire, because lib.sh's
@@ -285,5 +286,44 @@ run_check
 [ "$_rc" -eq 0 ] && [ ! -s "$LOG" ] \
   && ok "IgnoreIfMissing with its value on the next line is silent (newlines are folded)" \
   || no "line-spanning directive" "rc=$_rc, log: $(cat "$LOG")"
+
+# --- 15. an UNCLOSED AdvRASrcAddress block cannot log an unbounded bad= field ------
+# A block whose closing `}` is missing leaves the scanner in-block, so every
+# following directive is tokenized as an address and the whole remainder of the
+# config lands in one bad= field. The cap on the shipped call is what bounds that
+# record, and the marker is what stops a cut list from reading as a complete one.
+setup
+printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvRASrcAddress {\n  MinRtrAdvInterval 30;\n  MaxRtrAdvInterval 100;\n  AdvSendAdvert on;\n  AdvManagedFlag off;\n  AdvOtherConfigFlag off;\n  prefix 2001:db8:1::/64;\n  AdvOnLink on;\n  AdvAutonomous on;\n  AdvValidLifetime 86400;\n  AdvPreferredLifetime 14400;\n  RDNSS 2001:db8:1::53;\n' >"$CONF"
+run_check
+bad=$(sed -n 's/.*bad="\([^"]*\)".*/\1/p' "$LOG")
+payload=${bad%"[truncated]"}
+[ "$_rc" -eq 0 ] && [ "$(wc -l <"$LOG")" -eq 1 ] \
+  && logged 'msg="AdvRASrcAddress is set to a non-link-local address' \
+  && [ "${#payload}" -eq 200 ] && [ "$payload" != "$bad" ] \
+  && ok "an unclosed AdvRASrcAddress block warns once, with bad= capped at 200 and marked truncated" \
+  || no "unclosed block cap" "lines=$(wc -l <"$LOG"), payload=${#payload}, bad='$bad'"
+
+# --- 16. an EMPTY config warns, and the directive scan still runs ------------------
+# Emptiness is a foretold radvd failure (nothing configures an interface), not a
+# reason to skip the scan — both call sites reach this warning, so a config
+# emptied between startup and a HUP reload says so on the reload too.
+setup
+: >"$CONF"
+run_check
+[ "$_rc" -eq 0 ] && logged 'msg="radvd.conf is empty' \
+  && logged 'msg="no enabled IgnoreIfMissing on directive found' \
+  && logged 'msg="no AdvRASrcAddress directive found' \
+  && ok "an empty config warns that radvd will exit, and the HA-directive scan still runs" \
+  || no "empty config warn" "rc=$_rc, log: $(cat "$LOG")"
+
+# The predicate is the snapshot, not the file size: a config of nothing but
+# newlines is non-empty on disk and still configures no interface, so `-s` would
+# stay silent here while radvd exits exactly as the warning says.
+setup
+printf '\n\n\n' >"$CONF"
+run_check
+[ "$_rc" -eq 0 ] && logged 'msg="radvd.conf is empty' \
+  && ok "a newline-only config warns too (the emptiness test reads the snapshot, not the file size)" \
+  || no "newline-only config warn" "rc=$_rc, log: $(cat "$LOG")"
 
 report

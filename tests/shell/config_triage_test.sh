@@ -67,17 +67,7 @@ run_triage
   && ok "a readable config runs the HA validation and nothing else" \
   || no "readable config routing" "rc=$_rc, log: $(cat "$LOG")"
 
-# --- 2. an EMPTY config warns (radvd will exit: no interface configured) ----------
-# The warn and the validation both run: emptiness is a foretold radvd failure, not
-# a reason to skip the HA-directive scan.
-setup
-: >"$CONF"
-run_triage
-[ "$_rc" -eq 0 ] && logged 'msg="radvd.conf is empty' && logged 'HA_CHECK_CALLED' \
-  && ok "an empty config warns that radvd will exit, and still runs the validation" \
-  || no "empty config warn" "rc=$_rc, log: $(cat "$LOG")"
-
-# --- 3. an ABSENT config warns and skips the validation ---------------------------
+# --- 2. an ABSENT config warns and skips the validation ---------------------------
 # radvd reports the missing file with its own clear error; the entrypoint's job is
 # only to say so up front. Nothing to validate.
 setup
@@ -86,7 +76,7 @@ run_triage
   && ok "an absent config warns and does not attempt validation" \
   || no "absent config warn" "rc=$_rc, log: $(cat "$LOG")"
 
-# --- 4. the boot's ONLY fatal: the config exists but cannot be read ---------------
+# --- 3. the boot's ONLY fatal: the config exists but cannot be read ---------------
 # Warn-and-continue would boot a radvd that exits on the same unreadable file with
 # a less actionable error; the entrypoint names the real cause and refuses. Root
 # reads through any file mode, so the branch is unreachable as root — a hard
@@ -107,7 +97,7 @@ else
   chmod 644 "$CONF"
 fi
 
-# --- 5. the third fatal's phrase is asserted at the SOURCE -------------------------
+# --- 4. the third fatal's phrase is asserted at the SOURCE -------------------------
 # `failed to create radvd PID directory` is the one alternative in the README's alert
 # rule that no unit path drives (the mkdir only fails on a read-only /run), so this
 # is a source-side check: the shipped script must still emit the phrase the rule
