@@ -21,6 +21,15 @@
 #   6. validation   an invalid RADVD_DEBUG_LEVEL fails closed — the entrypoint
 #                   exits 1 with a sanitized structured error line before
 #                   radvd ever starts
+#   7. refusal      a non-regular node at /etc/radvd/radvd.conf fails closed:
+#                   radvd cannot open one, so the entrypoint exits 1 rather than
+#                   leaving a healthy-looking container that emits nothing
+#   8. hardened     read_only: true without a /run tmpfs fails closed with the
+#      profile      exact error the README's hardened profile publishes
+#   9. hardened     the README's hardened profile in full (cap_drop ALL plus the
+#      caps         four documented capabilities, read_only, /run tmpfs,
+#                   no-new-privileges) boots AND honors the signal contract under
+#                   it: privileges dropped, HUP reload, graceful stop
 #
 # The container runs with --network none and a config for an interface that
 # does not exist ("IgnoreIfMissing on" keeps radvd alive), so no Router
@@ -41,11 +50,15 @@ IMAGE="${1:-docker-radvd:smoke}"
 C1="radvd-smoke-$$"
 C2="radvd-smoke-kill-$$"
 C3="radvd-smoke-badlevel-$$"
+C4="radvd-smoke-nonfile-$$"
+C5="radvd-smoke-readonly-$$"
+C6="radvd-smoke-hardened-$$"
 TMPDIR_FIXTURE=""
+TMPDIR_NONFILE=""
 
 fail() {
   printf 'SMOKE FAIL: %s\n' "$*" >&2
-  for c in "$C1" "$C2" "$C3"; do
+  for c in "$C1" "$C2" "$C3" "$C4" "$C5" "$C6"; do
     if docker inspect "$c" >/dev/null 2>&1; then
       printf -- '--- %s logs (tail) ---\n' "$c" >&2
       docker logs "$c" 2>&1 | tail -25 >&2 || true
@@ -55,7 +68,8 @@ fail() {
 }
 
 cleanup() {
-  docker rm -f "$C1" "$C2" "$C3" >/dev/null 2>&1 || true
+  docker rm -f "$C1" "$C2" "$C3" "$C4" "$C5" "$C6" >/dev/null 2>&1 || true
+  [ -n "$TMPDIR_NONFILE" ] && rm -rf "$TMPDIR_NONFILE"
   [ -n "$TMPDIR_FIXTURE" ] && rm -rf "$TMPDIR_FIXTURE"
 }
 trap cleanup EXIT
@@ -68,10 +82,19 @@ docker image inspect "$IMAGE" >/dev/null 2>&1 || fail "image $IMAGE not found (d
 TMPDIR_FIXTURE=$(mktemp -d)
 cp tests/radvd.conf "$TMPDIR_FIXTURE/radvd.conf"
 
-# Create + inject config + start; wait until radvd runs inside.
+# Second fixture, for scenario 7: a DIRECTORY where radvd.conf belongs. This is
+# the shape a bind mount produces when the host path does not exist, and it is a
+# node radvd's own open cannot consume.
+TMPDIR_NONFILE=$(mktemp -d)
+mkdir "$TMPDIR_NONFILE/radvd.conf"
+
+# Create + inject config + start; wait until radvd runs inside. Any argument after
+# the name is passed to `docker create` verbatim, which is how scenario 9 boots the
+# same container under the README's hardened profile.
 start_container() {
   local name=$1 ready
-  docker create --name "$name" --network none --cap-add NET_RAW "$IMAGE" >/dev/null
+  shift
+  docker create --name "$name" --network none --cap-add NET_RAW "$@" "$IMAGE" >/dev/null
   docker cp "$TMPDIR_FIXTURE" "$name:/etc/radvd" >/dev/null
   docker start "$name" >/dev/null
   ready=""
@@ -208,17 +231,105 @@ printf '[smoke] PASS  propagation: radvd death exits container with 137\n'
 # --- 6. fail-closed RADVD_DEBUG_LEVEL validation -------------------------------
 printf '[smoke] starting %s (invalid RADVD_DEBUG_LEVEL scenario)\n' "$C3"
 docker create --name "$C3" --network none --cap-add NET_RAW \
-  -e 'RADVD_DEBUG_LEVEL=9"bogus' "$IMAGE" >/dev/null
+  -e "RADVD_DEBUG_LEVEL=$(printf '9"\302\205bogus')" "$IMAGE" >/dev/null
 docker cp "$TMPDIR_FIXTURE" "$C3:/etc/radvd" >/dev/null
 docker start "$C3" >/dev/null
 wait_until_stopped "$C3" "container still running with an invalid RADVD_DEBUG_LEVEL"
 ec=$(docker inspect -f '{{.State.ExitCode}}' "$C3")
 [ "$ec" = "1" ] || fail "invalid RADVD_DEBUG_LEVEL exit code $ec, want 1"
 wait_for_log "$C3" 'msg="invalid RADVD_DEBUG_LEVEL' "missing invalid-RADVD_DEBUG_LEVEL error line"
-wait_for_log "$C3" 'value="9?bogus"' "sanitizer did not neutralize the quote in the echoed value"
+# Both sanitizer stages in one assertion, on the tr that actually ships: the quote
+# maps to ? by the first stage, and U+0085's two bytes each map to a space by the
+# second — which a no-op `tr -c` would leave raw.
+wait_for_log "$C3" 'value="9?  bogus"' "sanitizer did not neutralize the quote and the C1 byte in the echoed value"
 # Absence assertion: single-shot on purpose, and safe here only because the two
 # wait_for_log calls above already proved this container's log is flushed.
 docker logs "$C3" 2>&1 | grep -q 'msg="starting radvd"' && fail "radvd was started despite an invalid RADVD_DEBUG_LEVEL"
 printf '[smoke] PASS  validation: invalid RADVD_DEBUG_LEVEL fails closed (exit 1, sanitized error)\n'
+
+# The README's RadvdConfigError rule is an exact-string contract between the
+# entrypoint's fatal lines and an operator's Loki rule, so the two refusal
+# scenarios below match their output against the rule's own `|~` pattern as the
+# regex Loki will use, pulled from the README beside this script rather than from
+# the copy the test stage puts in the image. Scoped to that one rule, and an empty
+# extraction fails here instead of matching silently.
+# The sed script matches the README's literal `|~ `pattern` [10m]` line, backticks
+# included, so the single quotes are required: nothing here may expand.
+# shellcheck disable=SC2016
+ALERT_RULE=$(sed -n '/alert: RadvdConfigError/,/^        for:/p' README.md \
+  | sed -n 's/^[[:space:]]*|~ `\(.*\)` \[[0-9]\+[a-z]\]$/\1/p')
+[ -n "$ALERT_RULE" ] || fail "could not extract the RadvdConfigError pattern from README.md"
+
+# --- 7. a non-regular node at the config path fails closed ---------------------
+# radvd cannot open a directory or a FIFO either, and its blocked open leaves the
+# shipped `pidof radvd` probe reporting healthy on a container emitting no RAs, so
+# the entrypoint refuses instead of degrading to a warning.
+printf '[smoke] starting %s (a directory where radvd.conf belongs)\n' "$C4"
+docker create --name "$C4" --network none --cap-add NET_RAW "$IMAGE" >/dev/null
+docker cp "$TMPDIR_NONFILE" "$C4:/etc/radvd" >/dev/null
+docker start "$C4" >/dev/null
+wait_until_stopped "$C4" "container still running with a non-regular radvd.conf"
+ec=$(docker inspect -f '{{.State.ExitCode}}' "$C4")
+[ "$ec" = "1" ] || fail "non-regular radvd.conf exit code $ec, want 1"
+wait_for_log "$C4" 'msg="radvd.conf is not a regular file' "missing non-regular-config fatal line"
+docker logs "$C4" 2>&1 | grep -Eq "$ALERT_RULE" \
+  || fail "the non-regular-config fatal does not match the README's RadvdConfigError pattern"
+# Absence assertion: single-shot on purpose, and safe here only because the
+# wait_for_log above already proved this container's log is flushed.
+docker logs "$C4" 2>&1 | grep -q 'msg="starting radvd"' && fail "radvd was started despite a non-regular radvd.conf"
+printf '[smoke] PASS  refusal: a non-regular radvd.conf fails closed (exit 1, alert-matching)\n'
+
+# --- 8. read_only without a /run tmpfs fails closed ---------------------------
+# The README's hardened profile states this exact failure for an operator who
+# takes read_only: true without the tmpfs. Asserted here rather than only as a
+# grep of the shipped script (config_triage_test.sh case 4), because the source
+# check cannot show the path is reachable or that the exit code is 1.
+printf '[smoke] starting %s (read_only, no /run tmpfs)\n' "$C5"
+docker create --name "$C5" --network none --cap-add NET_RAW --read-only "$IMAGE" >/dev/null
+docker cp "$TMPDIR_FIXTURE" "$C5:/etc/radvd" >/dev/null
+docker start "$C5" >/dev/null
+wait_until_stopped "$C5" "container still running with a read-only /run"
+ec=$(docker inspect -f '{{.State.ExitCode}}' "$C5")
+[ "$ec" = "1" ] || fail "read-only /run exit code $ec, want 1"
+wait_for_log "$C5" 'failed to create radvd PID directory' "missing PID-directory fatal line"
+docker logs "$C5" 2>&1 | grep -Eq "$ALERT_RULE" \
+  || fail "the PID-directory fatal does not match the README's RadvdConfigError pattern"
+docker logs "$C5" 2>&1 | grep -q 'msg="starting radvd"' && fail "radvd was started despite a read-only /run"
+printf '[smoke] PASS  hardening: read_only without a /run tmpfs fails closed (exit 1)\n'
+
+# --- 9. the README's hardened profile boots AND keeps the signal contract ------
+# The README publishes this exact set, so it is read from one place here and any
+# capability dropped from it must fail an assertion below. NET_RAW repeats what
+# start_container already grants; Docker takes the union, and keeping the list
+# verbatim is what makes it checkable against the README.
+HARDENED_FLAGS=(--cap-drop ALL --cap-add NET_RAW --cap-add SETUID --cap-add SETGID
+  --cap-add KILL --read-only --tmpfs /run --security-opt no-new-privileges)
+printf '[smoke] starting %s (README hardened profile: cap_drop ALL + the four documented caps)\n' "$C6"
+start_container "$C6" "${HARDENED_FLAGS[@]}"
+# SETUID/SETGID: radvd exits 1 before start_container returns without them, so this
+# names the cause the boot failure alone would not.
+owners=$(docker exec "$C6" ps -o user,comm | awk '$2 ~ /radvd/ { print $1 }' | sort -u)
+grep -qx 'radvd' <<<"$owners" \
+  || fail "hardened profile: no radvd-owned radvd process; observed owners: $(tr '\n' ' ' <<<"$owners")"
+docker logs "$C6" 2>&1 | grep -q 'unable to drop root privileges' \
+  && fail "hardened profile: radvd could not drop privileges (SETUID/SETGID missing from the profile)"
+# KILL, and this reload is the only assertion in the suite that can see it missing:
+# the supervisor's child runs as the unprivileged radvd user, so a root PID 1
+# without CAP_KILL cannot signal it. The HUP kill then fails silently, a second
+# radvd is started beside the live one and dies on the pid-file lock, and the
+# container exits on the propagated failure — none of which a start-only check or
+# the graceful-stop assertion below would notice.
+pid_before=$(docker exec "$C6" pidof radvd) || fail "hardened profile: cannot read radvd pid"
+docker kill -s HUP "$C6" >/dev/null
+pid_after=$(wait_for_reload "$C6" 1 "$pid_before")
+[ -n "$pid_after" ] || fail "hardened profile: HUP did not reload radvd (no reload log, PID unchanged, or the container died)"
+[ "$(docker inspect -f '{{.State.Running}}' "$C6")" = "true" ] || fail "hardened profile: container not running after HUP reload"
+docker logs "$C6" 2>&1 | grep -q 'unable to lock pid file' \
+  && fail "hardened profile: a second radvd raced the live one (the HUP kill never landed)"
+docker stop "$C6" >/dev/null
+ec=$(docker inspect -f '{{.State.ExitCode}}' "$C6")
+[ "$ec" = "0" ] || fail "hardened profile: docker stop exit code $ec, want 0"
+wait_for_log "$C6" 'radvd stopped on shutdown signal' "hardened profile: missing graceful shutdown log line"
+printf '[smoke] PASS  hardened caps: the published profile boots, drops privileges, reloads on HUP (pid %s -> %s) and stops gracefully\n' "$pid_before" "$pid_after"
 
 printf '[smoke] OK — all signal-contract assertions passed for %s\n' "$IMAGE"

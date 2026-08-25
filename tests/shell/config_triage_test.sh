@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The startup config triage: the inline if/elif/else that decides between "run the
-# HA validation", "warn and let radvd report it", and the boot's ONLY fatal
+# HA validation", "warn and let radvd report it", and one of the boot's fatal exits
 # (readable check failed on an existing file).
 #
 # This is inline boot code, not a function, so it comes out via extract_range and
@@ -76,7 +76,7 @@ run_triage
   && ok "an absent config warns and does not attempt validation" \
   || no "absent config warn" "rc=$_rc, log: $(cat "$LOG")"
 
-# --- 3. the boot's ONLY fatal: the config exists but cannot be read ---------------
+# --- 3. the triage's fatal: the config exists but cannot be read ---------------
 # Warn-and-continue would boot a radvd that exits on the same unreadable file with
 # a less actionable error; the entrypoint names the real cause and refuses. Root
 # reads through any file mode, so the branch is unreachable as root — a hard
@@ -97,7 +97,7 @@ else
   chmod 644 "$CONF"
 fi
 
-# --- 4. the third fatal's phrase is asserted at the SOURCE -------------------------
+# --- 4. the PID-directory fatal's phrase is asserted at the SOURCE -----------------
 # `failed to create radvd PID directory` is the one alternative in the README's alert
 # rule that no unit path drives (the mkdir only fails on a read-only /run), so this
 # is a source-side check: the shipped script must still emit the phrase the rule

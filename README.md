@@ -149,9 +149,30 @@ service in the [Quick start](#quick-start) example:
       - ALL
     cap_add:
       - NET_RAW
+      - SETUID
+      - SETGID
+      - KILL
     security_opt:
       - no-new-privileges:true
 ```
+
+All four capabilities are already in Docker's default set, so this profile grants
+nothing the [Quick start](#quick-start) example does not have; `cap_drop: ALL` is
+what makes listing them necessary. None of the four can be dropped further:
+
+- `NET_RAW` opens the raw ICMPv6 socket radvd sends Router Advertisements on.
+  Without it radvd exits at startup with
+  `open_icmpv6_socket: Operation not permitted`.
+- `SETUID` and `SETGID` let the entrypoint drop radvd to the non-root `radvd`
+  user. Without them `drop_root_privileges` returns -1 and radvd exits 1 with no
+  warn-and-continue arm, which the Quick start's `restart: unless-stopped` turns
+  into a crash loop.
+- `KILL` lets the root supervisor signal its own non-root child. Without it both
+  documented signal paths fail silently: `docker stop` leaves radvd running while
+  PID 1 exits 0, so the final zero-lifetime Router Advertisement is never sent and
+  LAN hosts keep this node as their default router until the advertised lifetime
+  expires; and `docker kill -s HUP` starts a second radvd that dies on the
+  pid-file lock.
 
 ### Networking
 
@@ -188,7 +209,7 @@ groups:
         expr: |
           sum by (hostname) (count_over_time(
             {container="radvd"}
-            |~ `exiting, failed to read config file|exiting, permissions on conf_file invalid|does not exist or is not set up properly \(setup_iface=|invalid RADVD_DEBUG_LEVEL|radvd.conf exists but is not readable|failed to create radvd PID directory` [10m]
+            |~ `exiting, failed to read config file|exiting, permissions on conf_file invalid|does not exist or is not set up properly \(setup_iface=|unable to drop root privileges|invalid RADVD_DEBUG_LEVEL|radvd.conf exists but is not readable|radvd.conf is not a regular file|failed to create radvd PID directory` [10m]
           )) > 0
         for: 0m
         labels:
@@ -203,9 +224,14 @@ groups:
             startup or introduced by a later edit and reload, since a reload
             restarts radvd and re-validates the config. Check your radvd.conf.
             The pattern also matches the entrypoint's own fatal startup errors
-            (an invalid RADVD_DEBUG_LEVEL, an unreadable radvd.conf, a failed
-            /run/radvd creation), which crash-loop the container the same way
-            before radvd ever starts.
+            (an invalid RADVD_DEBUG_LEVEL, an unreadable radvd.conf, a
+            radvd.conf that is not a regular file, a failed /run/radvd
+            creation), which crash-loop the container the same way before radvd
+            ever starts. One alternative is not a config fault at all: radvd's
+            `unable to drop root privileges` means the container was started
+            without the SETUID and SETGID capabilities, so the entrypoint's
+            `-u radvd` cannot take effect (see the hardened profile above). It
+            crash-loops identically.
 ```
 
 Every pattern above is a string radvd 2.21 or the entrypoint actually emits,

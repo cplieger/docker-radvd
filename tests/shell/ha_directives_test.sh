@@ -2,10 +2,11 @@
 # check_ha_directives(): the validator behind the HA warnings, and the bulk of
 # entrypoint.sh.
 #
-# Everything here is warn-only by design (a single-node operator legitimately
-# deploys without HA), so what a test pins is WHICH warning fires for which config
-# shape — and, just as load-bearing, which shapes stay SILENT. A false warning
-# against a valid config is how a real one gets ignored.
+# The HA directive checks are warn-only by design (a single-node operator legitimately
+# deploys without HA); the one refusal here is a config node radvd itself cannot open.
+# So what a test pins is WHICH line fires for which config shape — and, just as
+# load-bearing, which shapes stay SILENT. A false warning against a valid config is
+# how a real one gets ignored.
 #
 # The function's only input is the CONF global (entrypoint.sh assigns it plainly,
 # never readonly), which is the one file radvd itself is given with -C. Every case
@@ -222,18 +223,23 @@ logged 'msg="no AdvRASrcAddress directive found' \
   && ok "a config without AdvRASrcAddress warns that HA failover will not work" \
   || no "missing AdvRASrcAddress" "log: $(cat "$LOG")"
 
-# --- 12. an unscannable config degrades to ONE warning, and PID 1 must not hang ---
-# A FIFO at radvd.conf: without the regular-file probe the read that follows drains
-# it to an EOF that never comes, wedging boot (and every HUP reload) with no log
-# line. run_check's timeout turns that hang into a failure here.
+# --- 12. a non-regular config node is REFUSED, and PID 1 must not hang -----------
+# A FIFO at radvd.conf: the regular-file probe refuses it before the read that
+# would otherwise drain it to an EOF that never comes, wedging boot (and every HUP
+# reload) with no log line. Refusal rather than a degraded scan because radvd's own
+# open of the same node blocks the same way, leaving a container the healthcheck
+# calls healthy while it emits nothing. run_check's timeout turns a hang into a
+# failure here, and its bash -c gives `exit 1` a process boundary to reach instead
+# of this file.
 setup
 rm -f "$CONF"
 mkfifo "$CONF"
 run_check
-[ "$_rc" -eq 0 ] && logged 'msg="unable to scan mounted radvd config' \
-  && [ "$(warn_count)" -eq 1 ] && ! logged 'no enabled IgnoreIfMissing' \
-  && ok "a FIFO at radvd.conf degrades to one scan warning, without hanging or misdiagnosing" \
-  || no "FIFO degraded" "rc=$_rc, log: $(cat "$LOG")"
+[ "$_rc" -eq 1 ] && logged 'msg="radvd.conf is not a regular file' \
+  && [ "$(wc -l <"$LOG")" -eq 1 ] && [ "$(warn_count)" -eq 0 ] \
+  && ! logged 'no enabled IgnoreIfMissing' \
+  && ok "a FIFO at radvd.conf is refused with exit 1 on one line, without hanging or misdiagnosing" \
+  || no "FIFO refused" "rc=$_rc, log: $(cat "$LOG")"
 
 # The unreadable-file arm of the same guard reaches the READ, not the -f probe —
 # but root reads a chmod-000 file, so the branch cannot be provoked as root and
@@ -246,35 +252,36 @@ else
   chmod 000 "$CONF"
   run_check
   [ "$_rc" -eq 0 ] && logged 'msg="unable to scan mounted radvd config' \
+    && logged 'Permission denied' \
     && ok "an unreadable radvd.conf degrades via the failed read instead of misdiagnosing" \
     || no "unreadable degraded" "rc=$_rc, log: $(cat "$LOG")"
   chmod 644 "$CONF"
 fi
 
-# --- 13. the awk scanner's own clean() reaches hostile data ------------------------
-# The bad= field names operator-supplied address tokens, so clean() is the only
-# thing standing between a config value and the structured log line. A quote inside
-# the address survives tokenization (the splitter cuts on ';' and trims only
-# space/tab), so it reaches bad= as part of the token.
+# --- 13. hostile bytes inside an ADDRESS token reach the boundary sanitizer --------
+# The bad= field names operator-supplied address tokens, so the sanitize_log_value
+# call on the shipped path is the only thing standing between a config value and the
+# structured log line. A quote inside the address survives tokenization (the splitter
+# cuts on ';' and trims only space/tab), so it reaches bad= as part of the token.
 setup
 printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvRASrcAddress { fd00::"78; };\n};\n' >"$CONF"
 run_check
 [ "$_rc" -eq 0 ] && logged 'msg="AdvRASrcAddress is set to a non-link-local address' \
   && [ "$(wc -l <"$LOG")" -eq 1 ] && ! grep -Fq 'fd00::"78' "$LOG" \
   && grep -q 'fd00::?78' "$LOG" \
-  && ok "the awk scanner neutralizes a quote inside the ADDRESS token it names in bad=" \
-  || no "awk clean() on the address token" "lines=$(wc -l <"$LOG"), log: $(cat "$LOG")"
+  && ok "a quote inside the ADDRESS token named in bad= is neutralized" \
+  || no "quote in the address token" "lines=$(wc -l <"$LOG"), log: $(cat "$LOG")"
 
-# The control-character arm of the SAME clean(), which the quote mapping cannot
-# cover: a control byte inside the address token. The one-line oracle is what the
-# cntrl substitution holds together.
+# The control-byte arm of the same sanitizer, which the quote mapping cannot cover:
+# a control byte inside the address token. The one-line oracle is what the
+# \040-\176 substitution holds together.
 setup
 printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvRASrcAddress { fd00::\017 78; };\n};\n' >"$CONF"
 run_check
 [ "$_rc" -eq 0 ] && logged 'msg="AdvRASrcAddress is set to a non-link-local address' \
   && [ "$(wc -l <"$LOG")" -eq 1 ] && ! grep -q 'fd00::'"$(printf '\017')" "$LOG" \
   && ok "a control byte inside the address token is neutralized and the warning stays one line" \
-  || no "awk clean() control-character arm" "lines=$(wc -l <"$LOG"), log: $(cat "$LOG")"
+  || no "control byte in the address token" "lines=$(wc -l <"$LOG"), log: $(cat "$LOG")"
 
 # --- 14. a directive SPLIT across lines is still seen ------------------------------
 # radvd's lexer discards newlines, so `IgnoreIfMissing` with its value `on;` on the
@@ -303,27 +310,41 @@ payload=${bad%"[truncated]"}
   && ok "an unclosed AdvRASrcAddress block warns once, with bad= capped at 200 and marked truncated" \
   || no "unclosed block cap" "lines=$(wc -l <"$LOG"), payload=${#payload}, bad='$bad'"
 
-# --- 16. an EMPTY config warns, and the directive scan still runs ------------------
-# Emptiness is a foretold radvd failure (nothing configures an interface), not a
-# reason to skip the scan — both call sites reach this warning, so a config
-# emptied between startup and a HUP reload says so on the reload too.
+# --- 16. a config defining NO INTERFACE warns, and the directive scan still runs ---
+# A config defining no interface is a foretold radvd failure (its grammar requires
+# at least one interface block), not a reason to skip the scan — both call sites
+# reach this warning, so a config emptied between startup and a HUP reload says so
+# on the reload too.
 setup
 : >"$CONF"
 run_check
-[ "$_rc" -eq 0 ] && logged 'msg="radvd.conf is empty' \
+[ "$_rc" -eq 0 ] && logged 'msg="radvd.conf defines no interface' \
   && logged 'msg="no enabled IgnoreIfMissing on directive found' \
   && logged 'msg="no AdvRASrcAddress directive found' \
   && ok "an empty config warns that radvd will exit, and the HA-directive scan still runs" \
   || no "empty config warn" "rc=$_rc, log: $(cat "$LOG")"
 
-# The predicate is the snapshot, not the file size: a config of nothing but
-# newlines is non-empty on disk and still configures no interface, so `-s` would
-# stay silent here while radvd exits exactly as the warning says.
+# radvd's grammar requires at least one interface definition, so every spelling
+# of "configures nothing" warns - not just a zero-byte file.
 setup
 printf '\n\n\n' >"$CONF"
 run_check
-[ "$_rc" -eq 0 ] && logged 'msg="radvd.conf is empty' \
-  && ok "a newline-only config warns too (the emptiness test reads the snapshot, not the file size)" \
+[ "$_rc" -eq 0 ] && logged 'msg="radvd.conf defines no interface' \
+  && ok "a newline-only config warns too (radvd's grammar requires an interface definition, whatever the file size)" \
   || no "newline-only config warn" "rc=$_rc, log: $(cat "$LOG")"
+
+setup
+printf '# interface eth0 { AdvSendAdvert on; };\n' >"$CONF"
+run_check
+[ "$_rc" -eq 0 ] && logged 'msg="radvd.conf defines no interface' \
+  && ok "a fully commented-out config warns (comments define no interface)" \
+  || no "comment-only config warn" "rc=$_rc, log: $(cat "$LOG")"
+
+setup
+printf 'AdvSendAdvert on;\n' >"$CONF"
+run_check
+[ "$_rc" -eq 0 ] && logged 'msg="radvd.conf defines no interface' \
+  && ok "top-level directives with no interface block warn (radvd's grammar rejects it)" \
+  || no "top-level-only config warn" "rc=$_rc, log: $(cat "$LOG")"
 
 report

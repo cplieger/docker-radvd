@@ -90,6 +90,23 @@ contract.
   loop.
 - **Logs are structured `key=value` to stderr.** Match the existing
   `level=... msg="..."` shape so `docker logs` output stays greppable.
+- **A new fatal owes the README's alert rule an alternative.** Every
+  `level=error` line the entrypoint exits non-zero on is an alternative of the
+  `RadvdConfigError` pattern in README.md "Alerting" — that rule is the only
+  signal an operator gets that the container is crash-looping before radvd
+  starts. Adding a fatal means adding its message text to that pattern _and_
+  one assertion that matches the emitted line against the rule extracted from
+  the README rather than against a hand-copied string, so a reword on either
+  side fails a test instead of silently switching the alert off. Copy an
+  existing extraction: `tests/shell/config_triage_test.sh`'s `ALERT_RULE` or
+  `tests/shell/debug_level_test.sh`'s (unit, against the captured output of the
+  shipped block), or `scripts/smoke.sh`'s (runtime, against a real container's
+  logs). The counter-rule, so this does not run the other
+  way: do **not** add an alternative for a state an existing alternative already
+  matches on the same crash-loop — that is why the empty-config warning is not
+  in the pattern, and why `radvd exited; propagating exit for restart policy`
+  must never be (it reports any unexpected radvd exit, whatever the cause, so it
+  would fire a config alert for a crash that has nothing to do with the config).
 
 ## Validating locally
 

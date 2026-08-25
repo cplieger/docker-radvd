@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The RADVD_DEBUG_LEVEL gate: the inline default-and-validate block that decides
-# radvd's -d verbosity, and the boot's second fatal.
+# radvd's -d verbosity, and a boot fatal.
 #
 # This is inline boot code, not a function, so it comes out via extract_range and
 # runs in a subshell per case — `exit 1` must reach a process boundary here, not

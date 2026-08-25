@@ -36,11 +36,16 @@ fi
 # fixed by the pinned version and bumped by Renovate, so read both sides: pull the
 # rule's own |~ pattern out of the README and match radvd's actual reply against it
 # as the regex Loki will use. The extraction is the same expression the shell unit
-# tests use on the entrypoint's half of the same contract. Skipped in a plain local
-# run, where the README is not beside the tests.
-RULE_SRC=/tmp/README.md
-if [ -r "$RULE_SRC" ]; then
-  # The sed script matches the README's literal `|~ `pattern` [5m]` line, backticks
+# tests use on the entrypoint's half of the same contract. One repository-relative
+# path finds the README in both places this script runs: the repo root in a
+# checkout, and /tmp in the image, where the test stage copies it one level above
+# tests/.
+RULE_SRC="$d/../README.md"
+# Forced in-image the way sections 3 and 4 are: a plain local run may skip this,
+# the Dockerfile test stage may not — silently losing the drift gate is worse than
+# a red build.
+if [ -r "$RULE_SRC" ] || [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
+  # The sed script matches the README's literal `|~ `pattern` [10m]` line, backticks
   # included, so the single quotes are required: nothing here may expand.
   # shellcheck disable=SC2016
   rule=$(sed -n '/alert: RadvdConfigError/,/^        for:/p' "$RULE_SRC" \

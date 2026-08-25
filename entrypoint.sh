@@ -35,19 +35,15 @@ on_term() {
 trap on_hup HUP
 trap on_term TERM INT
 
-# Sanitize a value for interpolation into a structured key=value log line: map
-# `"` and `\` to '?' (the awk clean() convention in check_ha_directives), then
-# every byte outside printable ASCII to a space under LC_ALL=C, then cap at $2
-# chars, appending [truncated] so a cut value cannot be read as a complete one.
-# Both stages replace 1:1 rather than delete: deletion shifts offsets and can
-# splice two fragments into one token of the bad= list. The explicit \040-\176
-# range stands in for [:print:], which BusyBox tr (v1.37.0) does not implement,
-# and LC_ALL=C makes what it covers a property of the code and not of the
-# container's locale — closing the C1 (U+0080-U+009F), Bidi_Control and
-# U+2028/U+2029 classes a [:cntrl:] pass cannot see, at the cost of flattening
-# legitimate non-ASCII too (both callers' values are ASCII by domain). Every
-# surviving byte is then single-byte printable ASCII, so the cap cannot split a
-# rune.
+# Both tr stages replace 1:1 rather than delete: deletion shifts offsets and
+# can splice two fragments into one token of the bad= list. The explicit
+# \040-\176 range stands in for [:print:], which BusyBox tr (v1.37.0) does
+# not implement, and LC_ALL=C makes what it covers a property of the code and
+# not of the container's locale — closing the C1 (U+0080-U+009F),
+# Bidi_Control and U+2028/U+2029 classes a [:cntrl:] pass cannot see, at the
+# cost of flattening legitimate non-ASCII too. Every surviving byte is then
+# single-byte printable ASCII, so the cap cannot split a rune, and
+# [truncated] marks a cut value so it cannot be read as a complete one.
 sanitize_log_value() {
   # shellcheck disable=SC1003 # not an escape attempt: tr maps `"` and `\` to literal `?` (verified on BusyBox v1.37.0)
   _clean=$(printf '%s' "$1" | tr '"\\' '??' | LC_ALL=C tr -c '\040-\176' ' ')
@@ -72,57 +68,55 @@ case "$RADVD_DEBUG_LEVEL" in
     ;;
 esac
 
-# Sanity-check the HA directives: radvd starts happily without them, and both
-# MASTER and BACKUP then emit RAs, wrecking SLAAC default-route selection on
-# downstream clients. Warn-only on every call — a single-node operator
-# legitimately deploys without HA, and the SIGHUP branch re-emits these warnings
-# for a config edited since startup. The gates strip comments, fold newlines to
-# spaces (radvd's lexer discards them) and require a statement boundary before
-# the directive name, matching radvd's whitespace-insensitive caseless grammar.
-# The accepted spellings and the reason for each: CONTRIBUTING.md, "Design
-# boundaries (please preserve)".
+# Warn-only on every call — a single-node operator legitimately deploys without
+# HA, and the SIGHUP branch re-emits these warnings for a config edited since
+# startup. Why HA needs these directives, and the accepted spellings with the
+# reason for each: CONTRIBUTING.md, "Design boundaries (please preserve)".
 check_ha_directives() {
   # The regular-file probe must precede the read: a FIFO or device node never
   # reaches EOF, so reading one to snapshot it would hang PID 1 at startup or on
-  # a HUP reload instead of degrading to the warning below. One read for the
-  # whole scan, so the gates and the block scanner cannot see different bytes of
-  # a config edited between them.
+  # a HUP reload. It refuses rather than skipping the read, because radvd's own
+  # fopen of the same path cannot consume a non-regular node either: a FIFO with
+  # no writer leaves radvd blocked inside open(2), emitting no RAs while `pidof
+  # radvd` keeps the healthcheck green. One read for the whole scan, so the gates
+  # and the block scanner cannot see different bytes of a config edited between
+  # them.
   warn_scan_degraded() {
     scan_err=$(sanitize_log_value "$1" 200)
     printf 'level=warn msg="unable to scan mounted radvd config; HA-directive validation is incomplete" err="%s" path="%s"\n' "$scan_err" "$CONF" >&2
   }
-  if ! [ -f "$CONF" ]; then
-    warn_scan_degraded "not a regular config file: $CONF"
-    return 0
+  if [ -e "$CONF" ] && ! [ -f "$CONF" ]; then
+    printf 'level=error msg="radvd.conf is not a regular file" path="%s"\n' "$CONF" >&2
+    exit 1
   fi
-  if ! conf_snapshot=$(cat "$CONF" 2>&1); then
-    warn_scan_degraded "$conf_snapshot"
+  if ! conf_snapshot=$(cat "$CONF" 2>/dev/null); then
+    # Content and cause must not share a stream: cat writes its output before
+    # its error, so a merged read puts config bytes in the field that names
+    # the cause. The re-read runs only here, after the scan is abandoned, so
+    # no gate sees two versions of the file — and it can SUCCEED, because a
+    # short read that completes on retry emits no diagnostic at all, so the
+    # field falls back to a phrase rather than shipping an empty cause.
+    scan_cause=$(cat "$CONF" 2>&1 >/dev/null)
+    warn_scan_degraded "${scan_cause:-re-read of the config succeeded; the first read failed without a diagnostic}"
     return 0
-  fi
-  # The snapshot rather than [ -s "$CONF" ]: a config of nothing but newlines is
-  # non-empty on disk and still configures no interface, and a second stat would
-  # break the one-read invariant above.
-  if [ -z "$conf_snapshot" ]; then
-    printf 'level=warn msg="radvd.conf is empty; radvd will exit because no interface is configured" path="%s"\n' "$CONF" >&2
   fi
   has_directive() {
     printf '%s\n' "$conf_snapshot" | sed 's/#.*//' | tr '\n' ' ' | grep -Eqi "$1"
   }
+  # radvd's grammar has no empty production (v2.21 gram.y, `grammar : grammar
+  # ifacedef | ifacedef`), so a config with no interface definition fails
+  # yyparse and radvd exits with `exiting, failed to read config file`. Gated
+  # on the keyword rather than on emptiness: whitespace, comments and
+  # top-level-only directives are all non-empty on disk and configure nothing.
+  has_directive '(^|[;{}])[[:space:]]*interface[[:space:]]' \
+    || printf 'level=warn msg="radvd.conf defines no interface; radvd will exit because at least one interface block is required" path="%s"\n' "$CONF" >&2
   has_directive '(^|[;{}])[[:space:]]*IgnoreIfMissing[[:space:]]+on([[:space:]]|;|$)' \
     || printf 'level=warn msg="no enabled IgnoreIfMissing on directive found in mounted radvd config" path="%s"\n' "$CONF" >&2
-  # Every address AdvRASrcAddress lists must be link-local: RFC 4861 section
-  # 6.1.2 requires an RA's source to be link-local (fe80::/10), and hosts
-  # silently discard an RA sourced from a global or ULA address — so radvd emits,
-  # tcpdump shows the RAs, and no host autoconfigures. Warn-only, and the scan
-  # walks every block rather than stopping at the first link-local address, so a
-  # correct block cannot mask a sibling holding the global-VIP mistake.
+  # Warn-only, and the scan walks every block rather than stopping at the first
+  # link-local address, so a correct block cannot mask a sibling holding the
+  # global-VIP mistake. The rule itself is in the warning this branch prints.
   if has_directive '(^|[;{}])[[:space:]]*AdvRASrcAddress([[:space:]]|\{|$)'; then
     bad_src=$(printf '%s\n' "$conf_snapshot" | awk '
-      function clean(s) {
-        gsub(/["\\]/, "?", s)
-        gsub(/[[:cntrl:]]/, "?", s)
-        return s
-      }
       # Strip CR so the trailing \r of a CRLF config is not parsed as an
       # address token (the sed|grep gates already tolerate CRLF via
       # [[:space:]]).
@@ -153,7 +147,7 @@ check_ha_directives() {
             tok = addrs[i]
             sub(/^[ \t]+/, "", tok)
             sub(/[ \t]+$/, "", tok)
-            if (tok != "" && tok !~ /^fe[89ab][0-9a-f]:/) { bad = bad (bad ? ", " : "") clean(tok) }
+            if (tok != "" && tok !~ /^fe[89ab][0-9a-f]:/) { bad = bad (bad ? ", " : "") tok }
           }
           if (!closed) { break }
           inblock = 0

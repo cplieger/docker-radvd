@@ -22,16 +22,20 @@ RUN apk add --no-cache bison build-base flex linux-headers pkgconf
 ARG RADVD_VERSION
 ARG RADVD_SHA256
 WORKDIR /build/radvd
-# Fetch the upstream dist tarball — the release ASSET, not the auto-generated tag archive; that is what makes a SHA pin stable.
-# --with-pidfile keeps radvd writing its PID to /run/radvd/radvd.pid, matching the directory entrypoint.sh creates —
-# a coupling neither file can state in code.
-# `make gram.h` first works around a parallel-build race.
-# radvdump ships as upstream's own RA decoder, which the README's HA and Healthcheck sections tell the operator to run.
-RUN wget -q --tries=3 --timeout=30 \
-      "https://github.com/radvd-project/radvd/releases/download/${RADVD_VERSION}/radvd-${RADVD_VERSION#v}.tar.gz" \
-    && echo "${RADVD_SHA256}  radvd-${RADVD_VERSION#v}.tar.gz" | sha256sum -c - \
-    && tar xzf "radvd-${RADVD_VERSION#v}.tar.gz" --strip-components=1 --no-same-owner \
-    && rm "radvd-${RADVD_VERSION#v}.tar.gz" \
+# Fetch the release ASSET, not the auto-generated tag archive; that is what makes a SHA pin stable. The CycloneDX
+# fragment is emitted from this same RUN so the URL is spelled once: the bytes fetched, the digest verified and the
+# published download_url cannot drift apart. Syft inventories the final image from Alpine's APK database only, so the
+# source-built payload would otherwise be invisible to the signed release SBOM and to scanners. CPE: the NVD dictionary
+# carries exactly one vendor:product for radvd — radvd.litech:radvd; the sometimes-guessed
+# litech:router_advertisement_daemon has no dictionary entry at all. --with-pidfile keeps radvd writing its PID to
+# /run/radvd/radvd.pid, matching the directory entrypoint.sh creates — a coupling neither file can state in code.
+# `make gram.h` first works around a parallel-build race. radvdump ships as upstream's own RA decoder, which the README's HA and Healthcheck sections tell the operator to run.
+RUN url="https://github.com/radvd-project/radvd/releases/download/${RADVD_VERSION}/radvd-${RADVD_VERSION#v}.tar.gz" \
+    && tarball="${url##*/}" \
+    && wget -q --tries=3 --timeout=30 "$url" \
+    && echo "${RADVD_SHA256}  ${tarball}" | sha256sum -c - \
+    && tar xzf "$tarball" --strip-components=1 --no-same-owner \
+    && rm "$tarball" \
     && ./configure \
         --prefix=/usr \
         --sysconfdir=/etc/ \
@@ -40,24 +44,19 @@ RUN wget -q --tries=3 --timeout=30 \
     && make -j"$(nproc)" \
     && strip radvd radvdump \
     && install -D -m 755 radvd /out/usr/sbin/radvd \
-    && install -D -m 755 radvdump /out/usr/sbin/radvdump
-
-# Syft inventories the final image from Alpine's APK database only, so the
-# source-built payload is invisible to the signed release SBOM and to scanners.
-# CPE: the NVD dictionary carries exactly one vendor:product for radvd — radvd.litech:radvd;
-# the sometimes-guessed litech:router_advertisement_daemon has no dictionary entry at all.
-RUN cat > /out/radvd.cdx.json <<EOF
+    && install -D -m 755 radvdump /out/usr/sbin/radvdump \
+    && cat > /out/radvd.cdx.json <<EOF
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
   "version": 1,
   "components": [
     {
-      "bom-ref": "pkg:github/radvd-project/radvd@${RADVD_VERSION}",
+      "bom-ref": "pkg:generic/radvd@${RADVD_VERSION#v}",
       "type": "application",
       "name": "radvd",
       "version": "${RADVD_VERSION#v}",
-      "purl": "pkg:github/radvd-project/radvd@${RADVD_VERSION}",
+      "purl": "pkg:generic/radvd@${RADVD_VERSION#v}?download_url=${url}&checksum=sha256:${RADVD_SHA256}",
       "cpe": "cpe:2.3:a:radvd.litech:radvd:${RADVD_VERSION#v}:*:*:*:*:*:*:*"
     }
   ]
@@ -73,16 +72,16 @@ RUN echo "OS package refresh: ${PKG_REFRESH}" && apk upgrade --no-cache
 RUN addgroup -S radvd && adduser -S -D -H -G radvd radvd
 
 COPY --from=builder /out/usr/sbin/ /usr/sbin/
-# /usr/share/sbom is where the release pipeline's Syft cataloger looks, and this COPY is what decides the path.
+# The release pipeline's Syft cataloger discovers the fragment by its .cdx.json suffix, not by this path; /usr/share/sbom is a fleet-wide convention, not a requirement.
 COPY --from=builder /out/radvd.cdx.json /usr/share/sbom/radvd.cdx.json
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 
 FROM base AS test
 ARG RADVD_VERSION
 COPY tests/smoke.sh tests/radvd.conf tests/radvd.bad.conf /tmp/tests/
-# The smoke test reads the README's own alert-rule pattern and matches radvd's
-# config-rejection output against it, so the published rule and the pinned
-# upstream strings cannot drift apart unnoticed.
+# The smoke test matches radvd's malformed-config rejection against the README's
+# own alert-rule pattern, so that one fatal path keeps matching at least one
+# alternative in the published rule; the rule's other alternatives are unpinned.
 COPY README.md /tmp/README.md
 # ${RADVD_VERSION:?} fails the build if the ARG wiring breaks, so the in-image version assertion cannot be silently skipped.
 RUN RADVD_EXPECTED_VERSION="${RADVD_VERSION:?}" sh /tmp/tests/smoke.sh && touch /tests-passed
