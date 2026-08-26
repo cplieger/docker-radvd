@@ -131,7 +131,7 @@ only controls how much radvd logs.
 | Capability | Why needed |
 | --- | --- |
 | `NET_RAW` | **Required.** Opens the raw ICMPv6 socket used to send Router Advertisements. Without it radvd exits at startup (`open_icmpv6_socket: Operation not permitted`). |
-| `NET_ADMIN` | Not needed for Router-Advertisement emission, and inert in a default container: Docker mounts `/proc/sys` read-only in every unprivileged container, so the writes radvd makes for kernel-applied interface-parameter directives (`AdvLinkMTU`, `AdvCurHopLimit`, `AdvReachableTime`, `AdvRetransTimer`) to `/proc/sys/net/ipv6/{conf,neigh}/*` fail whether the capability is granted or not. It becomes meaningful only if you make `/proc/sys` writable yourself (`read_only: true` is a different thing — it governs the container's own rootfs). **For pure SLAAC Router-Advertisement emission, keep only `NET_RAW`.** |
+| `NET_ADMIN` | Not needed for Router-Advertisement emission, and inert in a default container: Docker mounts `/proc/sys` read-only in every unprivileged container, so the writes radvd makes for kernel-applied interface-parameter directives (`AdvLinkMTU`, `AdvCurHopLimit`, `AdvReachableTime`, `AdvRetransTimer`) to `/proc/sys/net/ipv6/{conf,neigh}/*` fail whether the capability is granted or not. It becomes meaningful only if you make `/proc/sys` writable yourself (`read_only: true` is a different thing — it governs the container's own rootfs). **No capability beyond `NET_RAW` is needed for Router-Advertisement emission.** Under `cap_drop: ALL` see the hardened profile below, which lists the three further capabilities the privilege drop and the supervisor's signalling require. |
 
 #### Hardened profile
 
@@ -168,11 +168,12 @@ what makes listing them necessary. None of the four can be dropped further:
   warn-and-continue arm, which the Quick start's `restart: unless-stopped` turns
   into a crash loop.
 - `KILL` lets the root supervisor signal its own non-root child. Without it both
-  documented signal paths fail silently: `docker stop` leaves radvd running while
-  PID 1 exits 0, so the final zero-lifetime Router Advertisement is never sent and
-  LAN hosts keep this node as their default router until the advertised lifetime
-  expires; and `docker kill -s HUP` starts a second radvd that dies on the
-  pid-file lock.
+  documented signal paths fail, and the entrypoint can only report the refusal:
+  `docker stop` leaves radvd running while PID 1 exits 0 (with a
+  `a graceful stop cannot be confirmed` warning), so the final zero-lifetime
+  Router Advertisement is never sent and LAN hosts keep this node as their
+  default router until the advertised lifetime expires; and
+  `docker kill -s HUP` starts a second radvd that dies on the pid-file lock.
 
 ### Networking
 
@@ -226,8 +227,10 @@ groups:
             The pattern also matches the entrypoint's own fatal startup errors
             (an invalid RADVD_DEBUG_LEVEL, an unreadable radvd.conf, a
             radvd.conf that is not a regular file, a failed /run/radvd
-            creation), which crash-loop the container the same way before radvd
-            ever starts. One alternative is not a config fault at all: radvd's
+            creation), which crash-loop the container the same way — before
+            radvd ever starts, or, for a radvd.conf that is not a regular file,
+            on a later reload after radvd has been stopped. One alternative is
+            not a config fault at all: radvd's
             `unable to drop root privileges` means the container was started
             without the SETUID and SETGID capabilities, so the entrypoint's
             `-u radvd` cannot take effect (see the hardened profile above). It
@@ -237,8 +240,10 @@ groups:
 Every pattern above is a string radvd 2.21 or the entrypoint actually emits,
 checked against upstream's `radvd.c`. Note that `properly \(setup_iface=` is
 anchored on the opening parenthesis so it matches only the fatal form; the
-`ignoring the interface (setup_iface=` warning that radvd logs when
-`IgnoreIfMissing on` is set is a normal HA-backup state, not an alert.
+`ignoring the interface (setup_iface=` form radvd emits when
+`IgnoreIfMissing on` is set is a normal HA-backup state, not an alert — and
+radvd logs it at debug level 4, so at the default `RADVD_DEBUG_LEVEL=0` it does
+not appear in `docker logs` at all.
 
 Thresholds and the `severity` label are starting points. The `container`
 selector and the `hostname` grouping label depend on your log collector:

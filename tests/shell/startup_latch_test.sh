@@ -1,38 +1,18 @@
 #!/usr/bin/env bash
 # The signal path's two unit-testable pieces: start_radvd()'s pre-pid latch, and
-# on_hup()'s refusal to reload during a shutdown.
-#
-# The entrypoint arms its HUP/TERM traps before the config validation so a signal
-# landing in that window is not lost — but the handlers can only kill a child that
-# exists, so they LATCH the flag and start_radvd delivers it to the freshly
-# assigned pid. Remove that latch and `docker stop` during startup waits out its
-# full timeout and SIGKILLs, and an early HUP is swallowed with no reload. No
-# container test hits the validation window deterministically; this one sets the
-# flags directly.
-#
-# THE ORACLE IS THE DELIVERY, NOT THE DEATH, and that is a correctness point rather
-# than a convenience. Asserting "the child is gone" infers delivery from an outcome
-# that a race can supply or withhold: `radvd` is stubbed as a shell function, so
-# `radvd ... &` forks a bash that must still `exec`, and while ANY EXIT trap is set
-# (this harness sets one) that pre-exec bash installs terminating-signal handlers.
-# It CONSUMES the latch TERM into a deferred flag, and when the exec wins the race
-# the flag dies with the bash image — the sleep starts with no pending signal and
-# outlives the poll window. Measured before this rewrite: ~1 false failure per 15
-# runs of this file. The contract is "the latched signal is delivered to the fresh
-# pid", so the test records the delivery and forwards it, which no scheduling order
-# can perturb.
-#
-# The recording stub is not a tautology: it FORWARDS to the real kill, and the
-# control case below requires that NO signal was recorded. With the latch removed,
-# nothing is recorded and both latch cases fail.
+# on_hup()'s refusal to reload during a shutdown. The traps arm before the config
+# validation, so a signal landing in that window is LATCHED and delivered to the
+# freshly assigned pid; without that, `docker stop` during startup waits out its
+# timeout and SIGKILLs while an early HUP is swallowed. THE ORACLE IS THE
+# DELIVERY, NOT THE DEATH — the stubbed radvd's pre-exec bash can consume the
+# latch TERM, so asserting "the child is gone" races (~1 false failure in 15 runs
+# before this rewrite); the recording stub forwards to the real kill, and case 1
+# requires an empty record, so neither latch case is a tautology.
 #
 # Lint directives, each against a stated guarantee rather than an assumption:
-#   SC2015 - the `cond && ok || no` form cannot mis-fire, because lib.sh's
-#     ok/no/skip return 0 unconditionally by design (see their comments).
-#   SC2034 - CONF/reload/shutdown are the INPUTS the extracted function reads at
-#     runtime; shellcheck cannot see those reads.
-#   SC2329 - the kill stub is invoked INDIRECTLY, by the extracted function it
-#     shadows, which shellcheck cannot see.
+#   SC2015 - `cond && ok || no` cannot mis-fire: lib.sh's ok/no/skip return 0.
+#   SC2034 - CONF/reload/shutdown are INPUTS the extracted functions read.
+#   SC2329 - the kill stub is invoked indirectly, by the function it shadows.
 # shellcheck disable=SC2015,SC2034,SC2329
 set -u
 

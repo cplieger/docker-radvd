@@ -1,48 +1,16 @@
 #!/usr/bin/env bash
 # Signal-contract smoke test: proves the assembled image honors the supervising
-# entrypoint's lifecycle contract — the reason the supervisor exists (see the
-# entrypoint.sh header and CONTRIBUTING "Design boundaries"). The build-time
-# tests/smoke.sh covers config parsing; this covers the running container:
+# entrypoint's lifecycle contract against a running container; the section headers
+# below name each scenario. Build-time config parsing is tests/smoke.sh's.
 #
-#   1. startup      radvd comes up under the supervisor, Docker reports the
-#                   shipped HEALTHCHECK healthy, and the daemon has dropped to
-#                   the unprivileged radvd user
-#   2. HUP reload   `docker kill -s HUP` restarts radvd (new PID), re-runs the
-#                   HA-directive validation on the mounted config, and the
-#                   container stays Up
-#   3. hardened     the same reload with /etc/radvd root-only (0700) — the
-#      reload       field failure the supervisor fixed (commit 8e7a792): radvd's
-#                   own unprivileged reread would die here; the supervisor
-#                   re-reads as root, so reload must still work
-#   4. shutdown     `docker stop` (SIGTERM) exits 0 with the graceful log line
-#   5. propagation  an unexpected radvd death (SIGKILL to the daemon) exits the
-#                   container with the propagated code (137) so a restart
-#                   policy would fire
-#   6. validation   an invalid RADVD_DEBUG_LEVEL fails closed — the entrypoint
-#                   exits 1 with a sanitized structured error line before
-#                   radvd ever starts
-#   7. refusal      a non-regular node at /etc/radvd/radvd.conf fails closed:
-#                   radvd cannot open one, so the entrypoint exits 1 rather than
-#                   leaving a healthy-looking container that emits nothing
-#   8. hardened     read_only: true without a /run tmpfs fails closed with the
-#      profile      exact error the README's hardened profile publishes
-#   9. hardened     the README's hardened profile in full (cap_drop ALL plus the
-#      caps         four documented capabilities, read_only, /run tmpfs,
-#                   no-new-privileges) boots AND honors the signal contract under
-#                   it: privileges dropped, HUP reload, graceful stop
-#
-# The container runs with --network none and a config for an interface that
+# Every container runs with --network none and a config naming an interface that
 # does not exist ("IgnoreIfMissing on" keeps radvd alive), so no Router
-# Advertisement is ever emitted onto a real network segment. The config enters
-# via `docker cp` (no bind mount), so the root-only chmod in scenario 3 never
-# touches host permissions.
+# Advertisement is ever emitted. The mutable-permission scenarios receive the
+# fixture by `docker cp`, which keeps scenario 3's root-only chmod off host
+# permissions; the `--read-only` scenarios receive it by a `:ro` bind mount or not
+# at all, because the daemon refuses an extract into a read-only rootfs.
 #
-# Usage:  scripts/smoke.sh [IMAGE]
-#   IMAGE defaults to docker-radvd:smoke. Build it first:
-#     docker build -t docker-radvd:smoke .
-#
-# Requires docker. Exits non-zero on the first failed assertion and always
-# removes the containers it started.
+# Usage:  scripts/smoke.sh [IMAGE]   (default docker-radvd:smoke; build it first)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -90,12 +58,18 @@ mkdir "$TMPDIR_NONFILE/radvd.conf"
 
 # Create + inject config + start; wait until radvd runs inside. Any argument after
 # the name is passed to `docker create` verbatim, which is how scenario 9 boots the
-# same container under the README's hardened profile.
+# same container under the README's hardened profile; NET_RAW comes from the caller
+# so a drop of it from that profile fails an assertion. A caller that mounts the
+# fixture itself (`:/etc/radvd:`, the only delivery a `--read-only` rootfs accepts)
+# is not also sent a `docker cp` copy.
 start_container() {
   local name=$1 ready
   shift
-  docker create --name "$name" --network none --cap-add NET_RAW "$@" "$IMAGE" >/dev/null
-  docker cp "$TMPDIR_FIXTURE" "$name:/etc/radvd" >/dev/null
+  docker create --name "$name" --network none "$@" "$IMAGE" >/dev/null
+  case "$*" in
+    *":/etc/radvd:"*) ;;
+    *) docker cp "$TMPDIR_FIXTURE" "$name:/etc/radvd" >/dev/null ;;
+  esac
   docker start "$name" >/dev/null
   ready=""
   for _ in $(seq 1 15); do
@@ -162,7 +136,7 @@ wait_for_log() {
 
 # --- 1. startup + shipped healthcheck ---------------------------------------
 printf '[smoke] starting %s (network none, fixture config)\n' "$C1"
-start_container "$C1"
+start_container "$C1" --cap-add NET_RAW
 logs=$(docker logs "$C1" 2>&1)
 grep -q 'msg="starting radvd"' <<<"$logs" || fail "missing startup log line"
 # tests/radvd.conf carries IgnoreIfMissing but no AdvRASrcAddress, so startup
@@ -184,6 +158,10 @@ done
 # of a root-owned one. Dropping `-u radvd` from the entrypoint fails this by name.
 owners=$(docker exec "$C1" ps -o user,comm | awk '$2 ~ /radvd/ { print $1 }' | sort -u)
 grep -qx 'radvd' <<<"$owners" || fail "no radvd-owned radvd process; observed owners: $(tr '\n' ' ' <<<"$owners")"
+# The directory entrypoint.sh creates must be the one radvd's compiled-in
+# --with-pidfile writes into; nothing else reads that Dockerfile coupling.
+docker exec "$C1" test -f /run/radvd/radvd.pid \
+  || fail "radvd did not write its pid file to /run/radvd (Dockerfile --with-pidfile vs the entrypoint's mkdir)"
 printf '[smoke] PASS  startup: radvd up, preflight warned, healthcheck healthy, privileges dropped\n'
 
 # --- 2. HUP reload (world-readable config) -----------------------------------
@@ -218,7 +196,7 @@ printf '[smoke] PASS  shutdown: SIGTERM exits 0 with graceful log\n'
 
 # --- 5. unexpected radvd death propagates to the container --------------------
 printf '[smoke] starting %s (exit-propagation scenario)\n' "$C2"
-start_container "$C2"
+start_container "$C2" --cap-add NET_RAW
 # pidof returns both radvd pids (root parent + dropped -u worker); word
 # splitting inside the container shell is deliberate so kill gets each pid.
 docker exec "$C2" sh -c 'kill -KILL $(pidof radvd)'
@@ -261,9 +239,12 @@ ALERT_RULE=$(sed -n '/alert: RadvdConfigError/,/^        for:/p' README.md \
 [ -n "$ALERT_RULE" ] || fail "could not extract the RadvdConfigError pattern from README.md"
 
 # --- 7. a non-regular node at the config path fails closed ---------------------
-# radvd cannot open a directory or a FIFO either, and its blocked open leaves the
-# shipped `pidof radvd` probe reporting healthy on a container emitting no RAs, so
-# the entrypoint refuses instead of degrading to a warning.
+# radvd cannot consume a non-regular node as its configuration file, so the
+# entrypoint refuses instead of degrading to a warning. This case uses a
+# DIRECTORY, whose refusal is deterministic in an assembled image; the
+# FIFO-with-no-writer variant — where radvd's open blocks while `pidof radvd`
+# keeps the healthcheck green — belongs to the bounded shell test
+# (tests/shell/ha_directives_test.sh case 12).
 printf '[smoke] starting %s (a directory where radvd.conf belongs)\n' "$C4"
 docker create --name "$C4" --network none --cap-add NET_RAW "$IMAGE" >/dev/null
 docker cp "$TMPDIR_NONFILE" "$C4:/etc/radvd" >/dev/null
@@ -283,10 +264,11 @@ printf '[smoke] PASS  refusal: a non-regular radvd.conf fails closed (exit 1, al
 # The README's hardened profile states this exact failure for an operator who
 # takes read_only: true without the tmpfs. Asserted here rather than only as a
 # grep of the shipped script (config_triage_test.sh case 4), because the source
-# check cannot show the path is reachable or that the exit code is 1.
+# check cannot show the path is reachable or that the exit code is 1. No fixture:
+# the daemon refuses a `docker cp` into a read-only rootfs, and the absent config
+# only warns, so the boot still reaches the PID-directory fatal.
 printf '[smoke] starting %s (read_only, no /run tmpfs)\n' "$C5"
 docker create --name "$C5" --network none --cap-add NET_RAW --read-only "$IMAGE" >/dev/null
-docker cp "$TMPDIR_FIXTURE" "$C5:/etc/radvd" >/dev/null
 docker start "$C5" >/dev/null
 wait_until_stopped "$C5" "container still running with a read-only /run"
 ec=$(docker inspect -f '{{.State.ExitCode}}' "$C5")
@@ -299,13 +281,15 @@ printf '[smoke] PASS  hardening: read_only without a /run tmpfs fails closed (ex
 
 # --- 9. the README's hardened profile boots AND keeps the signal contract ------
 # The README publishes this exact set, so it is read from one place here and any
-# capability dropped from it must fail an assertion below. NET_RAW repeats what
-# start_container already grants; Docker takes the union, and keeping the list
-# verbatim is what makes it checkable against the README.
+# capability dropped from it must fail an assertion below; start_container grants
+# no capability of its own, so this array is the container's whole set, and
+# keeping the list verbatim is what makes it checkable against the README.
 HARDENED_FLAGS=(--cap-drop ALL --cap-add NET_RAW --cap-add SETUID --cap-add SETGID
-  --cap-add KILL --read-only --tmpfs /run --security-opt no-new-privileges)
+  --cap-add KILL --read-only --tmpfs /run:size=1m --security-opt no-new-privileges)
 printf '[smoke] starting %s (README hardened profile: cap_drop ALL + the four documented caps)\n' "$C6"
-start_container "$C6" "${HARDENED_FLAGS[@]}"
+# The fixture arrives as a `:ro` bind mount, not a `docker cp`: the daemon
+# refuses an extract into a read-only rootfs.
+start_container "$C6" "${HARDENED_FLAGS[@]}" -v "$TMPDIR_FIXTURE:/etc/radvd:ro"
 # SETUID/SETGID: radvd exits 1 before start_container returns without them, so this
 # names the cause the boot failure alone would not.
 owners=$(docker exec "$C6" ps -o user,comm | awk '$2 ~ /radvd/ { print $1 }' | sort -u)
@@ -315,10 +299,10 @@ docker logs "$C6" 2>&1 | grep -q 'unable to drop root privileges' \
   && fail "hardened profile: radvd could not drop privileges (SETUID/SETGID missing from the profile)"
 # KILL, and this reload is the only assertion in the suite that can see it missing:
 # the supervisor's child runs as the unprivileged radvd user, so a root PID 1
-# without CAP_KILL cannot signal it. The HUP kill then fails silently, a second
-# radvd is started beside the live one and dies on the pid-file lock, and the
-# container exits on the propagated failure — none of which a start-only check or
-# the graceful-stop assertion below would notice.
+# without CAP_KILL cannot signal it. The refused kill is logged but the reload
+# proceeds anyway: a second radvd is started beside the live one, dies on the
+# pid-file lock, and the container exits on the propagated failure — none of which
+# a start-only check or the graceful-stop assertion below would notice.
 pid_before=$(docker exec "$C6" pidof radvd) || fail "hardened profile: cannot read radvd pid"
 docker kill -s HUP "$C6" >/dev/null
 pid_after=$(wait_for_reload "$C6" 1 "$pid_before")

@@ -38,7 +38,6 @@ RUN url="https://github.com/radvd-project/radvd/releases/download/${RADVD_VERSIO
     && rm "$tarball" \
     && ./configure \
         --prefix=/usr \
-        --sysconfdir=/etc/ \
         --with-pidfile=/run/radvd/radvd.pid \
     && make gram.h \
     && make -j"$(nproc)" \

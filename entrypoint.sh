@@ -16,6 +16,9 @@ CONF="/etc/radvd/radvd.conf"
 radvd_pid=""
 reload=0
 shutdown=0
+# Set when a TERM to the child was refused, so the shutdown arm cannot report a
+# graceful stop it never observed. Scoped to one child: start_radvd clears it.
+signal_failed=0
 # SIGHUP: reload config by restarting radvd (re-reads as root, see header).
 on_hup() {
   if [ "$shutdown" -eq 1 ]; then
@@ -24,13 +27,19 @@ on_hup() {
   fi
   reload=1
   printf 'level=info msg="SIGHUP received; restarting radvd to reload config"\n' >&2
-  [ -n "$radvd_pid" ] && kill -TERM "$radvd_pid" 2>/dev/null
+  if [ -n "$radvd_pid" ] && ! kill -TERM "$radvd_pid" 2>/dev/null; then
+    signal_failed=1
+    printf 'level=error msg="failed to deliver TERM to radvd; the container may lack CAP_KILL, or the child was already reaped" pid="%s"\n' "$radvd_pid" >&2
+  fi
 }
 # SIGTERM/SIGINT (docker stop): forward and exit.
 on_term() {
   shutdown=1
   printf 'level=info msg="shutdown signal received; stopping radvd"\n' >&2
-  [ -n "$radvd_pid" ] && kill -TERM "$radvd_pid" 2>/dev/null
+  if [ -n "$radvd_pid" ] && ! kill -TERM "$radvd_pid" 2>/dev/null; then
+    signal_failed=1
+    printf 'level=error msg="failed to deliver TERM to radvd; the container may lack CAP_KILL, or the child was already reaped" pid="%s"\n' "$radvd_pid" >&2
+  fi
 }
 trap on_hup HUP
 trap on_term TERM INT
@@ -68,19 +77,22 @@ case "$RADVD_DEBUG_LEVEL" in
     ;;
 esac
 
-# Warn-only on every call — a single-node operator legitimately deploys without
-# HA, and the SIGHUP branch re-emits these warnings for a config edited since
-# startup. Why HA needs these directives, and the accepted spellings with the
-# reason for each: CONTRIBUTING.md, "Design boundaries (please preserve)".
+# Warn-only on every call except the non-regular-node refusal below, which exits
+# 1 from BOTH call sites (startup triage and the SIGHUP reload) — a single-node
+# operator legitimately deploys without HA, and the SIGHUP branch re-emits these
+# warnings for a config edited since startup. Why HA needs these directives, and
+# the accepted spellings with the reason for each: CONTRIBUTING.md, "Design
+# boundaries (please preserve)".
 check_ha_directives() {
-  # The regular-file probe must precede the read: a FIFO or device node never
-  # reaches EOF, so reading one to snapshot it would hang PID 1 at startup or on
-  # a HUP reload. It refuses rather than skipping the read, because radvd's own
-  # fopen of the same path cannot consume a non-regular node either: a FIFO with
-  # no writer leaves radvd blocked inside open(2), emitting no RAs while `pidof
-  # radvd` keeps the healthcheck green. One read for the whole scan, so the gates
-  # and the block scanner cannot see different bytes of a config edited between
-  # them.
+  # A FIFO with no writer blocks in open/read and a device node may return EOF
+  # immediately (/dev/null does): neither gives the bounded regular-file snapshot
+  # this scan needs, and radvd's own open of the same node blocks the same way —
+  # leaving no RAs while `pidof radvd` keeps the healthcheck green — so the probe
+  # refuses rather than skipping the read. It excludes only the node it can see;
+  # the bounded read below covers one substituted after it returns, since no
+  # POSIX-sh operation can check the type and open the same node atomically. One
+  # read for the whole scan, so the gates and the block scanner cannot see
+  # different bytes of a config edited between them.
   warn_scan_degraded() {
     scan_err=$(sanitize_log_value "$1" 200)
     printf 'level=warn msg="unable to scan mounted radvd config; HA-directive validation is incomplete" err="%s" path="%s"\n' "$scan_err" "$CONF" >&2
@@ -89,15 +101,23 @@ check_ha_directives() {
     printf 'level=error msg="radvd.conf is not a regular file" path="%s"\n' "$CONF" >&2
     exit 1
   fi
-  if ! conf_snapshot=$(cat "$CONF" 2>/dev/null); then
-    # Content and cause must not share a stream: cat writes its output before
-    # its error, so a merged read puts config bytes in the field that names
-    # the cause. The re-read runs only here, after the scan is abandoned, so
-    # no gate sees two versions of the file — and it can SUCCEED, because a
-    # short read that completes on retry emits no diagnostic at all, so the
-    # field falls back to a phrase rather than shipping an empty cause.
-    scan_cause=$(cat "$CONF" 2>&1 >/dev/null)
-    warn_scan_degraded "${scan_cause:-re-read of the config succeeded; the first read failed without a diagnostic}"
+  # 5s is far above any legitimate read of a kilobyte config and far below
+  # `docker stop`'s 10s grace, so a stop during a wedged read still exits cleanly.
+  conf_snapshot=$(timeout 5 cat "$CONF" 2>/dev/null)
+  read_rc=$?
+  if [ "$read_rc" -ne 0 ]; then
+    if [ "$read_rc" -eq 124 ]; then
+      warn_scan_degraded "read of the config exceeded 5s; the node may be a FIFO or a stalled mount"
+    else
+      # Content and cause must not share a stream: cat writes its output before
+      # its error, so a merged read puts config bytes in the field that names
+      # the cause. The re-read runs only here, after the scan is abandoned, so
+      # no gate sees two versions of the file — and it can SUCCEED, because a
+      # short read that completes on retry emits no diagnostic at all, so the
+      # field falls back to a phrase rather than shipping an empty cause.
+      scan_cause=$(cat "$CONF" 2>&1 >/dev/null)
+      warn_scan_degraded "${scan_cause:-re-read of the config succeeded; the first read failed without a diagnostic}"
+    fi
     return 0
   fi
   has_directive() {
@@ -187,6 +207,9 @@ fi
 # socket is open. Missing config is caught by radvd itself with a clear error
 # message.
 start_radvd() {
+  # Cleared per child: the flag means "the TERM to THIS pid was refused", and
+  # start_radvd is the one place the child's identity changes.
+  signal_failed=0
   radvd -C "$CONF" -n -m stderr -d "$RADVD_DEBUG_LEVEL" -u radvd &
   radvd_pid=$!
   # A signal delivered before radvd_pid was assigned set the flag but skipped
@@ -194,7 +217,10 @@ start_radvd() {
   # every start (initial and reload restart) so a HUP/TERM latched during the
   # pre-pid window is always propagated to the freshly assigned child.
   if [ "$shutdown" -eq 1 ] || [ "$reload" -eq 1 ]; then
-    kill -TERM "$radvd_pid" 2>/dev/null
+    if ! kill -TERM "$radvd_pid" 2>/dev/null; then
+      signal_failed=1
+      printf 'level=error msg="failed to deliver TERM to radvd; the container may lack CAP_KILL, or the child was already reaped" pid="%s"\n' "$radvd_pid" >&2
+    fi
   fi
 }
 
@@ -213,7 +239,13 @@ while :; do
   done
 
   if [ "$shutdown" -eq 1 ]; then
-    printf 'level=info msg="radvd stopped on shutdown signal (SIGTERM/SIGINT)"\n' >&2
+    # Exit 0 either way: an explicit `docker stop` must not read as a crash to a
+    # restart policy, so the refused delivery is reported rather than propagated.
+    if [ "$signal_failed" -eq 1 ]; then
+      printf 'level=warn msg="the TERM could not be delivered to radvd; a graceful stop cannot be confirmed"\n' >&2
+    else
+      printf 'level=info msg="radvd stopped on shutdown signal (SIGTERM/SIGINT)"\n' >&2
+    fi
     exit 0
   fi
   if [ "$reload" -eq 1 ]; then

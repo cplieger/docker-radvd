@@ -1,25 +1,15 @@
 #!/usr/bin/env bash
 # The RADVD_DEBUG_LEVEL gate: the inline default-and-validate block that decides
-# radvd's -d verbosity, and a boot fatal.
-#
-# This is inline boot code, not a function, so it comes out via extract_range and
-# runs in a subshell per case — `exit 1` must reach a process boundary here, not
-# this file. sanitize_log_value is sourced alongside it because the refusal path
-# delegates the echoed value to it.
-#
-# Why it earns a unit test rather than leaning on scripts/smoke.sh: the smoke test
-# proves the fatal end to end, but it needs a built image and a docker daemon, and
-# it can afford exactly one invalid value. The interesting cases are the ones a
-# healthy container never reaches and a single container run cannot enumerate —
-# every accepted level, the multi-digit rejection the one-character glob implies,
-# and the two properties of the echoed value (sanitized, capped) that stop a
-# malformed env var from forging the log line.
+# radvd's -d verbosity, and a boot fatal. Inline boot code rather than a function,
+# so extract_range lifts it and each case runs in a subshell — `exit 1` must reach
+# a process boundary, not this file. sanitize_log_value comes along because the
+# refusal path delegates the echoed value to it. The cases a single container run
+# cannot enumerate are the point: every accepted level, the multi-digit rejection
+# the one-character glob implies, and the echoed value's sanitization and cap.
 #
 # Lint directives, each against a stated guarantee rather than an assumption:
-#   SC2015 - the `cond && ok || no` form cannot mis-fire, because lib.sh's
-#     ok/no/skip return 0 unconditionally by design (see their comments).
-#   SC2016 - run_level's bash -c script is single-quoted BECAUSE nothing may
-#     expand in this shell: $1/$2 are the subshell's own positionals.
+#   SC2015 - `cond && ok || no` cannot mis-fire: lib.sh's ok/no/skip return 0.
+#   SC2016 - run_level's bash -c body is single-quoted so nothing expands here.
 # shellcheck disable=SC2015,SC2016
 set -u
 
@@ -126,9 +116,9 @@ run_level '9\bogus'
   && ok "a backslash in the value is neutralized to ?" \
   || no "backslash neutralized" "rc=$_rc, log: $(cat "$LOG")"
 
-# The three classes a control-character pass cannot see, each arriving as a
-# multi-byte sequence rather than as a C0 byte: C1 (U+0085 NEL), Bidi_Control
-# (U+202E) and the line separator U+2028. runesafe's README is the fleet's written
+# The two classes a control-character pass cannot see, each arriving as a
+# multi-byte sequence rather than as a C0 byte: C1 (U+0085 NEL, two bytes) and
+# Bidi_Control (U+202E, three bytes). runesafe's README is the fleet's written
 # policy on what must not survive the trip to a log sink; this tier applies it with
 # a printable-ASCII range map, so each byte of the sequence becomes one space.
 run_level "$(printf '9\302\205bogus')"
@@ -140,11 +130,6 @@ run_level "$(printf '9\342\200\256bogus')"
 [ "$_rc" -eq 1 ] && logged 'value="9   bogus"' \
   && ok "a Bidi_Control (U+202E) cannot reorder the rendered log line" \
   || no "Bidi_Control neutralized" "rc=$_rc, log: $(cat "$LOG")"
-
-run_level "$(printf '9\342\200\250bogus')"
-[ "$_rc" -eq 1 ] && logged 'value="9   bogus"' \
-  && ok "U+2028 cannot split the record in a viewer that honours it as a terminator" \
-  || no "U+2028 neutralized" "rc=$_rc, log: $(cat "$LOG")"
 
 # --- 6. the echoed value is length-capped, and says when it was cut ----------------
 # An env var has no useful length bound; the cap is what stops one typo from

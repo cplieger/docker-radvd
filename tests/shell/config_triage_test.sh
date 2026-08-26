@@ -99,8 +99,9 @@ fi
 
 # --- 4. the PID-directory fatal's phrase is asserted at the SOURCE -----------------
 # `failed to create radvd PID directory` is the one alternative in the README's alert
-# rule that no unit path drives (the mkdir only fails on a read-only /run), so this
-# is a source-side check: the shipped script must still emit the phrase the rule
+# rule that no UNIT path drives (the mkdir only fails on a read-only /run);
+# scripts/smoke.sh scenario 8 drives it at runtime, so this source-side check is the
+# fast half of that pair: the shipped script must still emit the phrase the rule
 # matches. Rewording one side without the other silently stops the operator's alert.
 [ -n "$ALERT_RULE" ] && grep -q 'printf .*failed to create radvd PID directory' "$ENTRYPOINT" \
   && printf 'failed to create radvd PID directory\n' | grep -Eq "$ALERT_RULE" \

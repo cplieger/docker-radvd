@@ -114,5 +114,14 @@ if [ -e "$SBOM" ] || [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
   fi
 fi
 
+# 5. Both sbin binaries ship: the README's HA and Healthcheck sections tell the
+#    operator to run radvdump. Forced in-image the way sections 3 and 4 are.
+if [ -e /usr/sbin/radvdump ] || [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
+  [ -x /usr/sbin/radvdump ] || {
+    err "FAIL: radvdump is not executable at /usr/sbin/radvdump"
+    fail=1
+  }
+fi
+
 [ "$fail" -eq 0 ] && log "radvd smoke: ok"
 exit "$fail"

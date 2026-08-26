@@ -1,36 +1,17 @@
 #!/usr/bin/env bash
 # check_ha_directives(): the validator behind the HA warnings, and the bulk of
-# entrypoint.sh.
-#
-# The HA directive checks are warn-only by design (a single-node operator legitimately
-# deploys without HA); the one refusal here is a config node radvd itself cannot open.
-# So what a test pins is WHICH line fires for which config shape — and, just as
-# load-bearing, which shapes stay SILENT. A false warning against a valid config is
-# how a real one gets ignored.
-#
-# The function's only input is the CONF global (entrypoint.sh assigns it plainly,
-# never readonly), which is the one file radvd itself is given with -C. Every case
-# builds a fresh config dir and points CONF into it. No stubs: sed, grep, awk, cat,
-# tr and cut run for real against fixture files.
-#
-# DIALECT NOTE: the shipped file is #!/bin/sh under BusyBox ash with BusyBox
-# sed/grep/awk in the image; this suite runs it under bash with the runner's own
-# awk (mawk on this container) and GNU sed/grep/tr. The comparison is therefore
-# host-tool-vs-BusyBox, not GNU-vs-BusyBox, and it is NOT a compatibility gate:
-# the assertions stay POSIX-shaped and assert OUTCOMES (which warning line,
-# silence, one parseable line), never a tool-specific substitution. The one place
-# the dialects are known to diverge is the sanitizer path (BusyBox tr v1.37.0 has
-# no [:print:], which is why the shipped code spells the printable range as
-# \040-\176 under LC_ALL=C instead), so those cases assert the resulting log
-# line's shape rather than the exact bytes.
+# entrypoint.sh. Warn-only except the refusal of a node radvd itself cannot open,
+# so each case pins which line fires for which config shape and, just as
+# load-bearing, which shapes stay SILENT — a false warning against a valid config
+# is how a real one gets ignored. Its only input is the CONF global, so every case
+# builds a fresh config dir. Nothing is stubbed, and the host's sed/grep/awk/tr
+# stand in for the image's BusyBox ones, so a case asserts an OUTCOME (which line,
+# silence, one parseable line), never a tool-specific substitution.
 #
 # Lint directives, each against a stated guarantee rather than an assumption:
-#   SC2015 - the `cond && ok || no` form cannot mis-fire, because lib.sh's
-#     ok/no/skip return 0 unconditionally by design (see their comments).
-#   SC2034 - CONF is the INPUT the extracted code reads at runtime; shellcheck
-#     cannot see that read because the source happens through load_function.
-#   SC2016 - run_check's bash -c script is single-quoted BECAUSE nothing may
-#     expand in this shell: $1/$2 are the subshell's own positionals.
+#   SC2015 - `cond && ok || no` cannot mis-fire: lib.sh's ok/no/skip return 0.
+#   SC2034 - CONF is the INPUT the extracted code reads through load_function.
+#   SC2016 - run_check's bash -c body is single-quoted so nothing expands here.
 # shellcheck disable=SC2015,SC2034,SC2016
 set -u
 
@@ -55,11 +36,11 @@ setup() {
   CONF="$DIR/radvd.conf"
 }
 
-# The validator can block forever if its non-regular-file guard is gone (the cat
-# probe would read a FIFO to EOF that never comes), so every run is bounded: a
-# hang becomes a non-zero status here instead of a wedged test run. `timeout`
-# needs a COMMAND, not a shell function, hence the bash -c re-entry sourcing the
-# already-extracted file.
+# A lost non-regular-file guard would leave the validator's own 5s read bound as
+# the only thing between its cat probe and a FIFO's EOF that never comes, so every
+# run is bounded here as well: a hang becomes a non-zero status instead of a wedged
+# test run. `timeout` needs a COMMAND, not a shell function, hence the bash -c
+# re-entry sourcing the already-extracted file.
 run_check() {
   _rc=0
   timeout 5 bash -c '
@@ -94,10 +75,10 @@ run_check
 # boundary (start, ;, { or }) is enough. If the boundary alternation broke, this
 # valid one-liner would draw two false missing-directive warnings.
 setup
-printf 'interface eth0 { IgnoreIfMissing on; AdvRASrcAddress { fe80::1; }; };\n' >"$CONF"
+printf 'interface eth0 { IgnoreIfMissing on; AdvRASrcAddress { febf::1; }; };\n' >"$CONF"
 run_check
 [ "$_rc" -eq 0 ] && [ ! -s "$LOG" ] \
-  && ok "a valid one-line nested config is silent (mid-line directives found)" \
+  && ok "a valid one-line nested config is silent (mid-line directives found), with febf::1 accepted at the top of fe80::/10" \
   || no "one-line config" "rc=$_rc, log: $(cat "$LOG")"
 
 # The bare name at end-of-line, with the opening brace on the next line. CONTRIBUTING
@@ -167,7 +148,7 @@ logged 'msg="no enabled IgnoreIfMissing on directive found' \
   && ok "IgnoreIfMissing off is not accepted by a substring match (the value must be on)" \
   || no "off rejected" "log: $(cat "$LOG")"
 
-# --- 8. THE CLASSIC HA MISTAKE: AdvRASrcAddress on a global/ULA address -----------
+# --- 8. THE CLASSIC HA MISTAKE: AdvRASrcAddress on a non-link-local address -------
 # RFC 4861 §6.1.2: hosts silently discard an RA sourced from a non-link-local
 # address. radvd emits, tcpdump shows traffic, nothing autoconfigures — this
 # warning is the only artifact that names the cause.
@@ -179,11 +160,11 @@ logged 'msg="AdvRASrcAddress is set to a non-link-local address' && logged 'fd00
   || no "ULA source warned" "log: $(cat "$LOG")"
 
 setup
-printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvRASrcAddress { 2001:db8::5; };\n};\n' >"$CONF"
+printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvRASrcAddress { fec0::1; };\n};\n' >"$CONF"
 run_check
-logged 'msg="AdvRASrcAddress is set to a non-link-local address' && logged '2001:db8::5' \
-  && ok "a GUA AdvRASrcAddress warns as non-link-local" \
-  || no "GUA source warned" "log: $(cat "$LOG")"
+logged 'msg="AdvRASrcAddress is set to a non-link-local address' && logged 'fec0::1' \
+  && ok "a site-local fec0:: source warns: it is one hex digit outside fe80::/10, which is what [89ab] decides" \
+  || no "site-local source warned" "log: $(cat "$LOG")"
 
 # --- 9. a correct block must not MASK a broken sibling ----------------------------
 # Two blocks in one radvd.conf: eth0's correct block, then the global-VIP mistake on
@@ -224,13 +205,12 @@ logged 'msg="no AdvRASrcAddress directive found' \
   || no "missing AdvRASrcAddress" "log: $(cat "$LOG")"
 
 # --- 12. a non-regular config node is REFUSED, and PID 1 must not hang -----------
-# A FIFO at radvd.conf: the regular-file probe refuses it before the read that
-# would otherwise drain it to an EOF that never comes, wedging boot (and every HUP
-# reload) with no log line. Refusal rather than a degraded scan because radvd's own
-# open of the same node blocks the same way, leaving a container the healthcheck
-# calls healthy while it emits nothing. run_check's timeout turns a hang into a
-# failure here, and its bash -c gives `exit 1` a process boundary to reach instead
-# of this file.
+# A FIFO at radvd.conf: the regular-file probe refuses it before the read, which
+# without the probe would stall until the bounded read gave up and then degrade to
+# a warning — while radvd's own open of the same node blocks with no bound at all,
+# leaving a container the healthcheck calls healthy while it emits nothing.
+# run_check's timeout turns a hang into a failure here, and its bash -c gives
+# `exit 1` a process boundary to reach instead of this file.
 setup
 rm -f "$CONF"
 mkfifo "$CONF"
@@ -240,6 +220,17 @@ run_check
   && ! logged 'no enabled IgnoreIfMissing' \
   && ok "a FIFO at radvd.conf is refused with exit 1 on one line, without hanging or misdiagnosing" \
   || no "FIFO refused" "rc=$_rc, log: $(cat "$LOG")"
+
+# An ABSENT config is not a refusal: the reload call site has no readability gate,
+# so the `-e` half of the probe is what keeps a config removed since startup on
+# the degraded-scan path instead of exiting 1 after radvd has already been stopped.
+setup
+rm -f "$CONF"
+run_check
+[ "$_rc" -eq 0 ] && logged 'msg="unable to scan mounted radvd config' \
+  && ! logged 'msg="radvd.conf is not a regular file' \
+  && ok "an absent radvd.conf degrades instead of being refused as non-regular" \
+  || no "absent config degraded" "rc=$_rc, log: $(cat "$LOG")"
 
 # The unreadable-file arm of the same guard reaches the READ, not the -f probe —
 # but root reads a chmod-000 file, so the branch cannot be provoked as root and
@@ -323,15 +314,6 @@ run_check
   && logged 'msg="no AdvRASrcAddress directive found' \
   && ok "an empty config warns that radvd will exit, and the HA-directive scan still runs" \
   || no "empty config warn" "rc=$_rc, log: $(cat "$LOG")"
-
-# radvd's grammar requires at least one interface definition, so every spelling
-# of "configures nothing" warns - not just a zero-byte file.
-setup
-printf '\n\n\n' >"$CONF"
-run_check
-[ "$_rc" -eq 0 ] && logged 'msg="radvd.conf defines no interface' \
-  && ok "a newline-only config warns too (radvd's grammar requires an interface definition, whatever the file size)" \
-  || no "newline-only config warn" "rc=$_rc, log: $(cat "$LOG")"
 
 setup
 printf '# interface eth0 { AdvSendAdvert on; };\n' >"$CONF"

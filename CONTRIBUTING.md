@@ -103,8 +103,9 @@ contract.
   shipped block), or `scripts/smoke.sh`'s (runtime, against a real container's
   logs). The counter-rule, so this does not run the other
   way: do **not** add an alternative for a state an existing alternative already
-  matches on the same crash-loop — that is why the empty-config warning is not
-  in the pattern, and why `radvd exited; propagating exit for restart policy`
+  matches on the same crash-loop — that is why the no-interface warning
+  (`radvd.conf defines no interface`) is not in the pattern, and why
+  `radvd exited; propagating exit for restart policy`
   must never be (it reports any unexpected radvd exit, whatever the cause, so it
   would fire a config alert for a crash that has nothing to do with the config).
 
