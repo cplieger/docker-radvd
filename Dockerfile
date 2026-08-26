@@ -32,7 +32,7 @@ WORKDIR /build/radvd
 # `make gram.h` first works around a parallel-build race. radvdump ships as upstream's own RA decoder, which the README's HA and Healthcheck sections tell the operator to run.
 RUN url="https://github.com/radvd-project/radvd/releases/download/${RADVD_VERSION}/radvd-${RADVD_VERSION#v}.tar.gz" \
     && tarball="${url##*/}" \
-    && wget -q --tries=3 --timeout=30 "$url" \
+    && wget -q --timeout=30 "$url" \
     && echo "${RADVD_SHA256}  ${tarball}" | sha256sum -c - \
     && tar xzf "$tarball" --strip-components=1 --no-same-owner \
     && rm "$tarball" \

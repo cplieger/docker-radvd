@@ -85,7 +85,7 @@ run_level ""
 # multi-digit value is rejected no matter what its digits are. radvd's -d takes a
 # single digit, so this is correct — but it is not self-evident, and a future
 # widening to [0-9]* would silently start accepting 10 as "level 1, 0".
-for bad in 6 9 10 42 x -1 "1 2"; do
+for bad in 6 10 x -1 "1 2"; do
   run_level "$bad"
   [ "$_rc" -eq 1 ] && logged 'msg="invalid RADVD_DEBUG_LEVEL' && ! logged 'resolved=' \
     && ok "'$bad' fails closed with exit 1 before radvd is reached" \

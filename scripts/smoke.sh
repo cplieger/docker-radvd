@@ -187,12 +187,64 @@ docker logs "$C1" 2>&1 | grep -q 'failed to read config file' \
   && fail "radvd attempted its own unprivileged config reread (supervisor bypassed?)"
 printf '[smoke] PASS  hardened reload: root-only config reloaded cleanly (pid %s -> %s)\n' "$pid_before" "$pid_after"
 
+# --- HUP replacement waits for the previous generation to be reaped ---------
+reload_before=$(docker logs "$C1" 2>&1 | grep -c 'msg="reloading radvd (config re-read via restart)"' || true)
+hup_before=$(docker logs "$C1" 2>&1 | grep -c 'msg="SIGHUP received; restarting radvd to reload config"' || true)
+read -r -a held_pids <<<"$pid_after"
+[ "${#held_pids[@]}" -gt 0 ] || fail "reap-order setup found no radvd process to hold"
+docker exec "$C1" sh -c 'kill -STOP "$@"' _ "${held_pids[@]}"
+docker kill -s HUP "$C1" >/dev/null
+hup_seen=""
+for _ in $(seq 1 20); do
+  hup_now=$(docker logs "$C1" 2>&1 | grep -c 'msg="SIGHUP received; restarting radvd to reload config"' || true)
+  if [ "$hup_now" -gt "$hup_before" ]; then
+    hup_seen=1
+    break
+  fi
+  sleep 0.1
+done
+[ -n "$hup_seen" ] || fail "PID 1 did not handle HUP while the old radvd generation was held"
+for _ in $(seq 1 20); do
+  reload_now=$(docker logs "$C1" 2>&1 | grep -c 'msg="reloading radvd (config re-read via restart)"' || true)
+  [ "$reload_now" -eq "$reload_before" ] \
+    || fail "replacement startup began before the previous radvd generation was reaped"
+  sleep 0.1
+done
+docker exec "$C1" sh -c 'kill -CONT "$@"' _ "${held_pids[@]}"
+pid_before=$pid_after
+pid_after=$(wait_for_reload "$C1" "$((reload_before + 1))" "$pid_before")
+[ -n "$pid_after" ] || fail "HUP reload did not complete after the held radvd generation resumed"
+[ "$(docker inspect -f '{{.State.Running}}' "$C1")" = "true" ] \
+  || fail "container stopped after the reap-order reload"
+printf '[smoke] PASS  reap order: replacement waited for the previous radvd generation to exit\n'
+
 # --- 4. graceful shutdown on SIGTERM -----------------------------------------
 docker stop "$C1" >/dev/null
 ec=$(docker inspect -f '{{.State.ExitCode}}' "$C1")
 [ "$ec" = "0" ] || fail "docker stop exit code $ec, want 0"
 wait_for_log "$C1" 'radvd stopped on shutdown signal' "missing graceful shutdown log line"
 printf '[smoke] PASS  shutdown: SIGTERM exits 0 with graceful log\n'
+
+# --- malformed replacement config on HUP fails the container closed ---------
+printf '[smoke] restarting %s (malformed HUP replacement scenario)\n' "$C1"
+docker start "$C1" >/dev/null
+ready=""
+for _ in $(seq 1 15); do
+  if docker exec "$C1" pidof radvd >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
+  sleep 1
+done
+[ -n "$ready" ] || fail "$C1: radvd did not return before malformed-reload setup"
+docker cp tests/radvd.bad.conf "$C1:/etc/radvd/radvd.conf" >/dev/null
+docker kill -s HUP "$C1" >/dev/null
+wait_until_stopped "$C1" "container still running after the HUP replacement rejected its config"
+ec=$(docker inspect -f '{{.State.ExitCode}}' "$C1")
+[ "$ec" -ne 0 ] || fail "malformed HUP replacement exited 0, want non-zero"
+wait_for_log "$C1" 'failed to read config file' "replacement radvd did not reject the edited config"
+wait_for_log "$C1" 'radvd exited; propagating exit for restart policy' "missing reload-failure propagation log line"
+printf '[smoke] PASS  malformed reload: replacement rejection exits non-zero for restart\n'
 
 # --- 5. unexpected radvd death propagates to the container --------------------
 printf '[smoke] starting %s (exit-propagation scenario)\n' "$C2"

@@ -4,9 +4,10 @@
 # so each case pins which line fires for which config shape and, just as
 # load-bearing, which shapes stay SILENT — a false warning against a valid config
 # is how a real one gets ignored. Its only input is the CONF global, so every case
-# builds a fresh config dir. Nothing is stubbed, and the host's sed/grep/awk/tr
-# stand in for the image's BusyBox ones, so a case asserts an OUTCOME (which line,
-# silence, one parseable line), never a tool-specific substitution.
+# builds a fresh config dir. The host's sed/grep/awk/tr stand in for the image's
+# BusyBox ones, so a case asserts an OUTCOME (which line, silence, one parseable
+# line), never a tool-specific substitution; only case 17 stubs anything, and only
+# the two process boundaries whose STATUS is the subject there.
 #
 # Lint directives, each against a stated guarantee rather than an assumption:
 #   SC2015 - `cond && ok || no` cannot mis-fire: lib.sh's ok/no/skip return 0.
@@ -328,5 +329,31 @@ run_check
 [ "$_rc" -eq 0 ] && logged 'msg="radvd.conf defines no interface' \
   && ok "top-level directives with no interface block warn (radvd's grammar rejects it)" \
   || no "top-level-only config warn" "rc=$_rc, log: $(cat "$LOG")"
+
+# --- 17. an elapsed read budget stays bounded, on the status BusyBox produces ------
+# BusyBox timeout reports expiry as 143, not GNU's translated 124. Drive that
+# process-boundary result directly and record whether the failed-read arm falls
+# through to an unbounded diagnostic cat.
+setup
+printf 'interface eth0 { IgnoreIfMissing on; AdvRASrcAddress { fe80::1; }; };\n' >"$CONF"
+calls="$WORK/timeout-143-calls"
+: >"$calls"
+timeout() {
+  printf 'timeout %s\n' "$*" >>"$calls"
+  return 143
+}
+cat() {
+  printf 'cat %s\n' "$*" >>"$calls"
+  return 99
+}
+_rc=0
+check_ha_directives 2>"$LOG" || _rc=$?
+timeout_calls=$(grep -c '^timeout ' "$calls" || true)
+cat_calls=$(grep -c '^cat ' "$calls" || true)
+unset -f timeout cat
+[ "$_rc" -eq 0 ] && [ "$timeout_calls" -ge 1 ] && [ "$cat_calls" -eq 0 ] \
+  && logged 'read of the config exceeded 5s' \
+  && ok "BusyBox timeout expiry stays bounded and emits the exceeded-budget warning without a direct re-read" \
+  || no "BusyBox timeout expiry" "rc=$_rc, timeout_calls=$timeout_calls, cat_calls=$cat_calls, log: $(cat "$LOG")"
 
 report

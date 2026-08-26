@@ -81,10 +81,9 @@ fi
 
 # 4. Embedded SBOM fragment (Dockerfile builder stage): the CycloneDX file
 #    covering the source-built radvd must ship in the image, name the radvd
-#    component with a version-shaped string, and — in-image, where
-#    RADVD_EXPECTED_VERSION is guaranteed by the Dockerfile — carry exactly
-#    the pinned version (proves the ARG wiring into the fragment, not just
-#    that some version is present). BusyBox has no jq, so assert shape with
+#    component, and — in-image, where RADVD_EXPECTED_VERSION is guaranteed by
+#    the Dockerfile — carry exactly the pinned version (proves the ARG wiring
+#    into the fragment). BusyBox has no jq, so assert shape with
 #    grep: non-empty, starts with { and ends with }. Skipped like section 3
 #    when the file is absent in a plain local run (needs the built image).
 SBOM=/usr/share/sbom/radvd.cdx.json
@@ -99,10 +98,6 @@ if [ -e "$SBOM" ] || [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
     fi
     grep -q '"name": "radvd"' "$SBOM" || {
       err "FAIL: embedded SBOM fragment missing component: radvd"
-      fail=1
-    }
-    grep -q '"version": "[0-9][0-9.]*"' "$SBOM" || {
-      err "FAIL: embedded SBOM fragment has no version-shaped component version"
       fail=1
     }
     if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then

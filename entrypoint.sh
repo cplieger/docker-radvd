@@ -106,17 +106,23 @@ check_ha_directives() {
   conf_snapshot=$(timeout 5 cat "$CONF" 2>/dev/null)
   read_rc=$?
   if [ "$read_rc" -ne 0 ]; then
-    if [ "$read_rc" -eq 124 ]; then
+    # GNU timeout translates an elapsed budget to 124; BusyBox's applet, which
+    # is the one in this image, has no such translation and the read simply dies
+    # of the watchdog's TERM, so 143. Both mean the budget elapsed.
+    if [ "$read_rc" -eq 124 ] || [ "$read_rc" -eq 143 ]; then
       warn_scan_degraded "read of the config exceeded 5s; the node may be a FIFO or a stalled mount"
     else
       # Content and cause must not share a stream: cat writes its output before
       # its error, so a merged read puts config bytes in the field that names
-      # the cause. The re-read runs only here, after the scan is abandoned, so
-      # no gate sees two versions of the file — and it can SUCCEED, because a
-      # short read that completes on retry emits no diagnostic at all, so the
-      # field falls back to a phrase rather than shipping an empty cause.
-      scan_cause=$(cat "$CONF" 2>&1 >/dev/null)
-      warn_scan_degraded "${scan_cause:-re-read of the config succeeded; the first read failed without a diagnostic}"
+      # the cause. Bounded like the first read: this arm also runs on the reload
+      # path, where radvd is already stopped and an unbounded read would wedge
+      # PID 1 with no daemon and no exit. The re-read runs only here, after the
+      # scan is abandoned, so no gate sees two versions of the file, and it can
+      # produce nothing at all (a short read that completes on retry, or a
+      # `timeout` the image is missing), so the field falls back to a phrase
+      # rather than shipping an empty cause.
+      scan_cause=$(timeout 5 cat "$CONF" 2>&1 >/dev/null)
+      warn_scan_degraded "${scan_cause:-the re-read reported no diagnostic either}"
     fi
     return 0
   fi
@@ -232,11 +238,18 @@ while :; do
   status=$?
   # A trapped signal interrupts wait before radvd has finished terminating;
   # keep reaping until the child is fully gone so the next start does not race
-  # a dying process, preserving the latest exit status from each completed wait.
+  # a dying process. Only the first wait's status can reach the propagate arm:
+  # every trapped handler sets shutdown or reload, so a loop that ran here always
+  # leaves via exit 0 or continue.
   while kill -0 "$radvd_pid" 2>/dev/null; do
     wait "$radvd_pid"
-    status=$?
   done
+  # Cleared the instant the child is gone, so nothing between here and the next
+  # start_radvd can aim a signal at a reaped pid: the handlers skip an empty
+  # radvd_pid and start_radvd's pre-pid latch delivers to the replacement. Left
+  # set, a TERM landing in this gap reported a CAP_KILL problem that was not
+  # there, and could report an unconfirmable stop that was in fact graceful.
+  radvd_pid=""
 
   if [ "$shutdown" -eq 1 ]; then
     # Exit 0 either way: an explicit `docker stop` must not read as a crash to a
