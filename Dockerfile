@@ -82,8 +82,24 @@ COPY tests/smoke.sh tests/radvd.conf tests/radvd.bad.conf /tmp/tests/
 # own alert-rule pattern, so that one fatal path keeps matching at least one
 # alternative in the published rule; the rule's other alternatives are unpinned.
 COPY README.md /tmp/README.md
+COPY tests/shell /tmp/tests/shell
+# lib.sh:29 puts REPO_ROOT at /tmp in the image, and startup_latch_test.sh:153
+# reads $REPO_ROOT/CONTRIBUTING.md. Without this COPY the suite exits 1, no
+# /tests-passed marker is written, and the COPY --from=test below fails the
+# default-target build.
+COPY CONTRIBUTING.md /tmp/CONTRIBUTING.md
+# The suite's userland is the point: run.sh needs bash (installed here and
+# discarded with this stage) while awk, sed, grep and tr are the image's
+# BusyBox applets. The host CI run cannot see that axis — a ratified `sed`
+# shape was green on GNU and 16 FAILs on BusyBox — and no container scenario
+# reaches the block scanner at all, since no fixture carries AdvRASrcAddress.
+# Two uid-gated cases skip under root here; the non-root CI run keeps them.
 # ${RADVD_VERSION:?} fails the build if the ARG wiring breaks, so the in-image version assertion cannot be silently skipped.
-RUN RADVD_EXPECTED_VERSION="${RADVD_VERSION:?}" sh /tmp/tests/smoke.sh && touch /tests-passed
+# hadolint ignore=DL3018
+RUN apk add --no-cache bash \
+    && RADVD_EXPECTED_VERSION="${RADVD_VERSION:?}" sh /tmp/tests/smoke.sh \
+    && ENTRYPOINT=/usr/local/bin/entrypoint.sh bash /tmp/tests/shell/run.sh \
+    && touch /tests-passed
 
 # `final` must remain last: the CI gate builds the default target. The marker COPY
 # is what forces the test stage to build and pass first.

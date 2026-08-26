@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
-# The signal path's two unit-testable pieces: start_radvd()'s pre-pid latch, and
-# on_hup()'s refusal to reload during a shutdown. The traps arm before the config
-# validation, so a signal landing in that window is LATCHED and delivered to the
-# freshly assigned pid; without that, `docker stop` during startup waits out its
-# timeout and SIGKILLs while an early HUP is swallowed. THE ORACLE IS THE
-# DELIVERY, NOT THE DEATH — the stubbed radvd's pre-exec bash can consume the
-# latch TERM, so asserting "the child is gone" races (~1 false failure in 15 runs
-# before this rewrite); the recording stub forwards to the real kill, and case 1
-# requires an empty record, so neither latch case is a tautology.
+# The signal path's three unit-testable pieces: start_radvd()'s pre-pid latch,
+# on_hup()'s refusal to reload during a shutdown, and the shutdown arm's two-branch
+# report. The traps arm before the config validation, so a signal landing in that
+# window is LATCHED and delivered to the freshly assigned pid; without that,
+# `docker stop` during startup waits out its timeout and SIGKILLs while an early
+# HUP is swallowed. THE ORACLE IS THE DELIVERY, NOT THE DEATH — the stubbed
+# radvd's pre-exec bash can consume the latch TERM, so asserting "the child is
+# gone" races (~1 false failure in 15 runs before this rewrite); the recording
+# stub forwards to the real kill, and case 1 requires an empty record, so neither
+# latch case is a tautology.
+#
+# A run may also show an intermittent bash `wait_for: No record of process <pid>`
+# line on stderr (measured: 12 of 30 whole-suite runs, 0-2 lines each, suite still
+# green). It comes from the stub subshell dying inside that same pre-exec window and
+# unwinding through lib.sh's inherited EXIT trap, not from reap()'s `wait`; it is
+# bash-only and cannot occur in the image's ash. Do not chase it: the only
+# redirection that reaches the writer covers the fork, and it swallows
+# start_radvd()'s own `failed to deliver TERM` error.
 #
 # Lint directives, each against a stated guarantee rather than an assumption:
 #   SC2015 - `cond && ok || no` cannot mis-fire: lib.sh's ok/no/skip return 0.
@@ -111,7 +120,7 @@ sleep 20 &
 radvd_pid=$!
 shutdown=0 reload=0
 : >"$SIGNALS"
-on_hup 2>"$LOG"
+on_hup 2>"$LOG" 3>&2
 [ "$reload" -eq 1 ] && signalled "$radvd_pid" \
   && grep -Fq 'msg="SIGHUP received; restarting radvd to reload config"' "$LOG" \
   && ok "a HUP outside a shutdown sets the reload flag and TERMs the daemon" \
@@ -128,7 +137,7 @@ sleep 20 &
 radvd_pid=$!
 shutdown=1 reload=0
 : >"$SIGNALS"
-on_hup 2>"$LOG"
+on_hup 2>"$LOG" 3>&2
 [ ! -s "$SIGNALS" ] && [ "$reload" -eq 0 ] \
   && grep -Fq 'msg="SIGHUP received during shutdown; reload ignored"' "$LOG" \
   && command kill -0 "$radvd_pid" 2>/dev/null \
@@ -156,5 +165,50 @@ registered=$(bash -c '
   && grep -q 'SIGTERM`/`SIGINT`' <<<"$PROMISE" \
   && ok "both published shutdown signals are trapped to on_term, and CONTRIBUTING still promises both" \
   || no "shutdown signal contract" "registered: $(tr '\n' ' ' <<<"$registered"), promise found: $(grep -c 'SIGTERM`/`SIGINT`' <<<"$PROMISE")"
+
+# --- 7. the shutdown arm reports a refused TERM as unconfirmable ------------------
+# The arm lives inline in the supervisor loop, so it is extracted as a RANGE. The
+# start anchor is the comment line, NOT `if [ "$shutdown" -eq 1 ]; then`: that
+# spelling matches on_hup's guard at the top of the file too, and a sed range
+# restarts, so it emitted both blocks concatenated — sourced with shutdown=1 the
+# guard's `return` fired and the subject never ran (measured: byte-identical
+# outcome against HEAD and against a collapsed arm, so it witnessed nothing).
+# Nothing else reads signal_failed: both arms exit 0, every container scenario
+# holds CAP_KILL, and README:173 publishes the refusal line, so without these
+# cases the branch can invert with the whole corpus green.
+ARM=$(extract_range '^    # Exit 0 either way' '^    exit 0$' "$WORK/shutdown_arm.sh") || exit 1
+WARN='msg="the TERM could not be delivered to radvd; a graceful stop cannot be confirmed"'
+INFO='msg="radvd stopped on shutdown signal (SIGTERM/SIGINT)"'
+
+# The arm ends in `exit 0`, so it runs in a bounded child. signal_failed is its only
+# input: the extraction begins AFTER the `[ "$shutdown" -eq 1 ]` test, so under set -u
+# the flag has to be supplied the way CONF is above. stderr is redirected at the
+# child's own invocation rather than around a brace group, which would swallow the
+# lines this asserts on.
+run_arm() {
+  bash -c 'set -u; signal_failed=$1; . "$2"' _ "$1" "$ARM" 2>"$LOG"
+}
+
+run_arm 1
+rc=$?
+grep -Fq "$WARN" "$LOG" && ! grep -Fq "$INFO" "$LOG" && [ "$rc" -eq 0 ] \
+  && ok "a refused TERM reports that a graceful stop cannot be confirmed, and still exits 0" \
+  || no "refused-TERM report" "rc=$rc, log: $(tr '\n' '|' <"$LOG")"
+
+# --- 8. control: a delivered TERM reports the graceful stop instead ----------------
+# Without it, case 7 would pass against an arm that printed the warning
+# unconditionally — the same collapse in the other direction.
+run_arm 0
+rc=$?
+grep -Fq "$INFO" "$LOG" && ! grep -Fq "$WARN" "$LOG" && [ "$rc" -eq 0 ] \
+  && ok "a delivered TERM reports the graceful stop, and exits 0" \
+  || no "delivered-TERM report" "rc=$rc, log: $(tr '\n' '|' <"$LOG")"
+
+# --- 9. the README still publishes the sentence the refusal arm prints -------------
+# Same both-sides-at-run-time shape as case 6: the arm's text is a published
+# operator-facing string, so an edit to either side alone is red.
+grep -Fq 'a graceful stop cannot be confirmed' "$REPO_ROOT/README.md" \
+  && ok "the README still publishes the refusal line the shutdown arm prints" \
+  || no "published refusal line" "README.md no longer carries 'a graceful stop cannot be confirmed'"
 
 report

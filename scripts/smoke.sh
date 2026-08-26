@@ -166,12 +166,16 @@ printf '[smoke] PASS  startup: radvd up, preflight warned, healthcheck healthy, 
 
 # --- 2. HUP reload (world-readable config) -----------------------------------
 pid_before=$(docker exec "$C1" pidof radvd) || fail "cannot read radvd pid"
+job_status_before=$(docker logs "$C1" 2>&1 | grep -Ec '^(Terminated|Killed)$' || true)
 docker kill -s HUP "$C1" >/dev/null
 pid_after=$(wait_for_reload "$C1" 1 "$pid_before")
 [ -n "$pid_after" ] || fail "HUP did not reload radvd (no reload log, or PID unchanged)"
 [ "$(docker inspect -f '{{.State.Running}}' "$C1")" = "true" ] || fail "container not running after HUP reload"
 [ "$(docker logs "$C1" 2>&1 | grep -c 'no AdvRASrcAddress directive found')" -ge 2 ] \
   || fail "reload did not re-run the HA-directive validation"
+job_status_after=$(docker logs "$C1" 2>&1 | grep -Ec '^(Terminated|Killed)$' || true)
+[ "$job_status_after" -eq "$job_status_before" ] \
+  || fail "HUP reload leaked a bare BusyBox ash job-status line into docker logs"
 printf '[smoke] PASS  HUP reload: radvd restarted (pid %s -> %s), validation re-ran, container Up\n' "$pid_before" "$pid_after"
 
 # --- 3. HUP reload with a root-only config (the 8e7a792 field failure) -------
@@ -219,10 +223,14 @@ pid_after=$(wait_for_reload "$C1" "$((reload_before + 1))" "$pid_before")
 printf '[smoke] PASS  reap order: replacement waited for the previous radvd generation to exit\n'
 
 # --- 4. graceful shutdown on SIGTERM -----------------------------------------
+job_status_before=$(docker logs "$C1" 2>&1 | grep -Ec '^(Terminated|Killed)$' || true)
 docker stop "$C1" >/dev/null
 ec=$(docker inspect -f '{{.State.ExitCode}}' "$C1")
 [ "$ec" = "0" ] || fail "docker stop exit code $ec, want 0"
 wait_for_log "$C1" 'radvd stopped on shutdown signal' "missing graceful shutdown log line"
+job_status_after=$(docker logs "$C1" 2>&1 | grep -Ec '^(Terminated|Killed)$' || true)
+[ "$job_status_after" -eq "$job_status_before" ] \
+  || fail "graceful shutdown leaked a bare BusyBox ash job-status line into docker logs"
 printf '[smoke] PASS  shutdown: SIGTERM exits 0 with graceful log\n'
 
 # --- malformed replacement config on HUP fails the container closed ---------

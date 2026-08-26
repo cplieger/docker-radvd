@@ -118,5 +118,93 @@ if [ -e /usr/sbin/radvdump ] || [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
   }
 fi
 
+# The host-side shell suite cannot reproduce ash's job-status output. In the
+# image, expire the real production timeout and reject any bare shell record.
+if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
+  runtime_dir=$(mktemp -d)
+  entrypoint=/usr/local/bin/entrypoint.sh
+  if [ "$(grep -c '^sanitize_log_value() {$' "$entrypoint")" -ne 1 ] \
+    || [ "$(grep -c '^check_ha_directives() {$' "$entrypoint")" -ne 1 ]; then
+    err "FAIL: entrypoint function extraction anchors are not unique"
+    fail=1
+  else
+    sed -n '/^sanitize_log_value() {$/,/^}$/p' "$entrypoint" >"$runtime_dir/sanitize.sh"
+    sed -n '/^check_ha_directives() {$/,/^}$/p' "$entrypoint" >"$runtime_dir/check.sh"
+    mkdir "$runtime_dir/bin"
+    printf '%s\n' '#!/bin/sh' 'exec sleep 30' >"$runtime_dir/bin/cat"
+    chmod +x "$runtime_dir/bin/cat"
+    printf 'interface eth0 { IgnoreIfMissing on; AdvRASrcAddress { fe80::1; }; };\n' >"$runtime_dir/radvd.conf"
+    runtime_rc=0
+    runtime_out=$(PATH="$runtime_dir/bin:$PATH" /bin/busybox timeout 8 sh -c '
+      set -u
+      . "$1"
+      . "$2"
+      CONF=$3
+      check_ha_directives
+    ' _ "$runtime_dir/sanitize.sh" "$runtime_dir/check.sh" "$runtime_dir/radvd.conf" 2>&1) || runtime_rc=$?
+    if [ "$runtime_rc" -ne 0 ]; then
+      err "FAIL: elapsed config-read probe did not return through the degraded warning (rc=$runtime_rc)"
+      err "$runtime_out"
+      fail=1
+    elif ! printf '%s\n' "$runtime_out" | grep -Fq 'read of the config exceeded 5s'; then
+      err "FAIL: BusyBox timeout expiry was not classified as the exceeded-budget condition"
+      err "$runtime_out"
+      fail=1
+    elif printf '%s\n' "$runtime_out" | grep -Eq '^(Terminated|Killed)$'; then
+      err "FAIL: BusyBox ash leaked an unstructured job-status line during the bounded read"
+      err "$runtime_out"
+      fail=1
+    fi
+    rm -rf "$runtime_dir"
+  fi
+fi
+
+# A prompt first-read failure enters the diagnostic reread. Make that reread
+# block and require the production bound to return through one warning.
+if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
+  reread_dir=$(mktemp -d)
+  entrypoint=/usr/local/bin/entrypoint.sh
+  if [ "$(grep -c '^sanitize_log_value() {$' "$entrypoint")" -ne 1 ] \
+    || [ "$(grep -c '^check_ha_directives() {$' "$entrypoint")" -ne 1 ]; then
+    err "FAIL: entrypoint function extraction anchors are not unique"
+    fail=1
+  else
+    sed -n '/^sanitize_log_value() {$/,/^}$/p' "$entrypoint" >"$reread_dir/sanitize.sh"
+    sed -n '/^check_ha_directives() {$/,/^}$/p' "$entrypoint" >"$reread_dir/check.sh"
+    mkdir "$reread_dir/bin"
+    printf '%s\n' '#!/bin/sh' 'exec sleep 30' >"$reread_dir/bin/cat"
+    printf '%s\n' \
+      '#!/bin/sh' \
+      ': "${TIMEOUT_COUNT:?}"' \
+      'n=0' \
+      '[ ! -r "$TIMEOUT_COUNT" ] || n=$(/bin/busybox cat "$TIMEOUT_COUNT")' \
+      'n=$((n + 1))' \
+      'printf "%s\\n" "$n" >"$TIMEOUT_COUNT"' \
+      '[ "$n" -ne 1 ] || exit 2' \
+      'exec /bin/busybox timeout "$@"' >"$reread_dir/bin/timeout"
+    chmod +x "$reread_dir/bin/cat" "$reread_dir/bin/timeout"
+    printf 'interface eth0 { IgnoreIfMissing on; AdvRASrcAddress { fe80::1; }; };\n' >"$reread_dir/radvd.conf"
+    reread_rc=0
+    reread_out=$(TIMEOUT_COUNT="$reread_dir/timeout-count" PATH="$reread_dir/bin:$PATH" \
+      /bin/busybox timeout 8 sh -c '
+        set -u
+        . "$1"
+        . "$2"
+        CONF=$3
+        check_ha_directives
+      ' _ "$reread_dir/sanitize.sh" "$reread_dir/check.sh" "$reread_dir/radvd.conf" 2>&1) || reread_rc=$?
+    if [ "$reread_rc" -ne 0 ]; then
+      err "FAIL: diagnostic config reread exceeded its production bound (rc=$reread_rc)"
+      err "$reread_out"
+      fail=1
+    elif ! printf '%s\n' "$reread_out" | grep -Fq 'unable to scan mounted radvd config'; then
+      err "FAIL: bounded diagnostic reread emitted no degraded-scan warning"
+      err "$reread_out"
+      fail=1
+    fi
+    rm -rf "$reread_dir"
+  fi
+fi
+
 [ "$fail" -eq 0 ] && log "radvd smoke: ok"
 exit "$fail"

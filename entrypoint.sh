@@ -6,6 +6,11 @@
 # boundaries (please preserve)".
 set -u
 
+# A copy of the log stream for the signal handlers: the reap block below redirects
+# fd2 so ash's job-status report for its own child stays out of the log stream, and
+# a handler firing inside that redirection would otherwise lose its line too.
+exec 3>&2
+
 CONF="/etc/radvd/radvd.conf"
 
 # Arm the signal handlers before any preflight work so a HUP/TERM landing
@@ -22,23 +27,22 @@ signal_failed=0
 # SIGHUP: reload config by restarting radvd (re-reads as root, see header).
 on_hup() {
   if [ "$shutdown" -eq 1 ]; then
-    printf 'level=info msg="SIGHUP received during shutdown; reload ignored"\n' >&2
+    printf 'level=info msg="SIGHUP received during shutdown; reload ignored"\n' >&3
     return
   fi
   reload=1
-  printf 'level=info msg="SIGHUP received; restarting radvd to reload config"\n' >&2
+  printf 'level=info msg="SIGHUP received; restarting radvd to reload config"\n' >&3
   if [ -n "$radvd_pid" ] && ! kill -TERM "$radvd_pid" 2>/dev/null; then
-    signal_failed=1
-    printf 'level=error msg="failed to deliver TERM to radvd; the container may lack CAP_KILL, or the child was already reaped" pid="%s"\n' "$radvd_pid" >&2
+    printf 'level=error msg="failed to deliver TERM to radvd; the container may lack CAP_KILL, or the child was already reaped" pid="%s"\n' "$radvd_pid" >&3
   fi
 }
 # SIGTERM/SIGINT (docker stop): forward and exit.
 on_term() {
   shutdown=1
-  printf 'level=info msg="shutdown signal received; stopping radvd"\n' >&2
+  printf 'level=info msg="shutdown signal received; stopping radvd"\n' >&3
   if [ -n "$radvd_pid" ] && ! kill -TERM "$radvd_pid" 2>/dev/null; then
     signal_failed=1
-    printf 'level=error msg="failed to deliver TERM to radvd; the container may lack CAP_KILL, or the child was already reaped" pid="%s"\n' "$radvd_pid" >&2
+    printf 'level=error msg="failed to deliver TERM to radvd; the container may lack CAP_KILL, or the child was already reaped" pid="%s"\n' "$radvd_pid" >&3
   fi
 }
 trap on_hup HUP
@@ -103,7 +107,7 @@ check_ha_directives() {
   fi
   # 5s is far above any legitimate read of a kilobyte config and far below
   # `docker stop`'s 10s grace, so a stop during a wedged read still exits cleanly.
-  conf_snapshot=$(timeout 5 cat "$CONF" 2>/dev/null)
+  conf_snapshot=$({ timeout 5 cat "$CONF" 2>/dev/null; } 2>/dev/null)
   read_rc=$?
   if [ "$read_rc" -ne 0 ]; then
     # GNU timeout translates an elapsed budget to 124; BusyBox's applet, which
@@ -118,16 +122,46 @@ check_ha_directives() {
       # path, where radvd is already stopped and an unbounded read would wedge
       # PID 1 with no daemon and no exit. The re-read runs only here, after the
       # scan is abandoned, so no gate sees two versions of the file, and it can
-      # produce nothing at all (a short read that completes on retry, or a
-      # `timeout` the image is missing), so the field falls back to a phrase
-      # rather than shipping an empty cause.
-      scan_cause=$(timeout 5 cat "$CONF" 2>&1 >/dev/null)
+      # produce nothing at all (a re-read that succeeds, or writes nothing
+      # to stderr), so the field falls back to a phrase rather than
+      # shipping an empty cause. Whatever the re-read's own stderr
+      # carries reaches the field, ash's job-status word included when
+      # the bound elapses on the re-read too — the brace group points
+      # that report at the capture instead of at the log stream.
+      scan_cause=$({ timeout 5 cat "$CONF" 2>&1 >/dev/null; } 2>/dev/null)
       warn_scan_degraded "${scan_cause:-the re-read reported no diagnostic either}"
     fi
     return 0
   fi
+  # radvd's scanner makes a double-quoted string one token (v2.21
+  # scanner.l), so a `#` inside one is content: stripping from the first
+  # `#` byte erased the `;` after `AdvCaptivePortalAPI "…/#/login"` and
+  # the gates below then had nothing to anchor on. Split on the quote,
+  # not byte by byte: a char loop costs seconds on the multi-megabyte
+  # configs radvd.conf(5) allows.
+  conf_scan=$(printf '%s\n' "$conf_snapshot" | awk '
+    {
+      gsub(/\r/, "")
+      # radvd scanner.l:39 makes a string backslash-escape aware, so an ODD
+      # number of \" inside a value inverts a naive quote split. Neutralise
+      # every escaped character before splitting.
+      gsub(/\\./, "@@")
+      n = split($0, seg, "\"")
+      out = ""
+      for (i = 1; i <= n; i++) {
+        s = seg[i]
+        if (i % 2 == 1) {
+          p = index(s, "#")
+          if (p > 0) { out = out substr(s, 1, p - 1); break }
+        }
+        out = out s
+        if (i < n) { out = out "\"" }
+      }
+      print out
+    }
+  ')
   has_directive() {
-    printf '%s\n' "$conf_snapshot" | sed 's/#.*//' | tr '\n' ' ' | grep -Eqi "$1"
+    printf '%s\n' "$conf_scan" | tr '\n' ' ' | grep -Eqi "$1"
   }
   # radvd's grammar has no empty production (v2.21 gram.y, `grammar : grammar
   # ifacedef | ifacedef`), so a config with no interface definition fails
@@ -142,11 +176,8 @@ check_ha_directives() {
   # link-local address, so a correct block cannot mask a sibling holding the
   # global-VIP mistake. The rule itself is in the warning this branch prints.
   if has_directive '(^|[;{}])[[:space:]]*AdvRASrcAddress([[:space:]]|\{|$)'; then
-    bad_src=$(printf '%s\n' "$conf_snapshot" | awk '
-      # Strip CR so the trailing \r of a CRLF config is not parsed as an
-      # address token (the sed|grep gates already tolerate CRLF via
-      # [[:space:]]).
-      { sub(/#.*/, ""); gsub(/\r/, ""); line = tolower($0) }
+    bad_src=$(printf '%s\n' "$conf_scan" | awk '
+      { line = tolower($0) }
       {
         rest = line
         for (;;) {
@@ -234,17 +265,20 @@ printf 'level=info msg="starting radvd" config="%s" debug_level="%s"\n' "$CONF" 
 start_radvd
 
 while :; do
-  wait "$radvd_pid"
-  status=$?
   # A trapped signal interrupts wait before radvd has finished terminating;
   # keep reaping until the child is fully gone so the next start does not race
   # a dying process. Only the first wait's status can reach the propagate arm:
   # every trapped handler sets shutdown or reload, so a loop that ran here always
   # leaves via exit 0 or continue.
-  while kill -0 "$radvd_pid" 2>/dev/null; do
+  {
     wait "$radvd_pid"
-  done
-  # Cleared the instant the child is gone, so nothing between here and the next
+    status=$?
+    while kill -0 "$radvd_pid" 2>/dev/null; do
+      wait "$radvd_pid"
+    done
+  } 2>/dev/null
+  # Cleared as soon as the loop above can no longer see the child — reaped, or
+  # unsignallable without CAP_KILL — so nothing between here and the next
   # start_radvd can aim a signal at a reaped pid: the handlers skip an empty
   # radvd_pid and start_radvd's pre-pid latch delivers to the replacement. Left
   # set, a TERM landing in this gap reported a CAP_KILL problem that was not
