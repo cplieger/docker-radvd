@@ -197,8 +197,8 @@ if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
       . "$1"
       . "$2"
       CONF=$3
-      check_ha_directives
-    ' _ "$runtime_dir/fn-sanitize_log_value.sh" "$runtime_dir/fn-check_ha_directives.sh" "$runtime_dir/radvd.conf" 2>&1) || runtime_rc=$?
+      check_config_directives
+    ' _ "$runtime_dir/fn-sanitize_log_value.sh" "$runtime_dir/fn-check_config_directives.sh" "$runtime_dir/radvd.conf" 2>&1) || runtime_rc=$?
     if [ "$runtime_rc" -ne 0 ]; then
       err "FAIL: elapsed config-read probe did not return through the degraded warning (rc=$runtime_rc)"
       err "$runtime_out"
@@ -247,8 +247,8 @@ if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
         . "$1"
         . "$2"
         CONF=$3
-        check_ha_directives
-      ' _ "$reread_dir/fn-sanitize_log_value.sh" "$reread_dir/fn-check_ha_directives.sh" "$reread_dir/radvd.conf" 2>&1) || reread_rc=$?
+        check_config_directives
+      ' _ "$reread_dir/fn-sanitize_log_value.sh" "$reread_dir/fn-check_config_directives.sh" "$reread_dir/radvd.conf" 2>&1) || reread_rc=$?
     if [ "$reread_rc" -ne 0 ]; then
       err "FAIL: diagnostic config reread exceeded its production bound (rc=$reread_rc)"
       err "$reread_out"

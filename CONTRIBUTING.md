@@ -20,8 +20,9 @@ The files with real logic are:
   `postUpgradeTasks` recompute the SHA256 from the release asset inside the same
   bump commit, so no manual step is needed.
 - `entrypoint.sh`: a POSIX `sh` script (runs on Alpine's BusyBox shell, not
-  bash) that validates HA directives, creates `/run/radvd`, and supervises radvd
-  in the foreground as the non-root `radvd` user (`-u radvd`): it turns `SIGHUP`
+  bash) that validates the mounted `radvd.conf`, creates `/run/radvd`, and
+  supervises radvd in the foreground as the non-root `radvd` user (`-u radvd`):
+  it turns `SIGHUP`
   into a config reload (refusing it, and keeping the running daemon, when the
   mounted config would not start), forwards `SIGTERM`/`SIGINT` for graceful
   shutdown, and propagates an unexpected radvd exit to Docker's restart policy.
@@ -40,14 +41,22 @@ contract.
   prefixes; the operator supplies their own `radvd.conf` via the read-only
   `/etc/radvd` bind mount. Resist adding a config-generation layer; it is a
   deliberate omission, not a missing feature.
-- **The entrypoint warns, it does not fail.** The HA-directive checks emit
-  `level=warn` lines to stderr and keep going. Single-node operators legitimately
-  run without HA, so do not turn these into hard failures.
+- **The directive checks warn; they do not fail.** Every `level=warn` line
+  `check_config_directives` emits goes to stderr and the boot continues, because
+  single-node operators legitimately run without HA and a warning about a
+  misconfiguration is not a reason to refuse the whole container. Do not turn
+  these into hard failures. The one exception is the non-regular-node refusal at
+  the top of the function: radvd cannot consume a FIFO or a directory as its
+  config file, so that arm exits 1, and it does so from both call sites on
+  purpose (see the comment above it).
 - **The scan lexes the config; it does not grep it.** Comments are stripped
-  first (so a commented-out `# AdvSendAdvert on` correctly fails the check) and
-  the bytes inside a double-quoted value are dropped with them, because radvd's
-  scanner makes such a value one token: a URL carrying directive names and `;`
-  separators configures nothing and must decide nothing. What is left is
+  first (so a commented-out `# AdvSendAdvert on` correctly fails the check), and
+  the bytes inside a double-quoted value are kept while everything that means
+  something to the walk (`{`, `}`, `;`, `#`, whitespace, and the newline that
+  ends a record) is neutralised inside them, because radvd's scanner makes such a
+  value one token and that token spans newlines. So a URL carrying directive
+  names and `;` separators can still name an interface, but it configures nothing
+  and decides nothing, wrapped across lines or not. What is left is
   tokenized with `{`, `}` and `;` as tokens of their own, so a name is only a
   directive on a statement boundary (`MyIgnoreIfMissing on` is not one), a
   directive whose value sits on the next line is still one statement (radvd's
@@ -99,17 +108,31 @@ contract.
   into a radvd restart (re-reads as root), forwards `SIGTERM`/`SIGINT`, and
   propagates an unexpected radvd exit. `exec radvd` is simpler but reintroduces
   the reload-death, so keep the supervise-and-restart loop.
-- **The reload config-tests before it stops anything.** `on_hup` runs
-  `radvd -c -C "$CONF"` under a bound and refuses the reload on any non-zero
-  status, or on an absent config, so a bad edit costs the operator a reload
+- **The reload config-tests before it stops anything, and that is a filter, not
+  a guarantee.** `on_hup` refuses the reload on a `radvd.conf` that is absent or
+  not a regular file, and otherwise on any non-zero status from
+  `radvd -c -C "$CONF"` under a bound, so a bad edit costs the operator a reload
   rather than the segment its RA emitter. `radvd -c` refuses nothing the daemon
   accepts, which is what makes the gate safe to add; startup stays ungated,
-  because at boot there is no last good config to keep serving. A config
-  replaced between that check and the daemon's own read is deliberately not
-  covered.
+  because at boot there is no last good config to keep serving. What the gate
+  cannot cover is everything radvd checks AFTER `readin_config`: `radvd -c` is
+  the parser and exits there, so the `radvd.conf` permissions, the interface's
+  presence on the host, every per-interface parameter bound, and a config
+  replaced between the check and the daemon's own read all pass it. That residue
+  is published in the README's Reloading section by cause rather than closed. Do
+  not close it by replicating radvd's startup checks in shell: `check_conffile_perm`
+  is upstream's and still moving (it carries its own TODO about supplementary
+  groups), `check_iface` is a dozen parameter bounds that move with every
+  release, and Renovate lands `RADVD_VERSION` bumps unattended, so a replica goes
+  stale silently and in the unsafe direction. Alert on radvd's own text instead;
+  the `RadvdConfigError` pattern carries those lines.
 - **Logs are structured `key=value` to stderr.** Match the existing
-  `level=... msg="..."` shape so `docker logs` output stays greppable.
-- **A new fatal owes the README's alert rule an alternative.** Every
+  `level=... msg="..."` shape so `docker logs` output stays greppable. One
+  deliberate exception: `on_hup`'s refusal arm republishes radvd's captured
+  stderr verbatim and unstructured, because the README's `RadvdConfigError` rule
+  matches those bytes and `scripts/smoke.sh` asserts it. Do not route that
+  through `sanitize_log_value`.
+- **A new emitted signal owes the README's alert rules an alternative.** Every
   `level=error` line the entrypoint exits non-zero on is an alternative of the
   `RadvdConfigError` pattern in README.md "Alerting" — that rule is the only
   signal an operator gets that the container is crash-looping before radvd
@@ -120,10 +143,23 @@ contract.
   existing extraction: `tests/shell/config_triage_test.sh`'s `ALERT_RULE` or
   `tests/shell/debug_level_test.sh`'s (unit, against the captured output of the
   shipped block), or `scripts/smoke.sh`'s (runtime, against a real container's
-  logs). The counter-rule, so this does not run the other
-  way: do **not** add an alternative for a state an existing alternative already
-  matches on the same crash-loop — that is why the no-interface warning
-  (`radvd.conf defines no interface`) is not in the pattern, and why
+  logs). Two further arms carry the same obligation and the same assertion
+  requirement. A new `level=warn` line that predicts, or leaves unknown, zero
+  usable Router Advertisement output owes `RadvdAdvertisementsUnverified` an
+  alternative: none of those states produces a fatal, so no alternative of
+  `RadvdConfigError` matches them and the log is the operator's only channel. And
+  a newly discovered class of radvd's OWN diagnostics that does not exit the
+  process owes `RadvdConfigError` an alternative, because `radvd -c` runs the
+  parser only, so the reload gate cannot refuse those configs either.
+  The counter-rule applies to all three, so this does not run the other
+  way: do **not** add an alternative for a state something already matched
+  reports, and do **not** add one for a warning that does not predict zero RA
+  output. That is why the no-interface warning
+  (`radvd.conf defines no interface`) is in neither pattern (radvd's own
+  `exiting, failed to read config file` fires), why an explicit
+  `IgnoreIfMissing off` is not (on the backup where it bites, radvd's
+  `setup_iface=` fatal fires), why an absent `AdvRASrcAddress` is not (it breaks
+  failover, not this node's emission), and why
   `radvd exited; propagating exit for restart policy`
   must never be (it reports any unexpected radvd exit, whatever the cause, so it
   would fire a config alert for a crash that has nothing to do with the config).

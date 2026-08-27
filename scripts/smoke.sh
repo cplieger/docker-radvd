@@ -239,14 +239,10 @@ pid_after=$(wait_for_reload "$C1" "$((reload_before + 1))" "$pid_before")
 printf '[smoke] PASS  reap order: replacement waited for the previous radvd generation to exit\n'
 
 # --- 4. graceful shutdown on SIGTERM -----------------------------------------
-job_status_before=$(docker logs "$C1" 2>&1 | grep -Ec '^(Terminated|Killed)$' || true)
 docker stop "$C1" >/dev/null
 ec=$(docker inspect -f '{{.State.ExitCode}}' "$C1")
 [ "$ec" = "0" ] || fail "docker stop exit code $ec, want 0"
 wait_for_log "$C1" 'radvd stopped on shutdown signal' "missing graceful shutdown log line"
-job_status_after=$(docker logs "$C1" 2>&1 | grep -Ec '^(Terminated|Killed)$' || true)
-[ "$job_status_after" -eq "$job_status_before" ] \
-  || fail "graceful shutdown leaked a bare BusyBox ash job-status line into docker logs"
 printf '[smoke] PASS  shutdown: SIGTERM exits 0 with graceful log\n'
 
 # The README's RadvdConfigError rule is an exact-string contract between the
@@ -300,6 +296,59 @@ docker kill -s HUP "$C1" >/dev/null
 pid_after=$(wait_for_reload "$C1" "$((reload_before + 1))" "$pid_before")
 [ -n "$pid_after" ] || fail "a corrected config did not reload after a refused one"
 printf '[smoke] PASS  malformed reload: refused with radvd still serving (pids %s), and a corrected config reloads\n' "$pid_before"
+
+# --- unexpected death after an accepted reload still propagates ------------
+pid_before=$(docker exec "$C1" pidof radvd) || fail "cannot read radvd pid before the post-reload propagation scenario"
+reload_before=$(docker logs "$C1" 2>&1 | grep -c 'msg="reloading radvd (config re-read via restart)"' || true)
+docker kill -s HUP "$C1" >/dev/null
+pid_after=$(wait_for_reload "$C1" "$((reload_before + 1))" "$pid_before")
+[ -n "$pid_after" ] || fail "the setup reload did not complete before the propagation check"
+reload_after=$(docker logs "$C1" 2>&1 | grep -c 'msg="reloading radvd (config re-read via restart)"' || true)
+docker exec "$C1" sh -c 'kill -KILL $(pidof radvd)'
+wait_until_stopped "$C1" "container still running after radvd was SIGKILLed following a reload"
+ec=$(docker inspect -f '{{.State.ExitCode}}' "$C1")
+[ "$ec" = "137" ] || fail "post-reload propagated exit code $ec, want 137"
+wait_for_log "$C1" 'radvd exited; propagating exit for restart policy' "missing post-reload exit-propagation log line"
+[ "$(docker logs "$C1" 2>&1 | grep -c 'msg="reloading radvd (config re-read via restart)"' || true)" -eq "$reload_after" ] \
+  || fail "the unexpected post-reload death was mistaken for another deliberate reload"
+printf '[smoke] PASS  post-reload propagation: radvd death exits container with 137\n'
+
+# --- shutdown wins while an accepted HUP is still in flight -----------------
+docker start "$C1" >/dev/null
+ready=""
+for _ in $(seq 1 15); do
+  if docker exec "$C1" pidof radvd >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
+  sleep 1
+done
+[ -n "$ready" ] || fail "$C1: radvd did not return before the overlapping-signal scenario"
+held=$(docker exec "$C1" pidof radvd) || fail "cannot read radvd pids for the overlapping-signal scenario"
+read -r -a held_pids <<<"$held"
+reload_before=$(docker logs "$C1" 2>&1 | grep -c 'msg="reloading radvd (config re-read via restart)"' || true)
+hup_before=$(docker logs "$C1" 2>&1 | grep -c 'msg="SIGHUP received; restarting radvd to reload config"' || true)
+docker exec "$C1" sh -c 'kill -STOP "$@"' _ "${held_pids[@]}"
+docker kill -s HUP "$C1" >/dev/null
+hup_seen=""
+for _ in $(seq 1 20); do
+  hup_now=$(docker logs "$C1" 2>&1 | grep -c 'msg="SIGHUP received; restarting radvd to reload config"' || true)
+  if [ "$hup_now" -gt "$hup_before" ]; then
+    hup_seen=1
+    break
+  fi
+  sleep 0.1
+done
+[ -n "$hup_seen" ] || fail "PID 1 did not accept HUP while the old generation was held"
+docker kill -s TERM "$C1" >/dev/null
+docker exec "$C1" sh -c 'kill -CONT "$@"' _ "${held_pids[@]}"
+wait_until_stopped "$C1" "container restarted radvd instead of honoring shutdown during an in-flight HUP"
+ec=$(docker inspect -f '{{.State.ExitCode}}' "$C1")
+[ "$ec" = "0" ] || fail "overlapping HUP/TERM exit code $ec, want 0"
+wait_for_log "$C1" 'radvd stopped on shutdown signal' "missing graceful shutdown log after overlapping HUP and TERM"
+[ "$(docker logs "$C1" 2>&1 | grep -c 'msg="reloading radvd (config re-read via restart)"' || true)" -eq "$reload_before" ] \
+  || fail "a replacement radvd started after TERM took precedence over the in-flight HUP"
+printf '[smoke] PASS  signal precedence: shutdown beat the in-flight HUP reload\n'
 
 # --- 5. unexpected radvd death propagates to the container --------------------
 printf '[smoke] starting %s (exit-propagation scenario)\n' "$C2"

@@ -111,6 +111,27 @@ signalled "$radvd_pid" \
   || no "reload latch" "no TERM recorded for $radvd_pid; signals=[$(tr '\n' ' ' <"$SIGNALS")]"
 reap "$radvd_pid"
 
+# on_hup refuses any config that is not a regular file and config-tests the rest, so
+# every case from here down needs a real regular-file config and a real `radvd` on
+# PATH: `timeout 5 radvd -c` execs, and the recording shell function above is
+# invisible to that exec.
+HUPDIR=$(mktemp -d "$WORK/hup.XXXXXX")
+mkdir "$HUPDIR/bin"
+CONF="$HUPDIR/radvd.conf"
+stub_radvd() {
+  printf '%s\n' '#!/bin/sh' 'printf "%s\n" "radvd stub: $*" >&2' "exit $1" >"$HUPDIR/bin/radvd"
+  chmod +x "$HUPDIR/bin/radvd"
+}
+PATH="$HUPDIR/bin:$PATH"
+printf 'interface eth0 { AdvSendAdvert on; };\n' >"$CONF"
+stub_radvd 0
+# Asserted before it is relied on: a missing fixture produces the same refusal as a
+# correctly refusing on_hup, which would turn the control below green for the wrong
+# reason and take case 5 with it.
+[ -f "$CONF" ] && [ -x "$HUPDIR/bin/radvd" ] \
+  && ok "the reload cases have a regular-file config and a radvd stub on PATH" \
+  || no "hup fixture" "CONF=$CONF, stub=$HUPDIR/bin/radvd"
+
 # --- 4. control: a HUP outside a shutdown does reload -----------------------------
 # Without it, case 5 below would pass against an on_hup that ignores every HUP.
 # The throwaway child stands in for radvd for the same reason the cases above use
@@ -153,17 +174,6 @@ reap "$radvd_pid"
 # hiccup) where there is no file for radvd to reject, and the control that a
 # passing check still reloads — without which both refusals would pass against an
 # on_hup that refuses every HUP.
-HUPDIR=$(mktemp -d "$WORK/hup.XXXXXX")
-mkdir "$HUPDIR/bin"
-CONF="$HUPDIR/radvd.conf"
-# on_hup runs `timeout 5 radvd -c`, so radvd has to be a real process here: the
-# recording shell function above is invisible to timeout's exec.
-stub_radvd() {
-  printf '%s\n' '#!/bin/sh' 'printf "%s\n" "radvd stub: $*" >&2' "exit $1" >"$HUPDIR/bin/radvd"
-  chmod +x "$HUPDIR/bin/radvd"
-}
-PATH="$HUPDIR/bin:$PATH"
-
 printf 'interface eth0 { AdvSendAdvert on; };\n' >"$CONF"
 stub_radvd 1
 sleep 20 &

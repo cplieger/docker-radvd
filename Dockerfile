@@ -37,6 +37,8 @@ RUN url="https://github.com/radvd-project/radvd/releases/download/${RADVD_VERSIO
     && install -D -m 755 radvd /out/usr/sbin/radvd \
     && install -D -m 755 radvdump /out/usr/sbin/radvdump \
     && install -D -m 644 defaults.h /out/radvd-src/defaults.h \
+    # Syft inventories the final image from Alpine's APK database only, so this
+    # source-built payload is invisible to the signed release SBOM without it.
     && cat > /out/radvd.cdx.json <<EOF
 {
   "bomFormat": "CycloneDX",

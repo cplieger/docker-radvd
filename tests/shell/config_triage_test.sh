@@ -4,7 +4,7 @@
 # (readable check failed on an existing file).
 #
 # This is inline boot code, not a function, so it comes out via extract_range and
-# runs in a subshell per case with check_ha_directives stubbed to a recorder — the
+# runs in a subshell per case with check_config_directives stubbed to a recorder — the
 # validator itself has its own test file, and what THIS block owes is the routing:
 # which configs reach the validator, which warn, which abort.
 #
@@ -34,14 +34,14 @@ setup() {
 }
 
 # Each case runs the block in its own subshell: `exit 1` must reach a process
-# boundary here, not this file, and the check_ha_directives stub records instead
+# boundary here, not this file, and the check_config_directives stub records instead
 # of validating.
 run_triage() {
   _rc=0
   bash -c '
     set -u
     CONF=$1
-    check_ha_directives() { printf "HA_CHECK_CALLED\n" >&2; }
+    check_config_directives() { printf "HA_CHECK_CALLED\n" >&2; }
     . "$2"
   ' _ "$CONF" "$TRIAGE" 2>"$LOG" || _rc=$?
 }

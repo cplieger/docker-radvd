@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# check_ha_directives(): the validator behind the HA warnings, and the bulk of
+# check_config_directives(): the validator behind the config warnings, and the bulk of
 # entrypoint.sh. Warn-only except the refusal of a node radvd itself cannot open,
 # so each case pins which line fires for which config shape and, just as
 # load-bearing, which shapes stay SILENT — a false warning against a valid config
@@ -20,14 +20,14 @@ set -u
 . "$(dirname -- "$0")/lib.sh"
 new_workdir >/dev/null
 
-load_function check_ha_directives
+load_function check_config_directives
 # warn_scan_degraded delegates to the top-level sanitize_log_value, so the
 # extraction needs it too — without it the degraded-scan path dies with
 # "command not found" and the sanitizer assertion reports a wrong outcome rather
 # than a missing dependency.
 load_function sanitize_log_value
 # The same extractions, kept as files for run_check's bounded subshell below.
-SRC=$(extract_function check_ha_directives "$WORK/check_ha_directives.sh") || exit 1
+SRC=$(extract_function check_config_directives "$WORK/check_config_directives.sh") || exit 1
 SANITIZER=$(extract_function sanitize_log_value "$WORK/sanitize_log_value.sh") || exit 1
 
 LOG="$WORK/log"
@@ -49,7 +49,7 @@ run_check() {
     . "$1"
     . "$2"
     CONF=$3
-    check_ha_directives
+    check_config_directives
   ' _ "$SANITIZER" "$SRC" "$CONF" 2>"$LOG" || _rc=$?
 }
 
@@ -268,16 +268,17 @@ fi
 # --- 13. hostile bytes inside an ADDRESS token reach the boundary sanitizer --------
 # The bad= field names operator-supplied address tokens, so the sanitize_log_value
 # call on the shipped path is the only thing standing between a config value and the
-# structured log line. A quote inside the address survives tokenization (the splitter
-# cuts on ';' and trims only space/tab), so it reaches bad= as part of the token.
+# structured log line. A quote cannot be the bait: the lexer owns it, so a `"` inside
+# an address opens a string and no quote reaches bad= at all. A control byte INSIDE
+# the token does reach it, and must be neutralized without splitting the token.
 setup
-printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvSendAdvert on;\n  AdvRASrcAddress { fd00::"78; };\n};\n' >"$CONF"
+printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvSendAdvert on;\n  AdvRASrcAddress { fd00::\017x78; };\n};\n' >"$CONF"
 run_check
 [ "$_rc" -eq 0 ] && logged 'msg="AdvRASrcAddress is set to a non-link-local address' \
-  && [ "$(wc -l <"$LOG")" -eq 1 ] && ! grep -Fq 'fd00::"78' "$LOG" \
-  && grep -q 'fd00::?' "$LOG" \
-  && ok "a quote inside the ADDRESS token named in bad= is neutralized" \
-  || no "quote in the address token" "lines=$(wc -l <"$LOG"), log: $(cat "$LOG")"
+  && [ "$(wc -l <"$LOG")" -eq 1 ] && ! grep -q 'fd00::'"$(printf '\017')" "$LOG" \
+  && grep -q 'bad="fd00:: x78"' "$LOG" \
+  && ok "a control byte inside the ADDRESS token named in bad= is neutralized in place" \
+  || no "mid-token control byte in bad=" "lines=$(wc -l <"$LOG"), log: $(cat "$LOG")"
 
 # The control-byte arm of the same sanitizer, which the quote mapping cannot cover:
 # a control byte inside the address token. The one-line oracle is what the
@@ -294,7 +295,8 @@ run_check
 # scanner accepts a quoted, backslash-escaped STRING token there (scanner.l,
 # gram.y), so the name reaching iface= is operator-supplied text and not a
 # kernel-validated device name. A control byte inside it must not reach the log
-# stream raw, and the quoted spelling must not close the field early.
+# stream raw, and the quoted spelling must reach iface= as the name radvd's own
+# scanner reads out of the STRING token.
 setup
 printf 'interface eth\017x {\n  AdvSendAdvert on;\n};\n' >"$CONF"
 run_check
@@ -309,8 +311,8 @@ setup
 printf 'interface "eth0" {\n  AdvSendAdvert on;\n};\n' >"$CONF"
 run_check
 [ "$_rc" -eq 0 ] && [ "$(wc -l <"$LOG")" -eq 1 ] \
-  && grep -q 'iface="??"' "$LOG" \
-  && ok "a quoted interface name reaches iface= with its quotes neutralized, keeping the line parseable" \
+  && grep -q 'iface="eth0"' "$LOG" \
+  && ok "a quoted interface name reaches iface= as the name radvd reads, keeping the line parseable" \
   || no "quoted interface name" "lines=$(wc -l <"$LOG"), log: $(cat "$LOG")"
 
 # --- 14. a directive SPLIT across lines is still seen ------------------------------
@@ -377,7 +379,7 @@ setup
 printf 'interface eth0 { IgnoreIfMissing on; AdvRASrcAddress { fe80::1; }; };\n' >"$CONF"
 calls="$WORK/timeout-143-calls"
 : >"$calls"
-# Both stubs shadow the external commands the runtime-loaded check_ha_directives
+# Both stubs shadow the external commands the runtime-loaded check_config_directives
 # invokes, so their call site is not in this file for shellcheck to see.
 # shellcheck disable=SC2329
 timeout() {
@@ -390,7 +392,7 @@ cat() {
   return 99
 }
 _rc=0
-check_ha_directives 2>"$LOG" || _rc=$?
+check_config_directives 2>"$LOG" || _rc=$?
 timeout_calls=$(grep -c '^timeout ' "$calls" || true)
 cat_calls=$(grep -c '^cat ' "$calls" || true)
 unset -f timeout cat
@@ -425,5 +427,26 @@ msg_set "$LOG" >"$WORK/plain.msgs"
   && cmp -s "$WORK/bait.msgs" "$WORK/plain.msgs" \
   && ok "directive-shaped text inside a quoted value changes no HA decision" \
   || no "quoted payload treated as syntax" "bait_rc=$bait_rc, rc=$_rc, bait=[$(tr '\n' ' ' <"$WORK/bait.msgs")], plain=[$(tr '\n' ' ' <"$WORK/plain.msgs")]"
+
+# --- 19. a quoted value WRAPPED across lines is still ONE token -------------------
+# scanner.l:39 negates only the quote, so radvd's string token spans newlines: a
+# value opened on one line and closed on another carries every line between it as
+# data. A per-line quote model hands those lines to the walk as config, and the two
+# consequences are opposite halves of one defect: a payload naming AdvSendAdvert
+# silences the warning this interface needs, and an unbalanced brace in the
+# continuation corrupts brace depth and mutes every sibling block after it.
+setup
+printf 'interface eth0 {\n  AdvCaptivePortalAPI "\nAdvSendAdvert\non\n";\n  AdvRASrcAddress { fe80::1; };\n};\n' >"$CONF"
+run_check
+[ "$_rc" -eq 0 ] && logged 'msg="no enabled AdvSendAdvert on directive found' \
+  && ok "AdvSendAdvert on wrapped across lines inside a quoted value does not satisfy the gate" \
+  || no "wrapped quoted payload" "rc=$_rc, log: $(cat "$LOG")"
+
+setup
+printf 'interface eth0 {\n  AdvCaptivePortalAPI "\n  {\n  ";\n  AdvSendAdvert on;\n  AdvRASrcAddress { fe80::1; };\n};\ninterface eth1 {\n};\n' >"$CONF"
+run_check
+[ "$_rc" -eq 0 ] && logged 'iface="eth1"' && ! logged 'iface="eth0"' \
+  && ok "an unbalanced brace inside a wrapped quoted value masks no sibling interface block" \
+  || no "brace in a wrapped quoted value" "rc=$_rc, log: $(cat "$LOG")"
 
 report

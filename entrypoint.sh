@@ -23,17 +23,15 @@ on_hup() {
   fi
   # The reload stops radvd before its replacement reads the config, so a bad or
   # absent config here would leave the container with no daemon: refuse and keep
-  # serving the last good one. `radvd -c` rejects nothing the daemon accepts — it
-  # forces debug level 1 (radvd.c:289-290) and short-circuits before setup_ifaces.
-  hup_ct=""
-  hup_rc=0
-  if [ -f "$CONF" ]; then
-    hup_ct=$(timeout 5 radvd -c -C "$CONF" 2>&1) || hup_rc=$?
-  fi
-  if ! [ -e "$CONF" ]; then
-    printf 'level=error msg="SIGHUP reload refused: radvd.conf is absent; radvd keeps serving its last good config" path="%s"\n' "$CONF" >&3
+  # serving the last good one. `radvd -c` rejects nothing the daemon accepts, but it
+  # runs radvd's config PARSER and stops there, so everything radvd validates after
+  # parsing passes this gate: a filter, not a guarantee.
+  if ! [ -f "$CONF" ]; then
+    printf 'level=error msg="SIGHUP reload refused: radvd.conf is absent or not a regular file; radvd keeps serving its last good config" path="%s"\n' "$CONF" >&3
     return
   fi
+  hup_rc=0
+  hup_ct=$(timeout 5 radvd -c -C "$CONF" 2>&1) || hup_rc=$?
   if [ "$hup_rc" -ne 0 ]; then
     # Neither timeout call site passes -k, so an elapsed budget is 124 (GNU) or
     # 143 (BusyBox, the shipped one) and 137 is unreachable at both.
@@ -41,6 +39,8 @@ on_hup() {
       printf 'level=error msg="SIGHUP reload refused: the config check did not finish within 5s; radvd keeps serving its last good config" path="%s"\n' "$CONF" >&3
     else
       printf 'level=error msg="SIGHUP reload refused: radvd rejected the mounted config; radvd keeps serving its last good config" path="%s"\n' "$CONF" >&3
+      # radvd's own text, verbatim and unstructured on purpose: README's
+      # RadvdConfigError rule matches these bytes and scripts/smoke.sh asserts it.
       printf '%s\n' "$hup_ct" >&3
     fi
     return
@@ -88,10 +88,11 @@ case "$RADVD_DEBUG_LEVEL" in
     ;;
 esac
 
-# Warn-only except the non-regular-node refusal below, which exits 1 from both
-# call sites: a single-node operator legitimately deploys without HA. Why HA needs
-# these directives: CONTRIBUTING.md, "Design boundaries (please preserve)".
-check_ha_directives() {
+# Warn-only except the non-regular-node refusal below, which exits 1 from both call
+# sites: no warning here is worth refusing the container over, and a single-node
+# operator legitimately deploys without HA. Why HA needs its directives:
+# CONTRIBUTING.md, "Design boundaries (please preserve)".
+check_config_directives() {
   # A FIFO with no writer blocks in open/read and a device node may return EOF
   # immediately (/dev/null does), so neither gives the bounded regular-file
   # snapshot this scan needs. No POSIX-sh operation can type-check and open a node
@@ -105,7 +106,7 @@ check_ha_directives() {
     exit 1
   fi
   # 5s: above any legitimate read of this config, below `docker stop`'s 10s grace.
-  conf_snapshot=$({ timeout 5 cat "$CONF" 2>/dev/null; } 2>/dev/null)
+  conf_snapshot=$({ timeout 5 cat "$CONF"; } 2>/dev/null)
   read_rc=$?
   if [ "$read_rc" -ne 0 ]; then
     if [ "$read_rc" -eq 124 ] || [ "$read_rc" -eq 143 ]; then
@@ -122,8 +123,12 @@ check_ha_directives() {
   fi
   # radvd's scanner makes a double-quoted string one token (v2.21 scanner.l), so a
   # `#` inside one is content: a naive strip from the first `#` erases the `;` after
-  # `AdvCaptivePortalAPI "…/#/login"` and the gates lose their anchor. Split on the
-  # quote, not byte by byte: a char loop costs seconds on a multi-megabyte config.
+  # `AdvCaptivePortalAPI "…/#/login"` and the gates lose their anchor. This stage owns
+  # that token end to end: its bytes are KEPT (so a quoted value can still name an
+  # interface) but every byte that means something to the walk below — `{`, `}`, `;`,
+  # `#`, whitespace and the record separator — is replaced by `@`, so a quoted value
+  # decides nothing. Split on the quote, not byte by byte: a char loop costs seconds
+  # on a multi-megabyte config.
   conf_scan=$(printf '%s\n' "$conf_snapshot" | awk '
     {
       gsub(/\r/, "")
@@ -134,14 +139,22 @@ check_ha_directives() {
       out = ""
       for (i = 1; i <= n; i++) {
         s = seg[i]
-        if (i % 2 == 1) {
+        if (instr) {
+          gsub(/[{};# \t]/, "@", s)
+          out = out s
+        } else {
           p = index(s, "#")
           if (p > 0) { out = out substr(s, 1, p - 1); break }
           out = out s
         }
-        if (i < n) { out = out "\"" }
+        if (i < n) {
+          out = out " "
+          instr = !instr
+        }
       }
-      print out
+      # scanner.l:39 negates only the quote, so the string spans newlines too: while
+      # it is open the record separator is one more byte of it, not a token boundary.
+      if (instr) { printf "%s@", out } else { print out }
     }
   ')
   # Braces and `;` are padded into their own tokens, so a directive name counts only
@@ -215,7 +228,6 @@ check_ha_directives() {
         }
         if (depth == 0) {
           if (lt == "interface") {
-            flush()
             seen_iface = 1
             want_name = 1
           }
@@ -272,7 +284,7 @@ check_ha_directives() {
 }
 
 if [ -r "$CONF" ]; then
-  check_ha_directives
+  check_config_directives
 elif [ -e "$CONF" ]; then
   printf 'level=error msg="radvd.conf exists but is not readable" path="%s"\n' "$CONF" >&2
   exit 1
@@ -333,7 +345,7 @@ while :; do
   if [ "$reload" -eq 1 ]; then
     reload=0
     printf 'level=info msg="reloading radvd (config re-read via restart)"\n' >&2
-    check_ha_directives
+    check_config_directives
     start_radvd
     continue
   fi
