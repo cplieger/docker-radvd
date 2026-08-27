@@ -6,7 +6,7 @@
 # is how a real one gets ignored. Its only input is the CONF global, so every case
 # builds a fresh config dir. The host's sed/grep/awk/tr stand in for the image's
 # BusyBox ones, so a case asserts an OUTCOME (which line, silence, one parseable
-# line), never a tool-specific substitution; only case 17 stubs anything, and only
+# line), never a tool-specific substitution; only case 15 stubs anything, and only
 # the two process boundaries whose STATUS is the subject there.
 #
 # Lint directives, each against a stated guarantee rather than an assumption:
@@ -68,7 +68,7 @@ setup
 printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvSendAdvert on;\n  AdvRASrcAddress { fe80::cc32:57ff:feb5:85bf; };\n};\n' >"$CONF"
 run_check
 [ "$_rc" -eq 0 ] && [ ! -s "$LOG" ] \
-  && ok "a correct HA config (IgnoreIfMissing on + link-local AdvRASrcAddress) is silent" \
+  && ok "a correct HA config (AdvSendAdvert on + link-local AdvRASrcAddress) is silent" \
   || no "happy path silent" "rc=$_rc, log: $(cat "$LOG")"
 
 # --- 2. the whole grammar on ONE line is still recognised --------------------------
@@ -121,9 +121,7 @@ run_check
 
 # --- 5. a directive NAME must sit on a statement boundary -------------------------
 # "MyAdvSendAdvert on" contains the directive as a substring; the statement
-# boundary is what keeps it from satisfying the gate. Anchored on AdvSendAdvert
-# because absence of a directive whose upstream default is already the wanted
-# value is not a defect, so IgnoreIfMissing has no absence warning to observe.
+# boundary is what keeps it from satisfying the gate.
 setup
 printf 'interface eth0 {\n  MyAdvSendAdvert on;\n  IgnoreIfMissing on;\n  AdvRASrcAddress { fe80::1; };\n};\n' >"$CONF"
 run_check
@@ -143,27 +141,7 @@ logged 'msg="no enabled AdvSendAdvert on directive found' \
   && ok "a commented-out AdvSendAdvert still warns (comments are stripped first)" \
   || no "comment stripping" "log: $(cat "$LOG")"
 
-# --- 7. an EXPLICIT IgnoreIfMissing off warns; its absence does not ---------------
-# Upstream defaults IgnoreIfMissing to on (DFLT_IgnoreIfMissing, pinned by
-# tests/smoke.sh), so an absent directive is a correct config and an explicit
-# `off` is the state that makes an HA backup exit. The two arms are one pair: the
-# first fails if `off` stops being distinguished from `on`, the second if absence
-# is warned about again.
-setup
-printf 'interface eth0 {\n  IgnoreIfMissing off;\n  AdvSendAdvert on;\n  AdvRASrcAddress { fe80::1; };\n};\n' >"$CONF"
-run_check
-logged 'msg="IgnoreIfMissing is explicitly off' \
-  && ok "an explicit IgnoreIfMissing off warns that an HA backup will exit or log errors" \
-  || no "explicit off warned" "log: $(cat "$LOG")"
-
-setup
-printf 'interface eth0 {\n  AdvSendAdvert on;\n  AdvRASrcAddress { fe80::1; };\n};\n' >"$CONF"
-run_check
-[ "$_rc" -eq 0 ] && [ ! -s "$LOG" ] \
-  && ok "an ABSENT IgnoreIfMissing is silent: upstream already defaults it to on" \
-  || no "absent IgnoreIfMissing silent" "rc=$_rc, log: $(cat "$LOG")"
-
-# --- 8. THE CLASSIC HA MISTAKE: AdvRASrcAddress on a non-link-local address -------
+# --- 7. THE CLASSIC HA MISTAKE: AdvRASrcAddress on a non-link-local address -------
 # RFC 4861 §6.1.2: hosts silently discard an RA sourced from a non-link-local
 # address. radvd emits, tcpdump shows traffic, nothing autoconfigures — this
 # warning is the only artifact that names the cause.
@@ -181,7 +159,7 @@ logged 'msg="AdvRASrcAddress is set to a non-link-local address' && logged 'fec0
   && ok "a site-local fec0:: source warns: it is one hex digit outside fe80::/10, which is what [89ab] decides" \
   || no "site-local source warned" "log: $(cat "$LOG")"
 
-# --- 9. a correct block must not MASK a broken sibling ----------------------------
+# --- 8. a correct block must not MASK a broken sibling ----------------------------
 # Two blocks in one radvd.conf: eth0's correct block, then the global-VIP mistake on
 # a later line. A correct block seen first must not stop the scan.
 setup
@@ -201,9 +179,9 @@ logged 'fd00::78' \
   && ok "a broken sibling BLOCK on the same line is still scanned (same-line re-scan)" \
   || no "same-line sibling" "log: $(cat "$LOG")"
 
-# --- 10. no false warning from a trailing same-line directive ---------------------
+# --- 9. no false warning from a trailing same-line directive ---------------------
 # `}; MinRtrAdvInterval 30;` after the address block must not be parsed as an
-# address. This is the false-POSITIVE guard; cases 8/9 keep it honest (the file
+# address. This is the false-POSITIVE guard; cases 7/8 keep it honest (the file
 # cannot pass by never warning).
 setup
 printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvSendAdvert on;\n  AdvRASrcAddress { fe80::1; }; MinRtrAdvInterval 30;\n};\n' >"$CONF"
@@ -212,7 +190,7 @@ run_check
   && ok "a trailing same-line directive after the block close is not read as an address" \
   || no "trailing directive" "log: $(cat "$LOG")"
 
-# --- 11. missing AdvRASrcAddress warns (HA failover would not work) ---------------
+# --- 10. missing AdvRASrcAddress warns (HA failover would not work) ---------------
 setup
 printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvSendAdvert on;\n};\n' >"$CONF"
 run_check
@@ -220,7 +198,7 @@ logged 'msg="no AdvRASrcAddress directive found' \
   && ok "a config without AdvRASrcAddress warns that HA failover will not work" \
   || no "missing AdvRASrcAddress" "log: $(cat "$LOG")"
 
-# --- 12. a non-regular config node is REFUSED, and PID 1 must not hang -----------
+# --- 11. a non-regular config node is REFUSED, and PID 1 must not hang -----------
 # A FIFO at radvd.conf: the regular-file probe refuses it before the read, which
 # without the probe would stall until the bounded read gave up and then degrade to
 # a warning — while radvd's own open of the same node blocks with no bound at all,
@@ -265,7 +243,7 @@ else
   chmod 644 "$CONF"
 fi
 
-# --- 13. hostile bytes inside an ADDRESS token reach the boundary sanitizer --------
+# --- 12. hostile bytes inside an ADDRESS token reach the boundary sanitizer --------
 # The bad= field names operator-supplied address tokens, so the sanitize_log_value
 # call on the shipped path is the only thing standing between a config value and the
 # structured log line. A quote cannot be the bait: the lexer owns it, so a `"` inside
@@ -326,8 +304,8 @@ run_check
 
 # An EMPTY quoted name is a real name to radvd (the 2-byte `""`), so the block must
 # still be scanned. Stripping the quotes made it the empty string, which left `entered`
-# unset and silently dropped all three per-interface warnings while `seen_iface`
-# suppressed the no-interface warning too: total silence for a misconfigured block.
+# unset and silently dropped every per-interface warning: total silence for a
+# misconfigured block.
 setup
 printf 'interface "" {\n  AdvCaptivePortalAPI "x";\n};\n' >"$CONF"
 run_check
@@ -338,18 +316,18 @@ run_check
   && ok "an empty quoted interface name is still a name, so its block is not silently skipped" \
   || no "empty quoted interface name" "lines=$(wc -l <"$LOG"), log: $(cat "$LOG")"
 
-# --- 14. a directive SPLIT across lines is still seen ------------------------------
-# radvd's lexer discards newlines, so `IgnoreIfMissing` with its value `on;` on the
+# --- 13. a directive SPLIT across lines is still seen ------------------------------
+# radvd's lexer discards newlines, so `AdvSendAdvert` with its value `on;` on the
 # next line is valid config. The gates match a newline-folded stream for that reason;
 # a line-oriented gate reads this valid config as missing HA directives.
 setup
-printf 'interface eth0 {\n  IgnoreIfMissing\n  on;\n  AdvSendAdvert on;\n  AdvRASrcAddress { fe80::1; };\n};\n' >"$CONF"
+printf 'interface eth0 {\n  AdvSendAdvert\n  on;\n  AdvRASrcAddress { fe80::1; };\n};\n' >"$CONF"
 run_check
 [ "$_rc" -eq 0 ] && [ ! -s "$LOG" ] \
-  && ok "IgnoreIfMissing with its value on the next line is silent (newlines are folded)" \
+  && ok "AdvSendAdvert with its value on the next line is silent (newlines are folded)" \
   || no "line-spanning directive" "rc=$_rc, log: $(cat "$LOG")"
 
-# --- 15. an UNCLOSED AdvRASrcAddress block cannot log an unbounded bad= field ------
+# --- 14. an UNCLOSED AdvRASrcAddress block cannot log an unbounded bad= field ------
 # A block whose closing `}` is missing leaves the scanner in-block, so every
 # following directive is tokenized as an address and the whole remainder of the
 # config lands in one bad= field. The cap on the shipped call is what bounds that
@@ -365,36 +343,7 @@ payload=${bad%"[truncated]"}
   && ok "an unclosed AdvRASrcAddress block warns once, with bad= capped at 200 and marked truncated" \
   || no "unclosed block cap" "lines=$(wc -l <"$LOG"), payload=${#payload}, bad='$bad'"
 
-# --- 16. a config defining NO INTERFACE warns, and nothing else ---------------------
-# A config defining no interface is a foretold radvd failure (its grammar requires
-# at least one interface block) — both call sites reach this warning, so a config
-# emptied between startup and a HUP reload says so on the reload too. The
-# per-interface gates have no block to report against here, so this warning is the
-# whole oracle: warning about directives inside interfaces there are none of is
-# noise, not coverage.
-setup
-: >"$CONF"
-run_check
-[ "$_rc" -eq 0 ] && logged 'msg="radvd.conf defines no interface' \
-  && [ "$(warn_count)" -eq 1 ] \
-  && ok "an empty config warns that radvd will exit, and draws no per-interface warning" \
-  || no "empty config warn" "rc=$_rc, log: $(cat "$LOG")"
-
-setup
-printf '# interface eth0 { AdvSendAdvert on; };\n' >"$CONF"
-run_check
-[ "$_rc" -eq 0 ] && logged 'msg="radvd.conf defines no interface' \
-  && ok "a fully commented-out config warns (comments define no interface)" \
-  || no "comment-only config warn" "rc=$_rc, log: $(cat "$LOG")"
-
-setup
-printf 'AdvSendAdvert on;\n' >"$CONF"
-run_check
-[ "$_rc" -eq 0 ] && logged 'msg="radvd.conf defines no interface' \
-  && ok "top-level directives with no interface block warn (radvd's grammar rejects it)" \
-  || no "top-level-only config warn" "rc=$_rc, log: $(cat "$LOG")"
-
-# --- 17. an elapsed read budget stays bounded, on the status BusyBox produces ------
+# --- 15. an elapsed read budget stays bounded, on the status BusyBox produces ------
 # BusyBox timeout reports expiry as 143, not GNU's translated 124. Drive that
 # process-boundary result directly and record whether the failed-read arm falls
 # through to an unbounded diagnostic cat.
@@ -424,7 +373,7 @@ unset -f timeout cat
   && ok "BusyBox timeout expiry stays bounded and emits the exceeded-budget warning without a direct re-read" \
   || no "BusyBox timeout expiry" "rc=$_rc, timeout_calls=$timeout_calls, cat_calls=$cat_calls, log: $(cat "$LOG")"
 
-# --- 18. text inside a QUOTED VALUE is data, and must change no HA decision -------
+# --- 16. text inside a QUOTED VALUE is data, and must change no HA decision -------
 # radvd's scanner makes a double-quoted value ONE token (v2.21 scanner.l), so its
 # bytes configure nothing. The bait is a complete HA config -- statement
 # boundaries, directive names, values and an address block -- inside an
@@ -438,7 +387,7 @@ msg_set() {
   sed -n 's/.*\(msg="[^"]*"\).*/\1/p' "$1" | sort
 }
 setup
-printf 'interface eth0 {\n  AdvCaptivePortalAPI "https://portal.example/; IgnoreIfMissing on; AdvRASrcAddress { fe80::1; };";\n};\n' >"$CONF"
+printf 'interface eth0 {\n  AdvCaptivePortalAPI "https://portal.example/; AdvSendAdvert on; AdvRASrcAddress { fe80::1; };";\n};\n' >"$CONF"
 run_check
 bait_rc=$_rc
 msg_set "$LOG" >"$WORK/bait.msgs"
@@ -471,7 +420,7 @@ msg_set "$LOG" >"$WORK/word-plain.msgs"
   && ok "a single-word quoted value cannot satisfy a directive gate either" \
   || no "single-word quoted payload satisfied a gate" "word_rc=$word_rc, rc=$_rc, word=[$(tr '\n' ' ' <"$WORK/word.msgs")], plain=[$(tr '\n' ' ' <"$WORK/word-plain.msgs")]"
 
-# --- 19. a quoted value WRAPPED across lines is still ONE token -------------------
+# --- 17. a quoted value WRAPPED across lines is still ONE token -------------------
 # scanner.l:39 negates only the quote, so radvd's string token spans newlines: a
 # value opened on one line and closed on another carries every line between it as
 # data. A per-line quote model hands those lines to the walk as config, and the two

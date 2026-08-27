@@ -63,7 +63,7 @@ contract.
   `eth0` and the operator looks for a device radvd never asked about. What is
   left is
   tokenized with `{`, `}` and `;` as tokens of their own, so a name is only a
-  directive on a statement boundary (`MyIgnoreIfMissing on` is not one), a
+  directive on a statement boundary (`MyAdvSendAdvert on` is not one), a
   directive whose value sits on the next line is still one statement (radvd's
   lexer discards newlines), and all three `AdvRASrcAddress` spellings —
   `AdvRASrcAddress {`, the no-space `AdvRASrcAddress{`, and a bare
@@ -76,13 +76,19 @@ contract.
   That name is operator-supplied config text (radvd's scanner accepts a quoted,
   escaped string there), so it goes through `sanitize_log_value` like every
   other config value reaching the log stream.
-- **Absence is not the defect; the wrong VALUE is.** `IgnoreIfMissing` defaults
-  to on upstream, so an absent directive is a correct config and only an explicit
-  `IgnoreIfMissing off` warns. `AdvSendAdvert` defaults to off, so its absence
-  from an interface block does warn: radvd runs and emits nothing. Both defaults
-  are read out of the pinned source's `defaults.h` by `tests/smoke.sh`, which
-  fails the build if upstream moves one — a gate about a directive's absence is
-  only correct while upstream's default for it is the unwanted value.
+- **The wrapper reports what the CONFIG composes; radvd reports its own
+  diagnostics.** A state radvd itself announces — a config it rejects outright, an
+  `AdvRASrcAddress` link-local that is absent on this host — is left to radvd's own
+  line and to the supervisor loop that reports the daemon's exit. Do not add a
+  warning that predicts a diagnostic radvd already prints; alert on radvd's own
+  text instead (README.md "Alerting"). What is left for the scan is what radvd
+  never says: a composition mistake it accepts silently, and a directive whose
+  absence radvd defaults to the unwanted value.
+- **A check about a directive's absence is only correct while upstream's default
+  for it is the unwanted value.** `AdvSendAdvert` defaults to off, so its absence
+  from an interface block warns: radvd runs and emits nothing. That default is
+  read out of the pinned source's `defaults.h` by `tests/smoke.sh`, which fails
+  the build if upstream moves it.
 - **The non-link-local check is per-block.** Beyond presence detection, the
   `awk` scan walks every address inside every `AdvRASrcAddress` block and warns
   if _any_ is not link-local (`fe80::/10`). This is
@@ -159,12 +165,8 @@ contract.
   The counter-rule applies to all three, so this does not run the other
   way: do **not** add an alternative for a state something already matched
   reports, and do **not** add one for a warning that does not predict zero RA
-  output. That is why the no-interface warning
-  (`radvd.conf defines no interface`) is in neither pattern (radvd's own
-  `exiting, failed to read config file` fires), why an explicit
-  `IgnoreIfMissing off` is not (on the backup where it bites, radvd's
-  `setup_iface=` fatal fires), why an absent `AdvRASrcAddress` is not (it breaks
-  failover, not this node's emission), and why
+  output. That is why an absent `AdvRASrcAddress` is in neither pattern (it
+  breaks failover, not this node's emission), and why
   `radvd exited; propagating exit for restart policy`
   must never be (it reports any unexpected radvd exit, whatever the cause, so it
   would fire a config alert for a crash that has nothing to do with the config).

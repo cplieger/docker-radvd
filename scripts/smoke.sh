@@ -155,7 +155,7 @@ printf '[smoke] starting %s (network none, fixture config)\n' "$C1"
 start_container "$C1" --cap-add NET_RAW
 logs=$(docker logs "$C1" 2>&1)
 grep -q 'msg="starting radvd"' <<<"$logs" || fail "missing startup log line"
-# tests/radvd.conf carries IgnoreIfMissing but no AdvRASrcAddress, so startup
+# tests/radvd.conf enables AdvSendAdvert and carries no AdvRASrcAddress, so startup
 # validation must emit exactly this warning (proves the preflight ran).
 grep -q 'no AdvRASrcAddress directive found' <<<"$logs" || fail "startup HA validation warning not emitted"
 # Read Docker's own verdict instead of re-running the predicate: the shipped probe is
@@ -387,7 +387,7 @@ printf '[smoke] PASS  validation: invalid RADVD_DEBUG_LEVEL fails closed (exit 1
 # DIRECTORY, whose refusal is deterministic in an assembled image; the
 # FIFO-with-no-writer variant — where radvd's open blocks while `pidof radvd`
 # keeps the healthcheck green — belongs to the bounded shell test
-# (tests/shell/ha_directives_test.sh case 12).
+# (tests/shell/ha_directives_test.sh case 11).
 printf '[smoke] starting %s (a directory where radvd.conf belongs)\n' "$C4"
 docker create --name "$C4" --network none --cap-add NET_RAW "$IMAGE" >/dev/null
 docker cp "$TMPDIR_NONFILE" "$C4:/etc/radvd" >/dev/null

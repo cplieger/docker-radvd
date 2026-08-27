@@ -177,7 +177,6 @@ check_config_directives() {
       entered = 0
       want_name = 0
       f_send = 0
-      f_ignore_off = 0
       f_src = 0
       srcdepth = 0
       pend = ""
@@ -186,7 +185,6 @@ check_config_directives() {
     function flush() {
       if (!entered) { return }
       if (!f_send) { print "no_sendadvert " iface }
-      if (f_ignore_off) { print "ignore_off " iface }
       if (!f_src) { print "no_src " iface }
       if (bad != "") { print "bad_src " iface " " bad }
       reset()
@@ -234,10 +232,7 @@ check_config_directives() {
           continue
         }
         if (depth == 0) {
-          if (lt == "interface") {
-            seen_iface = 1
-            want_name = 1
-          }
+          if (lt == "interface") { want_name = 1 }
           pend = ""
           continue
         }
@@ -250,12 +245,7 @@ check_config_directives() {
           pend = ""
           continue
         }
-        if (pend == "ignoreifmissing" && lt == "off") {
-          f_ignore_off = 1
-          pend = ""
-          continue
-        }
-        if (lt == "advsendadvert" || lt == "ignoreifmissing" || lt == "advrasrcaddress") {
+        if (lt == "advsendadvert" || lt == "advrasrcaddress") {
           if (lt == "advrasrcaddress") { f_src = 1 }
           pend = lt
           continue
@@ -265,20 +255,13 @@ check_config_directives() {
     }
     END {
       flush()
-      if (!seen_iface) { print "no_interface" }
     }
   ' | while read -r kind iface_name bad_addrs; do
     # iface= carries operator-supplied config text (upstream's scanner accepts
     # quoted, backslash-escaped STRING tokens), so it crosses bad='s trust boundary.
     case "$kind" in
-      no_interface)
-        printf 'level=warn msg="radvd.conf defines no interface; radvd will exit because at least one interface block is required" path="%s"\n' "$CONF" >&2
-        ;;
       no_sendadvert)
         printf 'level=warn msg="no enabled AdvSendAdvert on directive found; radvd defaults it to off, so it will run and emit no router advertisements" iface="%s" path="%s"\n' "$(sanitize_log_value "$iface_name" 200)" "$CONF" >&2
-        ;;
-      ignore_off)
-        printf 'level=warn msg="IgnoreIfMissing is explicitly off; on an HA backup radvd will exit or log errors when the AdvRASrcAddress link-local is absent (upstream default is on)" iface="%s" path="%s"\n' "$(sanitize_log_value "$iface_name" 200)" "$CONF" >&2
         ;;
       no_src)
         printf 'level=warn msg="no AdvRASrcAddress directive found in mounted radvd config (HA failover will not work correctly)" iface="%s" path="%s"\n' "$(sanitize_log_value "$iface_name" 200)" "$CONF" >&2

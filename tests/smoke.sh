@@ -118,33 +118,31 @@ if [ -e /usr/sbin/radvdump ] || [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
   }
 fi
 
-# 6. The pinned radvd's own defaults for the directives the entrypoint's HA gates
-#    reason about. A gate that warns about a directive's ABSENCE is only correct
+# 6. The pinned radvd's own default for the directive the entrypoint's config scan
+#    reasons about. A check that warns about a directive's ABSENCE is only correct
 #    while upstream's default for it is the unwanted value, and RADVD_VERSION is
 #    Renovate-bumped with the SHA recomputed in the same commit, so a default can
 #    move with nobody reading upstream's CHANGES. Read from the header the image
 #    actually built (copied out of the builder stage) rather than from a constant
 #    restated here, the way sections 3 and 4 read the version. A macro that has
 #    been renamed or retired fails here too, which is the right outcome: it means
-#    upstream moved and the gates need re-reading.
+#    upstream moved and the check needs re-reading.
 if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
   DEFAULTS=/tmp/radvd-defaults.h
   if [ ! -s "$DEFAULTS" ]; then
     err "FAIL: the pinned radvd's defaults header did not ship into the test stage: $DEFAULTS"
     fail=1
   else
-    for pair in 'DFLT_IgnoreIfMissing 1' 'DFLT_AdvSendAdv 0'; do
-      macro=${pair% *}
-      want=${pair#* }
-      got=$(sed -n "s/^#define ${macro}[[:space:]]\{1,\}\([0-9]\{1,\}\).*/\1/p" "$DEFAULTS")
-      if [ -z "$got" ]; then
-        err "FAIL: $macro is not defined in the pinned radvd's defaults header; upstream renamed or retired it, so the entrypoint's HA gate for that directive must be re-read against the new default"
-        fail=1
-      elif [ "$got" != "$want" ]; then
-        err "FAIL: the pinned radvd defaults $macro to $got, not $want; the entrypoint's HA gate for that directive was written against $want and must be re-read"
-        fail=1
-      fi
-    done
+    macro=DFLT_AdvSendAdv
+    want=0
+    got=$(sed -n "s/^#define ${macro}[[:space:]]\{1,\}\([0-9]\{1,\}\).*/\1/p" "$DEFAULTS")
+    if [ -z "$got" ]; then
+      err "FAIL: $macro is not defined in the pinned radvd's defaults header; upstream renamed or retired it, so the entrypoint's check for that directive must be re-read against the new default"
+      fail=1
+    elif [ "$got" != "$want" ]; then
+      err "FAIL: the pinned radvd defaults $macro to $got, not $want; the entrypoint's check for that directive was written against $want and must be re-read"
+      fail=1
+    fi
   fi
 fi
 
