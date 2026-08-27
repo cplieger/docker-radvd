@@ -124,11 +124,15 @@ check_config_directives() {
   # radvd's scanner makes a double-quoted string one token (v2.21 scanner.l), so a
   # `#` inside one is content: a naive strip from the first `#` erases the `;` after
   # `AdvCaptivePortalAPI "…/#/login"` and the gates lose their anchor. This stage owns
-  # that token end to end: its bytes are KEPT (so a quoted value can still name an
-  # interface) but every byte that means something to the walk below — `{`, `}`, `;`,
-  # `#`, whitespace and the record separator — is replaced by `@`, so a quoted value
-  # decides nothing. Split on the quote, not byte by byte: a char loop costs seconds
-  # on a multi-megabyte config.
+  # that token end to end. scanner.l's `string` macro is
+  # `[a-zA-Z0-9…]+|L?\"(\\.|[^\\"])*\"`, so the QUOTES are inside the match and reach
+  # `yylval.str` verbatim: radvd's name for `interface "eth0"` is the 6-byte `"eth0"`,
+  # and `"AdvRASrcAddress"` is a STRING, never the directive. So the quotes are
+  # re-emitted around the run and every byte that means something to the walk below —
+  # `{`, `}`, `;`, `#`, whitespace and the record separator — is replaced by `@` inside
+  # it. A quoted value therefore decides nothing and reports itself as radvd reads it.
+  # Split on the quote, not byte by byte: a char loop costs seconds on a
+  # multi-megabyte config.
   conf_scan=$(printf '%s\n' "$conf_snapshot" | awk '
     {
       gsub(/\r/, "")
@@ -148,7 +152,10 @@ check_config_directives() {
           out = out s
         }
         if (i < n) {
-          out = out " "
+          # Re-emit the delimiter, padded so the quoted run is its own token: the
+          # quotes ARE part of the STRING value radvd reads, and a token carrying
+          # them can never equal a directive keyword.
+          if (instr) { out = out "\" " } else { out = out " \"" }
           instr = !instr
         }
       }

@@ -295,8 +295,7 @@ run_check
 # scanner accepts a quoted, backslash-escaped STRING token there (scanner.l,
 # gram.y), so the name reaching iface= is operator-supplied text and not a
 # kernel-validated device name. A control byte inside it must not reach the log
-# stream raw, and the quoted spelling must reach iface= as the name radvd's own
-# scanner reads out of the STRING token.
+# stream raw.
 setup
 printf 'interface eth\017x {\n  AdvSendAdvert on;\n};\n' >"$CONF"
 run_check
@@ -307,13 +306,37 @@ run_check
   && ok "a control byte in the interface NAME is neutralized in the iface= field" \
   || no "control byte in the interface name" "lines=$(wc -l <"$LOG"), log: $(cat "$LOG")"
 
+# scanner.l's `string` macro is `[a-zA-Z0-9...]+|L?\"(\\.|[^\\"])*\"` (v2.21), so the
+# quotes are INSIDE the match and reach yylval.str verbatim: radvd's own name for this
+# interface is the 6-byte `"eth0"`, not the 4-byte `eth0`. The scan must report that,
+# because an operator told `eth0` would look for a device radvd never asked about.
+# The two `?` in the expected value ARE those quotes: sanitize_log_value maps `"` to
+# `?` 1:1, since an unescaped quote inside a logfmt value="..." field truncates the
+# record, and a 1:1 map keeps every later byte at its own offset. Assert the sanitized
+# spelling AND that the bare 4-byte name never appears, so a scanner that goes back to
+# stripping the quotes fails here.
 setup
 printf 'interface "eth0" {\n  AdvSendAdvert on;\n};\n' >"$CONF"
 run_check
 [ "$_rc" -eq 0 ] && [ "$(wc -l <"$LOG")" -eq 1 ] \
-  && grep -q 'iface="eth0"' "$LOG" \
-  && ok "a quoted interface name reaches iface= as the name radvd reads, keeping the line parseable" \
+  && grep -q 'iface="?eth0?"' "$LOG" \
+  && ! grep -q 'iface="eth0"' "$LOG" \
+  && ok "a quoted interface name keeps its quotes, as radvd counts them, and stays parseable" \
   || no "quoted interface name" "lines=$(wc -l <"$LOG"), log: $(cat "$LOG")"
+
+# An EMPTY quoted name is a real name to radvd (the 2-byte `""`), so the block must
+# still be scanned. Stripping the quotes made it the empty string, which left `entered`
+# unset and silently dropped all three per-interface warnings while `seen_iface`
+# suppressed the no-interface warning too: total silence for a misconfigured block.
+setup
+printf 'interface "" {\n  AdvCaptivePortalAPI "x";\n};\n' >"$CONF"
+run_check
+[ "$_rc" -eq 0 ] && [ "$(wc -l <"$LOG")" -eq 2 ] \
+  && logged 'msg="no enabled AdvSendAdvert on directive found' \
+  && logged 'msg="no AdvRASrcAddress directive found' \
+  && grep -cq 'iface="??"' "$LOG" \
+  && ok "an empty quoted interface name is still a name, so its block is not silently skipped" \
+  || no "empty quoted interface name" "lines=$(wc -l <"$LOG"), log: $(cat "$LOG")"
 
 # --- 14. a directive SPLIT across lines is still seen ------------------------------
 # radvd's lexer discards newlines, so `IgnoreIfMissing` with its value `on;` on the
@@ -427,6 +450,26 @@ msg_set "$LOG" >"$WORK/plain.msgs"
   && cmp -s "$WORK/bait.msgs" "$WORK/plain.msgs" \
   && ok "directive-shaped text inside a quoted value changes no HA decision" \
   || no "quoted payload treated as syntax" "bait_rc=$bait_rc, rc=$_rc, bait=[$(tr '\n' ' ' <"$WORK/bait.msgs")], plain=[$(tr '\n' ' ' <"$WORK/plain.msgs")]"
+
+# The case above baits with a MULTI-WORD payload, whose interior whitespace is masked
+# on its own, so it passed even while a SINGLE-WORD payload did not: a lone quoted
+# word carries no byte the mask touches, so stripping the quotes left it
+# indistinguishable from a bare directive and it satisfied the AdvRASrcAddress gate.
+# radvd returns STRING for `"AdvRASrcAddress"` and T_RASRCADDRESS only for the bare
+# spelling, so the two must not agree here either. Same differential oracle.
+setup
+printf 'interface eth0 {\n  AdvSendAdvert on;\n  AdvCaptivePortalAPI "AdvRASrcAddress";\n};\n' >"$CONF"
+run_check
+word_rc=$_rc
+msg_set "$LOG" >"$WORK/word.msgs"
+setup
+printf 'interface eth0 {\n  AdvSendAdvert on;\n  AdvCaptivePortalAPI "https://portal.example/login";\n};\n' >"$CONF"
+run_check
+msg_set "$LOG" >"$WORK/word-plain.msgs"
+[ "$word_rc" -eq 0 ] && [ "$_rc" -eq 0 ] && [ -s "$WORK/word-plain.msgs" ] \
+  && cmp -s "$WORK/word.msgs" "$WORK/word-plain.msgs" \
+  && ok "a single-word quoted value cannot satisfy a directive gate either" \
+  || no "single-word quoted payload satisfied a gate" "word_rc=$word_rc, rc=$_rc, word=[$(tr '\n' ' ' <"$WORK/word.msgs")], plain=[$(tr '\n' ' ' <"$WORK/word-plain.msgs")]"
 
 # --- 19. a quoted value WRAPPED across lines is still ONE token -------------------
 # scanner.l:39 negates only the quote, so radvd's string token spans newlines: a

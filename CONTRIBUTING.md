@@ -51,12 +51,17 @@ contract.
   purpose (see the comment above it).
 - **The scan lexes the config; it does not grep it.** Comments are stripped
   first (so a commented-out `# AdvSendAdvert on` correctly fails the check), and
-  the bytes inside a double-quoted value are kept while everything that means
-  something to the walk (`{`, `}`, `;`, `#`, whitespace, and the newline that
-  ends a record) is neutralised inside them, because radvd's scanner makes such a
-  value one token and that token spans newlines. So a URL carrying directive
-  names and `;` separators can still name an interface, but it configures nothing
-  and decides nothing, wrapped across lines or not. What is left is
+  a double-quoted value becomes ONE opaque token: its quotes are kept, and every
+  byte that means something to the walk (`{`, `}`, `;`, `#`, whitespace, and the
+  newline that ends a record) is neutralised inside them. Keeping the quotes
+  matches upstream. `scanner.l`'s `string` macro is
+  `[a-zA-Z0-9…]+|L?\"(\\.|[^\\"])*\"`, so the delimiters are part of the match
+  and reach `yylval.str`. Two consequences. A quoted value decides nothing,
+  wrapped across lines or not and however short — `"AdvRASrcAddress"` is a STRING
+  to radvd, never the directive. And a quoted interface name keeps its quotes,
+  because radvd's name for `interface "eth0"` is the 6-byte `"eth0"`; report
+  `eth0` and the operator looks for a device radvd never asked about. What is
+  left is
   tokenized with `{`, `}` and `;` as tokens of their own, so a name is only a
   directive on a statement boundary (`MyIgnoreIfMissing on` is not one), a
   directive whose value sits on the next line is still one statement (radvd's
