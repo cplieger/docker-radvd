@@ -22,8 +22,9 @@ The files with real logic are:
 - `entrypoint.sh`: a POSIX `sh` script (runs on Alpine's BusyBox shell, not
   bash) that validates HA directives, creates `/run/radvd`, and supervises radvd
   in the foreground as the non-root `radvd` user (`-u radvd`): it turns `SIGHUP`
-  into a config reload, forwards `SIGTERM`/`SIGINT` for graceful shutdown, and
-  propagates an unexpected radvd exit to Docker's restart policy.
+  into a config reload (refusing it, and keeping the running daemon, when the
+  mounted config would not start), forwards `SIGTERM`/`SIGINT` for graceful
+  shutdown, and propagates an unexpected radvd exit to Docker's restart policy.
 
 `compose.yaml` is the reference deployment. There is no build system and no
 application source beyond these files. Two smoke tests cover the two failure
@@ -39,25 +40,35 @@ contract.
   prefixes; the operator supplies their own `radvd.conf` via the read-only
   `/etc/radvd` bind mount. Resist adding a config-generation layer; it is a
   deliberate omission, not a missing feature.
-- **The entrypoint warns, it does not fail.** The `IgnoreIfMissing on` and
-  `AdvRASrcAddress` checks emit `level=warn` lines to stderr and keep going.
-  Single-node operators legitimately run without HA, so do not turn these into
-  hard failures.
-- **grep patterns gate on statement boundaries on purpose.** The directive
-  checks strip comments first (so a commented-out `# IgnoreIfMissing on`
-  correctly fails the check), fold newlines to spaces (radvd's lexer discards
-  them, so a directive whose value sits on the next line is still one
-  statement), and then require a statement boundary (start of the stream, `;`,
-  `{` or `}`) before the directive name, so a directive
-  mid-line in a one-line nested config
-  (`interface eth0 { IgnoreIfMissing on; ... };`) is still seen. The
-  `IgnoreIfMissing` pattern requires the value `on` so `IgnoreIfMissing off`
-  does not pass a substring match. The checks scan the `radvd.conf` the daemon
-  itself is given with `-C`, and the
-  `AdvRASrcAddress` pattern accepts `AdvRASrcAddress {`, the no-space
-  `AdvRASrcAddress{` form, and a bare `AdvRASrcAddress` at end-of-line (the
-  opening brace on the next line) so a valid multi-line HA config isn't
-  flagged. Keep that behaviour if you touch the patterns.
+- **The entrypoint warns, it does not fail.** The HA-directive checks emit
+  `level=warn` lines to stderr and keep going. Single-node operators legitimately
+  run without HA, so do not turn these into hard failures.
+- **The scan lexes the config; it does not grep it.** Comments are stripped
+  first (so a commented-out `# AdvSendAdvert on` correctly fails the check) and
+  the bytes inside a double-quoted value are dropped with them, because radvd's
+  scanner makes such a value one token: a URL carrying directive names and `;`
+  separators configures nothing and must decide nothing. What is left is
+  tokenized with `{`, `}` and `;` as tokens of their own, so a name is only a
+  directive on a statement boundary (`MyIgnoreIfMissing on` is not one), a
+  directive whose value sits on the next line is still one statement (radvd's
+  lexer discards newlines), and all three `AdvRASrcAddress` spellings —
+  `AdvRASrcAddress {`, the no-space `AdvRASrcAddress{`, and a bare
+  `AdvRASrcAddress` at end-of-line with the brace on the next — need no special
+  case. The scan reads the `radvd.conf` the daemon itself is given with `-C`.
+  Keep those properties if you touch the walk.
+- **Each directive is credited to the interface block it sits directly inside.**
+  A directive lexed in a nested block belongs to that block, not to the
+  enclosing interface, and every warning names its block in an `iface=` field.
+  That name is operator-supplied config text (radvd's scanner accepts a quoted,
+  escaped string there), so it goes through `sanitize_log_value` like every
+  other config value reaching the log stream.
+- **Absence is not the defect; the wrong VALUE is.** `IgnoreIfMissing` defaults
+  to on upstream, so an absent directive is a correct config and only an explicit
+  `IgnoreIfMissing off` warns. `AdvSendAdvert` defaults to off, so its absence
+  from an interface block does warn: radvd runs and emits nothing. Both defaults
+  are read out of the pinned source's `defaults.h` by `tests/smoke.sh`, which
+  fails the build if upstream moves one — a gate about a directive's absence is
+  only correct while upstream's default for it is the unwanted value.
 - **The non-link-local check is per-block.** Beyond presence detection, the
   `awk` scan walks every address inside every `AdvRASrcAddress` block and warns
   if _any_ is not link-local (`fe80::/10`). This is
@@ -78,16 +89,24 @@ contract.
   reads its config as root at startup but re-reads it as the unprivileged
   `radvd` user on an in-process `SIGHUP`; a config that user can't read (a
   hardened `0770 root:<group>` bind mount) makes radvd's own reload fail
-  (`failed to read config file`) and the process exit. Under the
-  `restart: unless-stopped` policy `compose.yaml` ships, a `docker kill -s HUP`
-  then wouldn't trip Docker's restart policy either — Docker treats a container
-  stopped by a signal it delivered as manually stopped, which `unless-stopped`
-  honours; under `always` or `on-failure` the container would come back, so how
-  bad the reload death is depends on the operator's policy. The supervisor loop
-  turns `SIGHUP` into a radvd restart (re-reads as root), forwards
-  `SIGTERM`/`SIGINT`, and propagates an unexpected radvd exit. `exec radvd` is
-  simpler but reintroduces the reload-death, so keep the supervise-and-restart
-  loop.
+  (`failed to read config file`) and the process exit. A `docker kill -s HUP`
+  then wouldn't trip Docker's restart policy either, whatever the policy: the
+  daemon cancels the container's restart manager at kill time when the container
+  configures no stop signal, and neither this image nor the `compose.yaml` here
+  sets one. An operator who does set `stop_signal` — even one that only restates
+  SIGTERM — keeps crash-recreate armed under `always` or `on-failure`, so how bad
+  a reload death is depends on that setting. The supervisor loop turns `SIGHUP`
+  into a radvd restart (re-reads as root), forwards `SIGTERM`/`SIGINT`, and
+  propagates an unexpected radvd exit. `exec radvd` is simpler but reintroduces
+  the reload-death, so keep the supervise-and-restart loop.
+- **The reload config-tests before it stops anything.** `on_hup` runs
+  `radvd -c -C "$CONF"` under a bound and refuses the reload on any non-zero
+  status, or on an absent config, so a bad edit costs the operator a reload
+  rather than the segment its RA emitter. `radvd -c` refuses nothing the daemon
+  accepts, which is what makes the gate safe to add; startup stays ungated,
+  because at boot there is no last good config to keep serving. A config
+  replaced between that check and the daemon's own read is deliberately not
+  covered.
 - **Logs are structured `key=value` to stderr.** Match the existing
   `level=... msg="..."` shape so `docker logs` output stays greppable.
 - **A new fatal owes the README's alert rule an alternative.** Every

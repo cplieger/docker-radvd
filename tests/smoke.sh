@@ -118,30 +118,87 @@ if [ -e /usr/sbin/radvdump ] || [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
   }
 fi
 
+# 6. The pinned radvd's own defaults for the directives the entrypoint's HA gates
+#    reason about. A gate that warns about a directive's ABSENCE is only correct
+#    while upstream's default for it is the unwanted value, and RADVD_VERSION is
+#    Renovate-bumped with the SHA recomputed in the same commit, so a default can
+#    move with nobody reading upstream's CHANGES. Read from the header the image
+#    actually built (copied out of the builder stage) rather than from a constant
+#    restated here, the way sections 3 and 4 read the version. A macro that has
+#    been renamed or retired fails here too, which is the right outcome: it means
+#    upstream moved and the gates need re-reading.
+if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
+  DEFAULTS=/tmp/radvd-defaults.h
+  if [ ! -s "$DEFAULTS" ]; then
+    err "FAIL: the pinned radvd's defaults header did not ship into the test stage: $DEFAULTS"
+    fail=1
+  else
+    for pair in 'DFLT_IgnoreIfMissing 1' 'DFLT_AdvSendAdv 0'; do
+      macro=${pair% *}
+      want=${pair#* }
+      got=$(sed -n "s/^#define ${macro}[[:space:]]\{1,\}\([0-9]\{1,\}\).*/\1/p" "$DEFAULTS")
+      if [ -z "$got" ]; then
+        err "FAIL: $macro is not defined in the pinned radvd's defaults header; upstream renamed or retired it, so the entrypoint's HA gate for that directive must be re-read against the new default"
+        fail=1
+      elif [ "$got" != "$want" ]; then
+        err "FAIL: the pinned radvd defaults $macro to $got, not $want; the entrypoint's HA gate for that directive was written against $want and must be re-read"
+        fail=1
+      fi
+    done
+  fi
+fi
+
+# Both blocks below run an extracted entrypoint function against the image's own
+# BusyBox userland, so both need every function the extraction depends on present
+# and LOADABLE before their own oracle can mean anything. Enumerating the anchors
+# rather than naming two supplies any sibling the validator gains; loading each
+# extraction is what turns a truncated one (a column-0 closer inside a body, which
+# still parses and still defines A function) into one honest refusal here instead
+# of two oracles accusing something innocent.
+extract_entrypoint_functions() {
+  ep_dir=$1
+  ep_src=/usr/local/bin/entrypoint.sh
+  mkdir -p "$ep_dir/bin"
+  ep_anchors=$(grep -o '^[a-z_][a-z_0-9]*() {$' "$ep_src" | sed 's/() {$//')
+  if [ -z "$ep_anchors" ]; then
+    err "FAIL: no top-level function anchors found in $ep_src"
+    return 1
+  fi
+  for ep_fn in $ep_anchors; do
+    if [ "$(grep -c "^$ep_fn() {\$" "$ep_src")" -ne 1 ]; then
+      err "FAIL: the entrypoint anchor for $ep_fn() does not appear exactly once"
+      return 1
+    fi
+    sed -n "/^$ep_fn() {\$/,/^}\$/p" "$ep_src" >"$ep_dir/fn-$ep_fn.sh"
+    if ! sh -c '. "$1"; command -v "$2" >/dev/null 2>&1' _ "$ep_dir/fn-$ep_fn.sh" "$ep_fn"; then
+      err "FAIL: the extraction of $ep_fn() does not define it (a column-0 closer inside its body truncates the range)"
+      return 1
+    fi
+  done
+  return 0
+}
+
 # The host-side shell suite cannot reproduce ash's job-status output. In the
 # image, expire the real production timeout and reject any bare shell record.
 if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
   runtime_dir=$(mktemp -d)
-  entrypoint=/usr/local/bin/entrypoint.sh
-  if [ "$(grep -c '^sanitize_log_value() {$' "$entrypoint")" -ne 1 ] \
-    || [ "$(grep -c '^check_ha_directives() {$' "$entrypoint")" -ne 1 ]; then
-    err "FAIL: entrypoint function extraction anchors are not unique"
+  if ! extract_entrypoint_functions "$runtime_dir"; then
     fail=1
   else
-    sed -n '/^sanitize_log_value() {$/,/^}$/p' "$entrypoint" >"$runtime_dir/sanitize.sh"
-    sed -n '/^check_ha_directives() {$/,/^}$/p' "$entrypoint" >"$runtime_dir/check.sh"
-    mkdir "$runtime_dir/bin"
     printf '%s\n' '#!/bin/sh' 'exec sleep 30' >"$runtime_dir/bin/cat"
     chmod +x "$runtime_dir/bin/cat"
     printf 'interface eth0 { IgnoreIfMissing on; AdvRASrcAddress { fe80::1; }; };\n' >"$runtime_dir/radvd.conf"
     runtime_rc=0
+    # The sh -c body's $1..$3 are that shell's positional parameters, supplied
+    # after the `_` below and expanded when it runs.
+    # shellcheck disable=SC2016
     runtime_out=$(PATH="$runtime_dir/bin:$PATH" /bin/busybox timeout 8 sh -c '
       set -u
       . "$1"
       . "$2"
       CONF=$3
       check_ha_directives
-    ' _ "$runtime_dir/sanitize.sh" "$runtime_dir/check.sh" "$runtime_dir/radvd.conf" 2>&1) || runtime_rc=$?
+    ' _ "$runtime_dir/fn-sanitize_log_value.sh" "$runtime_dir/fn-check_ha_directives.sh" "$runtime_dir/radvd.conf" 2>&1) || runtime_rc=$?
     if [ "$runtime_rc" -ne 0 ]; then
       err "FAIL: elapsed config-read probe did not return through the degraded warning (rc=$runtime_rc)"
       err "$runtime_out"
@@ -163,16 +220,13 @@ fi
 # block and require the production bound to return through one warning.
 if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
   reread_dir=$(mktemp -d)
-  entrypoint=/usr/local/bin/entrypoint.sh
-  if [ "$(grep -c '^sanitize_log_value() {$' "$entrypoint")" -ne 1 ] \
-    || [ "$(grep -c '^check_ha_directives() {$' "$entrypoint")" -ne 1 ]; then
-    err "FAIL: entrypoint function extraction anchors are not unique"
+  if ! extract_entrypoint_functions "$reread_dir"; then
     fail=1
   else
-    sed -n '/^sanitize_log_value() {$/,/^}$/p' "$entrypoint" >"$reread_dir/sanitize.sh"
-    sed -n '/^check_ha_directives() {$/,/^}$/p' "$entrypoint" >"$reread_dir/check.sh"
-    mkdir "$reread_dir/bin"
     printf '%s\n' '#!/bin/sh' 'exec sleep 30' >"$reread_dir/bin/cat"
+    # The lines below are the shim's SOURCE, so $TIMEOUT_COUNT, $n and $@ must
+    # expand when the shim runs rather than while it is being written.
+    # shellcheck disable=SC2016
     printf '%s\n' \
       '#!/bin/sh' \
       ': "${TIMEOUT_COUNT:?}"' \
@@ -185,6 +239,8 @@ if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
     chmod +x "$reread_dir/bin/cat" "$reread_dir/bin/timeout"
     printf 'interface eth0 { IgnoreIfMissing on; AdvRASrcAddress { fe80::1; }; };\n' >"$reread_dir/radvd.conf"
     reread_rc=0
+    # As above: the sh -c body's $1..$3 belong to that shell.
+    # shellcheck disable=SC2016
     reread_out=$(TIMEOUT_COUNT="$reread_dir/timeout-count" PATH="$reread_dir/bin:$PATH" \
       /bin/busybox timeout 8 sh -c '
         set -u
@@ -192,7 +248,7 @@ if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
         . "$2"
         CONF=$3
         check_ha_directives
-      ' _ "$reread_dir/sanitize.sh" "$reread_dir/check.sh" "$reread_dir/radvd.conf" 2>&1) || reread_rc=$?
+      ' _ "$reread_dir/fn-sanitize_log_value.sh" "$reread_dir/fn-check_ha_directives.sh" "$reread_dir/radvd.conf" 2>&1) || reread_rc=$?
     if [ "$reread_rc" -ne 0 ]; then
       err "FAIL: diagnostic config reread exceeded its production bound (rc=$reread_rc)"
       err "$reread_out"

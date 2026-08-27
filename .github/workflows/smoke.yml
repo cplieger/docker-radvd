@@ -1,5 +1,3 @@
-# Repo-local (NOT synced from cplieger/ci): runtime signal-contract smoke test.
-# Kept separate from the synced CI template so a future sync can't clobber it.
 name: Smoke
 
 on:

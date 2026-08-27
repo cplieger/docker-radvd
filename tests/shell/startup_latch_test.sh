@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# The signal path's three unit-testable pieces: start_radvd()'s pre-pid latch,
-# on_hup()'s refusal to reload during a shutdown, and the shutdown arm's two-branch
-# report. The traps arm before the config validation, so a signal landing in that
+# The signal path's unit-testable pieces: start_radvd()'s pre-pid latch, on_hup()'s
+# refusal to reload during a shutdown, its refusal to reload a config radvd would
+# reject or cannot find, and the shutdown arm's two-branch report. The traps arm before the config validation, so a signal landing in that
 # window is LATCHED and delivered to the freshly assigned pid; without that,
 # `docker stop` during startup waits out its timeout and SIGKILLs while an early
 # HUP is swallowed. THE ORACLE IS THE DELIVERY, NOT THE DEATH — the stubbed
@@ -34,7 +34,7 @@ load_function on_hup
 load_function on_term
 # The trap registrations themselves, not a function: the end pattern is deliberately
 # '^trap on_term' rather than the whole line, so an edited signal list is reported by
-# case 6's assertion instead of as a harness range error naming the wrong subject.
+# case 7's assertion instead of as a harness range error naming the wrong subject.
 TRAPS=$(extract_range '^trap on_hup HUP$' '^trap on_term' "$WORK/traps.sh") || exit 1
 
 # The stub: the function body backgrounds `radvd ... &`, so exec makes the
@@ -145,7 +145,66 @@ on_hup 2>"$LOG" 3>&2
   || no "hup during shutdown" "reload=$reload, signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
 reap "$radvd_pid"
 
-# --- 6. the trap maps BOTH published shutdown signals to on_term --------------------
+# --- 6. a SIGHUP whose config check fails is REFUSED, and radvd keeps serving -----
+# The reload stops radvd before its replacement reads the config, so accepting a
+# bad edit costs the segment its RA emitter for nothing. Three arms, none
+# redundant: the refusal (no flag, no signal, child untouched), the absent-config
+# arm an ordinary editing accident takes (an editor's write-rename window, a mount
+# hiccup) where there is no file for radvd to reject, and the control that a
+# passing check still reloads — without which both refusals would pass against an
+# on_hup that refuses every HUP.
+HUPDIR=$(mktemp -d "$WORK/hup.XXXXXX")
+mkdir "$HUPDIR/bin"
+CONF="$HUPDIR/radvd.conf"
+# on_hup runs `timeout 5 radvd -c`, so radvd has to be a real process here: the
+# recording shell function above is invisible to timeout's exec.
+stub_radvd() {
+  printf '%s\n' '#!/bin/sh' 'printf "%s\n" "radvd stub: $*" >&2' "exit $1" >"$HUPDIR/bin/radvd"
+  chmod +x "$HUPDIR/bin/radvd"
+}
+PATH="$HUPDIR/bin:$PATH"
+
+printf 'interface eth0 { AdvSendAdvert on; };\n' >"$CONF"
+stub_radvd 1
+sleep 20 &
+radvd_pid=$!
+shutdown=0 reload=0
+: >"$SIGNALS"
+on_hup 2>"$LOG" 3>&2
+[ "$reload" -eq 0 ] && [ ! -s "$SIGNALS" ] \
+  && command kill -0 "$radvd_pid" 2>/dev/null \
+  && grep -Fq 'msg="SIGHUP reload refused' "$LOG" \
+  && ok "a HUP whose config check fails is refused: no reload flag, no signal, radvd untouched" \
+  || no "refused reload" "reload=$reload, signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
+reap "$radvd_pid"
+
+rm -f "$CONF"
+stub_radvd 0
+sleep 20 &
+radvd_pid=$!
+shutdown=0 reload=0
+: >"$SIGNALS"
+on_hup 2>"$LOG" 3>&2
+[ "$reload" -eq 0 ] && [ ! -s "$SIGNALS" ] \
+  && command kill -0 "$radvd_pid" 2>/dev/null \
+  && grep -Fq 'radvd.conf is absent' "$LOG" \
+  && ok "a HUP with the config gone is refused too, where a config check has nothing to reject" \
+  || no "absent-config reload" "reload=$reload, signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
+reap "$radvd_pid"
+
+printf 'interface eth0 { AdvSendAdvert on; };\n' >"$CONF"
+stub_radvd 0
+sleep 20 &
+radvd_pid=$!
+shutdown=0 reload=0
+: >"$SIGNALS"
+on_hup 2>"$LOG" 3>&2
+[ "$reload" -eq 1 ] && signalled "$radvd_pid" \
+  && ok "a HUP whose config check passes still sets the reload flag and TERMs the daemon" \
+  || no "accepted reload" "reload=$reload, signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
+reap "$radvd_pid"
+
+# --- 7. the trap maps BOTH published shutdown signals to on_term --------------------
 # CONTRIBUTING's "Design boundaries (please preserve)" promises SIGTERM/SIGINT and
 # nothing else reads either side, so deleting INT is invisible to the whole corpus.
 # Both sides are read at run time: the registration is executed, and the promise is
@@ -166,7 +225,7 @@ registered=$(bash -c '
   && ok "both published shutdown signals are trapped to on_term, and CONTRIBUTING still promises both" \
   || no "shutdown signal contract" "registered: $(tr '\n' ' ' <<<"$registered"), promise found: $(grep -c 'SIGTERM`/`SIGINT`' <<<"$PROMISE")"
 
-# --- 7. the shutdown arm reports a refused TERM as unconfirmable ------------------
+# --- 8. the shutdown arm reports a refused TERM as unconfirmable ------------------
 # The arm lives inline in the supervisor loop, so it is extracted as a RANGE. The
 # start anchor is the comment line, NOT `if [ "$shutdown" -eq 1 ]; then`: that
 # spelling matches on_hup's guard at the top of the file too, and a sed range
@@ -195,8 +254,8 @@ grep -Fq "$WARN" "$LOG" && ! grep -Fq "$INFO" "$LOG" && [ "$rc" -eq 0 ] \
   && ok "a refused TERM reports that a graceful stop cannot be confirmed, and still exits 0" \
   || no "refused-TERM report" "rc=$rc, log: $(tr '\n' '|' <"$LOG")"
 
-# --- 8. control: a delivered TERM reports the graceful stop instead ----------------
-# Without it, case 7 would pass against an arm that printed the warning
+# --- 9. control: a delivered TERM reports the graceful stop instead ----------------
+# Without it, case 8 would pass against an arm that printed the warning
 # unconditionally — the same collapse in the other direction.
 run_arm 0
 rc=$?
@@ -204,8 +263,8 @@ grep -Fq "$INFO" "$LOG" && ! grep -Fq "$WARN" "$LOG" && [ "$rc" -eq 0 ] \
   && ok "a delivered TERM reports the graceful stop, and exits 0" \
   || no "delivered-TERM report" "rc=$rc, log: $(tr '\n' '|' <"$LOG")"
 
-# --- 9. the README still publishes the sentence the refusal arm prints -------------
-# Same both-sides-at-run-time shape as case 6: the arm's text is a published
+# --- 10. the README still publishes the sentence the refusal arm prints ------------
+# Same both-sides-at-run-time shape as case 7: the arm's text is a published
 # operator-facing string, so an edit to either side alone is red.
 grep -Fq 'a graceful stop cannot be confirmed' "$REPO_ROOT/README.md" \
   && ok "the README still publishes the refusal line the shutdown arm prints" \

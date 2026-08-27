@@ -45,6 +45,22 @@ trap cleanup EXIT
 command -v docker >/dev/null 2>&1 || fail "docker is required"
 docker image inspect "$IMAGE" >/dev/null 2>&1 || fail "image $IMAGE not found (docker build -t docker-radvd:smoke . first)"
 
+# The published deployment contract, read from BOTH sides so editing either alone
+# fails here. RAs are ICMPv6 on a real LAN interface, so the compose example a
+# stranger copies out of this repo must put the service on the host network; on an
+# isolated network radvd runs, `pidof radvd` stays green and nothing reaches the
+# LAN. Scoped to the `radvd:` service rather than a file-wide grep, so the setting
+# cannot pass by sitting under some other service.
+compose_net=$(awk '/^  [[:alnum:]_-]+:[[:space:]]*$/ { svc = ($0 ~ /^  radvd:[[:space:]]*$/) } svc && /^[[:space:]]+network_mode:/ { print $2 }' compose.yaml)
+# The sed script matches the README row's literal backticks, so nothing in it may
+# expand: the single quotes are required.
+# shellcheck disable=SC2016
+readme_net=$(sed -n 's/^| `network_mode` *| `\([^`]*\)`.*/\1/p' README.md)
+[ -n "$readme_net" ] || fail "could not read the network_mode row from the README's Networking table"
+[ "$compose_net" = "host" ] || fail "compose.yaml's radvd service sets network_mode='$compose_net', want host: RAs cannot reach the LAN from an isolated network"
+[ "$compose_net" = "$readme_net" ] || fail "compose.yaml ('$compose_net') and the README's Networking table ('$readme_net') disagree on network_mode"
+printf '[smoke] PASS  published contract: compose.yaml and the README agree on network_mode=%s\n' "$compose_net"
+
 # Fixture: only the valid config (tests/ also holds radvd.bad.conf, which is not
 # the file the daemon is given with -C).
 TMPDIR_FIXTURE=$(mktemp -d)
@@ -233,7 +249,24 @@ job_status_after=$(docker logs "$C1" 2>&1 | grep -Ec '^(Terminated|Killed)$' || 
   || fail "graceful shutdown leaked a bare BusyBox ash job-status line into docker logs"
 printf '[smoke] PASS  shutdown: SIGTERM exits 0 with graceful log\n'
 
-# --- malformed replacement config on HUP fails the container closed ---------
+# The README's RadvdConfigError rule is an exact-string contract between the
+# entrypoint's fatal lines and an operator's Loki rule, so the refusal
+# scenarios below match their output against the rule's own `|~` pattern as the
+# regex Loki will use, pulled from the README beside this script rather than from
+# the copy the test stage puts in the image. Scoped to that one rule, and an empty
+# extraction fails here instead of matching silently.
+# The sed script matches the README's literal `|~ `pattern` [10m]` line, backticks
+# included, so the single quotes are required: nothing here may expand.
+# shellcheck disable=SC2016
+ALERT_RULE=$(sed -n '/alert: RadvdConfigError/,/^        for:/p' README.md \
+  | sed -n 's/^[[:space:]]*|~ `\(.*\)` \[[0-9]\+[a-z]\]$/\1/p')
+[ -n "$ALERT_RULE" ] || fail "could not extract the RadvdConfigError pattern from README.md"
+
+# --- a malformed replacement config on HUP is refused, and radvd keeps serving --
+# The reload stops radvd before its replacement reads the config, so accepting a
+# bad edit costs the segment its RA emitter. The configtest in on_hup refuses
+# instead, and radvd's own rejection text still reaches the log for the operator's
+# alert rule.
 printf '[smoke] restarting %s (malformed HUP replacement scenario)\n' "$C1"
 docker start "$C1" >/dev/null
 ready=""
@@ -245,14 +278,28 @@ for _ in $(seq 1 15); do
   sleep 1
 done
 [ -n "$ready" ] || fail "$C1: radvd did not return before malformed-reload setup"
+pid_before=$(docker exec "$C1" pidof radvd) || fail "cannot read the radvd pid before the malformed reload"
+reload_before=$(docker logs "$C1" 2>&1 | grep -c 'msg="reloading radvd (config re-read via restart)"' || true)
 docker cp tests/radvd.bad.conf "$C1:/etc/radvd/radvd.conf" >/dev/null
 docker kill -s HUP "$C1" >/dev/null
-wait_until_stopped "$C1" "container still running after the HUP replacement rejected its config"
-ec=$(docker inspect -f '{{.State.ExitCode}}' "$C1")
-[ "$ec" -ne 0 ] || fail "malformed HUP replacement exited 0, want non-zero"
-wait_for_log "$C1" 'failed to read config file' "replacement radvd did not reject the edited config"
-wait_for_log "$C1" 'radvd exited; propagating exit for restart policy' "missing reload-failure propagation log line"
-printf '[smoke] PASS  malformed reload: replacement rejection exits non-zero for restart\n'
+wait_for_log "$C1" 'SIGHUP reload refused' "the malformed HUP replacement was not refused"
+[ "$(docker inspect -f '{{.State.Running}}' "$C1")" = "true" ] \
+  || fail "the container died on a refused HUP reload instead of keeping its last good config"
+[ "$(docker exec "$C1" pidof radvd)" = "$pid_before" ] \
+  || fail "a refused reload replaced the running radvd (pids moved from $pid_before)"
+docker logs "$C1" 2>&1 | grep -Eq "$ALERT_RULE" \
+  || fail "the refused reload's radvd output does not match the README's RadvdConfigError pattern"
+# Absence assertion: single-shot on purpose, and safe here only because the
+# wait_for_log above already proved this container's log is flushed.
+[ "$(docker logs "$C1" 2>&1 | grep -c 'msg="reloading radvd (config re-read via restart)"' || true)" -eq "$reload_before" ] \
+  || fail "a refused reload still restarted radvd"
+# The other direction: the refusal must not wedge the reload path for a config the
+# operator then fixes.
+docker cp tests/radvd.conf "$C1:/etc/radvd/radvd.conf" >/dev/null
+docker kill -s HUP "$C1" >/dev/null
+pid_after=$(wait_for_reload "$C1" "$((reload_before + 1))" "$pid_before")
+[ -n "$pid_after" ] || fail "a corrected config did not reload after a refused one"
+printf '[smoke] PASS  malformed reload: refused with radvd still serving (pids %s), and a corrected config reloads\n' "$pid_before"
 
 # --- 5. unexpected radvd death propagates to the container --------------------
 printf '[smoke] starting %s (exit-propagation scenario)\n' "$C2"
@@ -284,19 +331,6 @@ wait_for_log "$C3" 'value="9?  bogus"' "sanitizer did not neutralize the quote a
 # wait_for_log calls above already proved this container's log is flushed.
 docker logs "$C3" 2>&1 | grep -q 'msg="starting radvd"' && fail "radvd was started despite an invalid RADVD_DEBUG_LEVEL"
 printf '[smoke] PASS  validation: invalid RADVD_DEBUG_LEVEL fails closed (exit 1, sanitized error)\n'
-
-# The README's RadvdConfigError rule is an exact-string contract between the
-# entrypoint's fatal lines and an operator's Loki rule, so the two refusal
-# scenarios below match their output against the rule's own `|~` pattern as the
-# regex Loki will use, pulled from the README beside this script rather than from
-# the copy the test stage puts in the image. Scoped to that one rule, and an empty
-# extraction fails here instead of matching silently.
-# The sed script matches the README's literal `|~ `pattern` [10m]` line, backticks
-# included, so the single quotes are required: nothing here may expand.
-# shellcheck disable=SC2016
-ALERT_RULE=$(sed -n '/alert: RadvdConfigError/,/^        for:/p' README.md \
-  | sed -n 's/^[[:space:]]*|~ `\(.*\)` \[[0-9]\+[a-z]\]$/\1/p')
-[ -n "$ALERT_RULE" ] || fail "could not extract the RadvdConfigError pattern from README.md"
 
 # --- 7. a non-regular node at the config path fails closed ---------------------
 # radvd cannot consume a non-regular node as its configuration file, so the
@@ -354,22 +388,20 @@ start_container "$C6" "${HARDENED_FLAGS[@]}" -v "$TMPDIR_FIXTURE:/etc/radvd:ro"
 # names the cause the boot failure alone would not.
 owners=$(docker exec "$C6" ps -o user,comm | awk '$2 ~ /radvd/ { print $1 }' | sort -u)
 grep -qx 'radvd' <<<"$owners" \
-  || fail "hardened profile: no radvd-owned radvd process; observed owners: $(tr '\n' ' ' <<<"$owners")"
-docker logs "$C6" 2>&1 | grep -q 'unable to drop root privileges' \
-  && fail "hardened profile: radvd could not drop privileges (SETUID/SETGID missing from the profile)"
+  || fail "hardened profile: no radvd-owned radvd process (SETUID/SETGID missing from the profile is the usual cause); observed owners: $(tr '\n' ' ' <<<"$owners")"
 # KILL, and this reload is the only assertion in the suite that can see it missing:
 # the supervisor's child runs as the unprivileged radvd user, so a root PID 1
-# without CAP_KILL cannot signal it. The refused kill is logged but the reload
-# proceeds anyway: a second radvd is started beside the live one, dies on the
-# pid-file lock, and the container exits on the propagated failure — none of which
-# a start-only check or the graceful-stop assertion below would notice.
+# without CAP_KILL cannot signal it. A new pid plus a still-running container is
+# what sees that: the refused kill is logged but the reload proceeds anyway, a
+# second radvd is started beside the live one, dies on the pid-file lock, and the
+# container exits on the propagated failure. A log grep is not that oracle — it is
+# keyed to radvd's own wording at the pinned version.
 pid_before=$(docker exec "$C6" pidof radvd) || fail "hardened profile: cannot read radvd pid"
 docker kill -s HUP "$C6" >/dev/null
 pid_after=$(wait_for_reload "$C6" 1 "$pid_before")
 [ -n "$pid_after" ] || fail "hardened profile: HUP did not reload radvd (no reload log, PID unchanged, or the container died)"
-[ "$(docker inspect -f '{{.State.Running}}' "$C6")" = "true" ] || fail "hardened profile: container not running after HUP reload"
-docker logs "$C6" 2>&1 | grep -q 'unable to lock pid file' \
-  && fail "hardened profile: a second radvd raced the live one (the HUP kill never landed)"
+[ "$(docker inspect -f '{{.State.Running}}' "$C6")" = "true" ] \
+  || fail "hardened profile: container not running after HUP reload (KILL missing from the profile is the usual cause: a second radvd then races the live one and dies on the pid-file lock)"
 docker stop "$C6" >/dev/null
 ec=$(docker inspect -f '{{.State.ExitCode}}' "$C6")
 [ "$ec" = "0" ] || fail "hardened profile: docker stop exit code $ec, want 0"

@@ -65,7 +65,7 @@ warn_count() {
 # Without this control, every warning assertion below could pass against a
 # validator that warns on everything.
 setup
-printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvRASrcAddress { fe80::cc32:57ff:feb5:85bf; };\n};\n' >"$CONF"
+printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvSendAdvert on;\n  AdvRASrcAddress { fe80::cc32:57ff:feb5:85bf; };\n};\n' >"$CONF"
 run_check
 [ "$_rc" -eq 0 ] && [ ! -s "$LOG" ] \
   && ok "a correct HA config (IgnoreIfMissing on + link-local AdvRASrcAddress) is silent" \
@@ -76,7 +76,7 @@ run_check
 # boundary (start, ;, { or }) is enough. If the boundary alternation broke, this
 # valid one-liner would draw two false missing-directive warnings.
 setup
-printf 'interface eth0 { IgnoreIfMissing on; AdvRASrcAddress { febf::1; }; };\n' >"$CONF"
+printf 'interface eth0 { IgnoreIfMissing on; AdvSendAdvert on; AdvRASrcAddress { febf::1; }; };\n' >"$CONF"
 run_check
 [ "$_rc" -eq 0 ] && [ ! -s "$LOG" ] \
   && ok "a valid one-line nested config is silent (mid-line directives found), with febf::1 accepted at the top of fe80::/10" \
@@ -85,7 +85,7 @@ run_check
 # The bare name at end-of-line, with the opening brace on the next line. CONTRIBUTING
 # records this spelling as deliberately accepted, so it must stay silent.
 setup
-printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvRASrcAddress\n  {\n    fe80::1;\n  };\n};\n' >"$CONF"
+printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvSendAdvert on;\n  AdvRASrcAddress\n  {\n    fe80::1;\n  };\n};\n' >"$CONF"
 run_check
 [ "$_rc" -eq 0 ] && [ ! -s "$LOG" ] \
   && ok "a bare AdvRASrcAddress at end-of-line with the brace on the next line is silent" \
@@ -93,7 +93,7 @@ run_check
 
 # The no-space form, also recorded in CONTRIBUTING as deliberately accepted.
 setup
-printf 'interface eth0 { IgnoreIfMissing on; AdvRASrcAddress{fe80::1;}; };\n' >"$CONF"
+printf 'interface eth0 { IgnoreIfMissing on; AdvSendAdvert on; AdvRASrcAddress{fe80::1;}; };\n' >"$CONF"
 run_check
 [ "$_rc" -eq 0 ] && [ ! -s "$LOG" ] \
   && ok "the no-space AdvRASrcAddress{...} form is silent" \
@@ -101,7 +101,7 @@ run_check
 
 # --- 3. case-insensitive, because radvd's flex scanner is caseless ----------------
 setup
-printf 'INTERFACE eth0 { IGNOREIFMISSING ON; ADVRASRCADDRESS { FE80::1; }; };\n' >"$CONF"
+printf 'INTERFACE eth0 { IGNOREIFMISSING ON; ADVSENDADVERT ON; ADVRASRCADDRESS { FE80::1; }; };\n' >"$CONF"
 run_check
 [ "$_rc" -eq 0 ] && [ ! -s "$LOG" ] \
   && ok "an all-uppercase valid config is silent (gates and scanner are caseless)" \
@@ -113,41 +113,55 @@ run_check
 # the tokenizer — which the address-token trim (space/tab only) cannot remove, and
 # a correct link-local config then draws a false non-link-local warning.
 setup
-printf 'interface eth0 {\r\n  IgnoreIfMissing on;\r\n  AdvRASrcAddress {\r\n    fe80::1;\r\n  };\r\n};\r\n' >"$CONF"
+printf 'interface eth0 {\r\n  IgnoreIfMissing on;\r\n  AdvSendAdvert on;\r\n  AdvRASrcAddress {\r\n    fe80::1;\r\n  };\r\n};\r\n' >"$CONF"
 run_check
 [ "$_rc" -eq 0 ] && [ ! -s "$LOG" ] \
   && ok "a CRLF config with a correct link-local source is silent" \
   || no "CRLF handling" "log: $(cat "$LOG")"
 
 # --- 5. a directive NAME must sit on a statement boundary -------------------------
-# "MyIgnoreIfMissing on" contains the directive as a substring; the boundary
-# anchor is what keeps it from satisfying the gate.
+# "MyAdvSendAdvert on" contains the directive as a substring; the statement
+# boundary is what keeps it from satisfying the gate. Anchored on AdvSendAdvert
+# because absence of a directive whose upstream default is already the wanted
+# value is not a defect, so IgnoreIfMissing has no absence warning to observe.
 setup
-printf 'interface eth0 {\n  MyIgnoreIfMissing on;\n  AdvRASrcAddress { fe80::1; };\n};\n' >"$CONF"
+printf 'interface eth0 {\n  MyAdvSendAdvert on;\n  IgnoreIfMissing on;\n  AdvRASrcAddress { fe80::1; };\n};\n' >"$CONF"
 run_check
-logged 'msg="no enabled IgnoreIfMissing on directive found' \
-  && ok "a substring like MyIgnoreIfMissing does not satisfy the IgnoreIfMissing gate" \
+logged 'msg="no enabled AdvSendAdvert on directive found' \
+  && ok "a substring like MyAdvSendAdvert does not satisfy the AdvSendAdvert gate" \
   || no "boundary anchor" "log: $(cat "$LOG")"
 
-# --- 6. a commented-out IgnoreIfMissing does not count ----------------------------
-# The bait carries a statement boundary INSIDE the comment (`; Ignore...`): without
-# comment stripping that `;` satisfies the gate's boundary anchor and the gate
-# reads a fully commented line as configured HA. A bare `# IgnoreIfMissing on`
-# would be rejected by the boundary anchor alone and prove nothing about the strip.
+# --- 6. a commented-out AdvSendAdvert does not count ------------------------------
+# The bait carries a statement boundary INSIDE the comment (`; AdvSend...`): without
+# comment stripping that `;` opens a fresh statement and the gate reads a fully
+# commented line as configured. A bare `# AdvSendAdvert on` would be rejected by
+# the statement boundary alone and prove nothing about the strip.
 setup
-printf 'interface eth0 {\n  # retired 2024; IgnoreIfMissing on;\n  AdvRASrcAddress { fe80::1; };\n};\n' >"$CONF"
+printf 'interface eth0 {\n  # retired 2024; AdvSendAdvert on;\n  IgnoreIfMissing on;\n  AdvRASrcAddress { fe80::1; };\n};\n' >"$CONF"
 run_check
-logged 'msg="no enabled IgnoreIfMissing on directive found' \
-  && ok "a commented-out IgnoreIfMissing still warns (comments are stripped first)" \
+logged 'msg="no enabled AdvSendAdvert on directive found' \
+  && ok "a commented-out AdvSendAdvert still warns (comments are stripped first)" \
   || no "comment stripping" "log: $(cat "$LOG")"
 
-# --- 7. IgnoreIfMissing must be ON ------------------------------------------------
+# --- 7. an EXPLICIT IgnoreIfMissing off warns; its absence does not ---------------
+# Upstream defaults IgnoreIfMissing to on (DFLT_IgnoreIfMissing, pinned by
+# tests/smoke.sh), so an absent directive is a correct config and an explicit
+# `off` is the state that makes an HA backup exit. The two arms are one pair: the
+# first fails if `off` stops being distinguished from `on`, the second if absence
+# is warned about again.
 setup
-printf 'interface eth0 {\n  IgnoreIfMissing off;\n  AdvRASrcAddress { fe80::1; };\n};\n' >"$CONF"
+printf 'interface eth0 {\n  IgnoreIfMissing off;\n  AdvSendAdvert on;\n  AdvRASrcAddress { fe80::1; };\n};\n' >"$CONF"
 run_check
-logged 'msg="no enabled IgnoreIfMissing on directive found' \
-  && ok "IgnoreIfMissing off is not accepted by a substring match (the value must be on)" \
-  || no "off rejected" "log: $(cat "$LOG")"
+logged 'msg="IgnoreIfMissing is explicitly off' \
+  && ok "an explicit IgnoreIfMissing off warns that an HA backup will exit or log errors" \
+  || no "explicit off warned" "log: $(cat "$LOG")"
+
+setup
+printf 'interface eth0 {\n  AdvSendAdvert on;\n  AdvRASrcAddress { fe80::1; };\n};\n' >"$CONF"
+run_check
+[ "$_rc" -eq 0 ] && [ ! -s "$LOG" ] \
+  && ok "an ABSENT IgnoreIfMissing is silent: upstream already defaults it to on" \
+  || no "absent IgnoreIfMissing silent" "rc=$_rc, log: $(cat "$LOG")"
 
 # --- 8. THE CLASSIC HA MISTAKE: AdvRASrcAddress on a non-link-local address -------
 # RFC 4861 §6.1.2: hosts silently discard an RA sourced from a non-link-local
@@ -177,8 +191,9 @@ logged 'msg="AdvRASrcAddress is set to a non-link-local address' && logged 'fd00
   && ok "a broken sibling block on a later line is not masked by a correct one, and is named" \
   || no "multi-block sibling" "log: $(cat "$LOG")"
 
-# Same line: a correct block followed by a wrong one. Only the same-line re-scan
-# branch of the awk state machine reaches the second block.
+# Same line: a correct block followed by a wrong one. The whole config is one line,
+# so only a walk that carries its brace depth across a block close reaches the
+# second block at all.
 setup
 printf 'interface eth0 { AdvRASrcAddress { fe80::1; }; }; interface eth1 { AdvRASrcAddress { fd00::78; }; };\n' >"$CONF"
 run_check
@@ -191,7 +206,7 @@ logged 'fd00::78' \
 # address. This is the false-POSITIVE guard; cases 8/9 keep it honest (the file
 # cannot pass by never warning).
 setup
-printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvRASrcAddress { fe80::1; }; MinRtrAdvInterval 30;\n};\n' >"$CONF"
+printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvSendAdvert on;\n  AdvRASrcAddress { fe80::1; }; MinRtrAdvInterval 30;\n};\n' >"$CONF"
 run_check
 [ ! -s "$LOG" ] \
   && ok "a trailing same-line directive after the block close is not read as an address" \
@@ -218,7 +233,7 @@ mkfifo "$CONF"
 run_check
 [ "$_rc" -eq 1 ] && logged 'msg="radvd.conf is not a regular file' \
   && [ "$(wc -l <"$LOG")" -eq 1 ] && [ "$(warn_count)" -eq 0 ] \
-  && ! logged 'no enabled IgnoreIfMissing' \
+  && ! logged 'msg="unable to scan mounted radvd config' \
   && ok "a FIFO at radvd.conf is refused with exit 1 on one line, without hanging or misdiagnosing" \
   || no "FIFO refused" "rc=$_rc, log: $(cat "$LOG")"
 
@@ -256,11 +271,11 @@ fi
 # structured log line. A quote inside the address survives tokenization (the splitter
 # cuts on ';' and trims only space/tab), so it reaches bad= as part of the token.
 setup
-printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvRASrcAddress { fd00::"78; };\n};\n' >"$CONF"
+printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvSendAdvert on;\n  AdvRASrcAddress { fd00::"78; };\n};\n' >"$CONF"
 run_check
 [ "$_rc" -eq 0 ] && logged 'msg="AdvRASrcAddress is set to a non-link-local address' \
   && [ "$(wc -l <"$LOG")" -eq 1 ] && ! grep -Fq 'fd00::"78' "$LOG" \
-  && grep -q 'fd00::?78' "$LOG" \
+  && grep -q 'fd00::?' "$LOG" \
   && ok "a quote inside the ADDRESS token named in bad= is neutralized" \
   || no "quote in the address token" "lines=$(wc -l <"$LOG"), log: $(cat "$LOG")"
 
@@ -268,19 +283,42 @@ run_check
 # a control byte inside the address token. The one-line oracle is what the
 # \040-\176 substitution holds together.
 setup
-printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvRASrcAddress { fd00::\017 78; };\n};\n' >"$CONF"
+printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvSendAdvert on;\n  AdvRASrcAddress { fd00::\017 78; };\n};\n' >"$CONF"
 run_check
 [ "$_rc" -eq 0 ] && logged 'msg="AdvRASrcAddress is set to a non-link-local address' \
   && [ "$(wc -l <"$LOG")" -eq 1 ] && ! grep -q 'fd00::'"$(printf '\017')" "$LOG" \
   && ok "a control byte inside the address token is neutralized and the warning stays one line" \
   || no "control byte in the address token" "lines=$(wc -l <"$LOG"), log: $(cat "$LOG")"
 
+# The interface NAME is the third config-to-log crossing on this path: radvd's
+# scanner accepts a quoted, backslash-escaped STRING token there (scanner.l,
+# gram.y), so the name reaching iface= is operator-supplied text and not a
+# kernel-validated device name. A control byte inside it must not reach the log
+# stream raw, and the quoted spelling must not close the field early.
+setup
+printf 'interface eth\017x {\n  AdvSendAdvert on;\n};\n' >"$CONF"
+run_check
+[ "$_rc" -eq 0 ] && [ "$(wc -l <"$LOG")" -eq 1 ] \
+  && logged 'msg="no AdvRASrcAddress directive found' \
+  && ! grep -q 'iface="eth'"$(printf '\017')" "$LOG" \
+  && grep -q 'iface="eth x"' "$LOG" \
+  && ok "a control byte in the interface NAME is neutralized in the iface= field" \
+  || no "control byte in the interface name" "lines=$(wc -l <"$LOG"), log: $(cat "$LOG")"
+
+setup
+printf 'interface "eth0" {\n  AdvSendAdvert on;\n};\n' >"$CONF"
+run_check
+[ "$_rc" -eq 0 ] && [ "$(wc -l <"$LOG")" -eq 1 ] \
+  && grep -q 'iface="??"' "$LOG" \
+  && ok "a quoted interface name reaches iface= with its quotes neutralized, keeping the line parseable" \
+  || no "quoted interface name" "lines=$(wc -l <"$LOG"), log: $(cat "$LOG")"
+
 # --- 14. a directive SPLIT across lines is still seen ------------------------------
 # radvd's lexer discards newlines, so `IgnoreIfMissing` with its value `on;` on the
 # next line is valid config. The gates match a newline-folded stream for that reason;
 # a line-oriented gate reads this valid config as missing HA directives.
 setup
-printf 'interface eth0 {\n  IgnoreIfMissing\n  on;\n  AdvRASrcAddress { fe80::1; };\n};\n' >"$CONF"
+printf 'interface eth0 {\n  IgnoreIfMissing\n  on;\n  AdvSendAdvert on;\n  AdvRASrcAddress { fe80::1; };\n};\n' >"$CONF"
 run_check
 [ "$_rc" -eq 0 ] && [ ! -s "$LOG" ] \
   && ok "IgnoreIfMissing with its value on the next line is silent (newlines are folded)" \
@@ -292,7 +330,7 @@ run_check
 # config lands in one bad= field. The cap on the shipped call is what bounds that
 # record, and the marker is what stops a cut list from reading as a complete one.
 setup
-printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvRASrcAddress {\n  MinRtrAdvInterval 30;\n  MaxRtrAdvInterval 100;\n  AdvSendAdvert on;\n  AdvManagedFlag off;\n  AdvOtherConfigFlag off;\n  prefix 2001:db8:1::/64;\n  AdvOnLink on;\n  AdvAutonomous on;\n  AdvValidLifetime 86400;\n  AdvPreferredLifetime 14400;\n  RDNSS 2001:db8:1::53;\n' >"$CONF"
+printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvSendAdvert on;\n  AdvRASrcAddress {\n  MinRtrAdvInterval 30;\n  MaxRtrAdvInterval 100;\n  AdvSendAdvert on;\n  AdvManagedFlag off;\n  AdvOtherConfigFlag off;\n  prefix 2001:db8:1::/64;\n  AdvOnLink on;\n  AdvAutonomous on;\n  AdvValidLifetime 86400;\n  AdvPreferredLifetime 14400;\n  RDNSS 2001:db8:1::53;\n' >"$CONF"
 run_check
 bad=$(sed -n 's/.*bad="\([^"]*\)".*/\1/p' "$LOG")
 payload=${bad%"[truncated]"}
@@ -302,18 +340,19 @@ payload=${bad%"[truncated]"}
   && ok "an unclosed AdvRASrcAddress block warns once, with bad= capped at 200 and marked truncated" \
   || no "unclosed block cap" "lines=$(wc -l <"$LOG"), payload=${#payload}, bad='$bad'"
 
-# --- 16. a config defining NO INTERFACE warns, and the directive scan still runs ---
+# --- 16. a config defining NO INTERFACE warns, and nothing else ---------------------
 # A config defining no interface is a foretold radvd failure (its grammar requires
-# at least one interface block), not a reason to skip the scan — both call sites
-# reach this warning, so a config emptied between startup and a HUP reload says so
-# on the reload too.
+# at least one interface block) — both call sites reach this warning, so a config
+# emptied between startup and a HUP reload says so on the reload too. The
+# per-interface gates have no block to report against here, so this warning is the
+# whole oracle: warning about directives inside interfaces there are none of is
+# noise, not coverage.
 setup
 : >"$CONF"
 run_check
 [ "$_rc" -eq 0 ] && logged 'msg="radvd.conf defines no interface' \
-  && logged 'msg="no enabled IgnoreIfMissing on directive found' \
-  && logged 'msg="no AdvRASrcAddress directive found' \
-  && ok "an empty config warns that radvd will exit, and the HA-directive scan still runs" \
+  && [ "$(warn_count)" -eq 1 ] \
+  && ok "an empty config warns that radvd will exit, and draws no per-interface warning" \
   || no "empty config warn" "rc=$_rc, log: $(cat "$LOG")"
 
 setup
@@ -338,10 +377,14 @@ setup
 printf 'interface eth0 { IgnoreIfMissing on; AdvRASrcAddress { fe80::1; }; };\n' >"$CONF"
 calls="$WORK/timeout-143-calls"
 : >"$calls"
+# Both stubs shadow the external commands the runtime-loaded check_ha_directives
+# invokes, so their call site is not in this file for shellcheck to see.
+# shellcheck disable=SC2329
 timeout() {
   printf 'timeout %s\n' "$*" >>"$calls"
   return 143
 }
+# shellcheck disable=SC2329
 cat() {
   printf 'cat %s\n' "$*" >>"$calls"
   return 99
@@ -355,5 +398,32 @@ unset -f timeout cat
   && logged 'read of the config exceeded 5s' \
   && ok "BusyBox timeout expiry stays bounded and emits the exceeded-budget warning without a direct re-read" \
   || no "BusyBox timeout expiry" "rc=$_rc, timeout_calls=$timeout_calls, cat_calls=$cat_calls, log: $(cat "$LOG")"
+
+# --- 18. text inside a QUOTED VALUE is data, and must change no HA decision -------
+# radvd's scanner makes a double-quoted value ONE token (v2.21 scanner.l), so its
+# bytes configure nothing. The bait is a complete HA config -- statement
+# boundaries, directive names, values and an address block -- inside an
+# AdvCaptivePortalAPI value, on an interface carrying neither real directive. The
+# oracle is DIFFERENTIAL: the same config with an ordinary URL must draw exactly
+# the same warnings. That is what keeps the case honest however the individual
+# gates are worded, where a silence-only assertion would pin one wording. Compared
+# on the msg= set, because path= names each case's own temp dir, and the plain
+# run's set is required non-empty so two empty sets cannot compare equal.
+msg_set() {
+  sed -n 's/.*\(msg="[^"]*"\).*/\1/p' "$1" | sort
+}
+setup
+printf 'interface eth0 {\n  AdvCaptivePortalAPI "https://portal.example/; IgnoreIfMissing on; AdvRASrcAddress { fe80::1; };";\n};\n' >"$CONF"
+run_check
+bait_rc=$_rc
+msg_set "$LOG" >"$WORK/bait.msgs"
+setup
+printf 'interface eth0 {\n  AdvCaptivePortalAPI "https://portal.example/login";\n};\n' >"$CONF"
+run_check
+msg_set "$LOG" >"$WORK/plain.msgs"
+[ "$bait_rc" -eq 0 ] && [ "$_rc" -eq 0 ] && [ -s "$WORK/plain.msgs" ] \
+  && cmp -s "$WORK/bait.msgs" "$WORK/plain.msgs" \
+  && ok "directive-shaped text inside a quoted value changes no HA decision" \
+  || no "quoted payload treated as syntax" "bait_rc=$bait_rc, rc=$_rc, bait=[$(tr '\n' ' ' <"$WORK/bait.msgs")], plain=[$(tr '\n' ' ' <"$WORK/plain.msgs")]"
 
 report

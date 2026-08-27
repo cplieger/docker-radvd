@@ -4,9 +4,16 @@
 # otherwise, so committing the file is how a repo opts in — keep the name.
 #
 # Scope (repo-owned, per lib.sh): this suite owns entrypoint.sh's validator arms
-# and pre-pid signal latch — warn-only diagnostics a healthy container never
-# shows, plus one refusal (a config node radvd itself cannot open); tests/smoke.sh
-# owns the radvd binary and scripts/smoke.sh the supervisor's signal contract.
+# AND its signal-handler pieces — the warn-only diagnostics a healthy container
+# never shows, one refusal for a config node radvd itself cannot open, the pre-pid
+# latch, and the shutdown arm that lives inline in the supervisor loop; plus one
+# repo-contract case asserting that the Smoke workflow still invokes
+# scripts/smoke.sh against the image it builds — the one thing this suite owns that
+# is not entrypoint.sh behaviour, and it lives here because ci / validate is the
+# check that stays green when the Smoke workflow stops asserting. tests/smoke.sh
+# owns the radvd binary; scripts/smoke.sh owns the assembled-container lifecycle
+# contract and is the only test that exercises the supervisor loop itself rather
+# than an extracted arm.
 set -u
 
 cd -- "$(dirname -- "$0")" || exit 1
