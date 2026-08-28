@@ -10,7 +10,6 @@ FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6ee
 
 SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
 
-# hadolint ignore=DL3018
 RUN apk add --no-cache bison build-base flex linux-headers pkgconf
 
 ARG RADVD_VERSION
@@ -89,7 +88,6 @@ COPY --from=builder /out/radvd-src/defaults.h /tmp/radvd-defaults.h
 # with this stage) while awk, sed, grep and tr are the image's BusyBox applets — a
 # host-only run can be green while BusyBox fails.
 # ${RADVD_VERSION:?} fails the build if the ARG wiring breaks, so the in-image version assertion cannot be silently skipped.
-# hadolint ignore=DL3018
 RUN apk add --no-cache bash \
     && RADVD_EXPECTED_VERSION="${RADVD_VERSION:?}" sh /tmp/tests/smoke.sh \
     && ENTRYPOINT=/usr/local/bin/entrypoint.sh bash /tmp/tests/shell/run.sh \

@@ -449,24 +449,23 @@ grep -qx 'radvd' <<<"$owners" \
   || fail "hardened profile: no radvd-owned radvd process (SETUID/SETGID missing from the profile is the usual cause); observed owners: $(tr '\n' ' ' <<<"$owners")"
 # KILL, and this reload is the only assertion in the suite that can see it missing:
 # the supervisor's child runs as the unprivileged radvd user, so a root PID 1
-# without CAP_KILL cannot signal it. A new pid plus a still-running container is
-# what sees that: the refused kill is logged but the reload proceeds anyway, a
-# second radvd is started beside the live one, dies on the pid-file lock, and the
-# container exits on the propagated failure. A log grep is not that oracle — it is
-# keyed to radvd's own wording at the pinned version.
+# without CAP_KILL cannot signal it. A MOVED pid is what sees that: without the
+# capability the delivery is never observed, the reload never arms, and radvd keeps
+# serving under the pid it already had. A log grep is not that oracle — it is keyed
+# to radvd's own wording at the pinned version.
 pid_before=$(docker exec "$C6" pidof radvd) || fail "hardened profile: cannot read radvd pid"
 docker kill -s HUP "$C6" >/dev/null
 pid_after=$(wait_for_reload "$C6" 1 "$pid_before")
 [ -n "$pid_after" ] || fail "hardened profile: HUP did not reload radvd (no reload log, PID unchanged, or the container died)"
 [ "$(docker inspect -f '{{.State.Running}}' "$C6")" = "true" ] \
-  || fail "hardened profile: container not running after HUP reload (KILL missing from the profile is the usual cause: a second radvd then races the live one and dies on the pid-file lock)"
+  || fail "hardened profile: container not running after HUP reload (the replacement radvd exited)"
 docker stop "$C6" >/dev/null
 ec=$(docker inspect -f '{{.State.ExitCode}}' "$C6")
 [ "$ec" = "0" ] || fail "hardened profile: docker stop exit code $ec, want 0"
 wait_for_log "$C6" 'radvd stopped on shutdown signal' "hardened profile: missing graceful shutdown log line"
 printf '[smoke] PASS  hardened caps: the published profile boots, drops privileges, reloads on HUP (pid %s -> %s) and stops gracefully\n' "$pid_before" "$pid_after"
 
-# --- 10. shutdown without CAP_KILL reports the explicit disposition ----------
+# --- 10. without CAP_KILL both signal paths report their own refusal ---------
 (
   C7="radvd-smoke-no-kill-$$"
   cleanup_no_kill() {
@@ -491,6 +490,19 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
   done
   printf '[smoke] starting %s (hardened profile without CAP_KILL)\n' "$C7"
   start_container "$C7" "${NO_KILL_FLAGS[@]}" -v "$TMPDIR_FIXTURE:/etc/radvd:ro"
+  # The root supervisor cannot signal its non-root child here, so the reload is
+  # refused and radvd keeps serving. PID 1 staying up is load-bearing rather than
+  # incidental: this `docker kill` has already disarmed the restart policy, so an
+  # exit would leave the segment with no RA emitter until an operator intervenes.
+  pid_before=$(docker exec "$C7" pidof radvd) || fail "no-KILL: cannot read the radvd pid before the HUP"
+  docker kill -s HUP "$C7" >/dev/null
+  wait_for_log "$C7" 'SIGHUP reload refused: TERM delivery to radvd could not be confirmed' \
+    "no-KILL HUP was not refused"
+  [ "$(docker inspect -f '{{.State.Running}}' "$C7")" = "true" ] \
+    || fail "no-KILL HUP stopped the container instead of leaving radvd serving its last good config"
+  [ "$(docker exec "$C7" pidof radvd)" = "$pid_before" ] \
+    || fail "no-KILL HUP replaced radvd (pids moved from $pid_before)"
+  printf '[smoke] PASS  no-KILL HUP: reload refused, radvd still serving (pids %s), container up\n' "$pid_before"
   docker stop -t 5 "$C7" >/dev/null
   ec=$(docker inspect -f '{{.State.ExitCode}}' "$C7")
   [ "$ec" = "0" ] || fail "no-KILL docker stop exit code $ec, want 0"

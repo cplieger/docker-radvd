@@ -3,9 +3,6 @@
 # CONTRIBUTING.md, "Design boundaries (please preserve)".
 set -u
 
-# The handlers' log stream: the reap block below redirects fd2 out from under them.
-exec 3>&2
-
 CONF="/etc/radvd/radvd.conf"
 
 # Both tr stages replace 1:1 rather than delete: deletion shifts offsets and can
@@ -45,9 +42,13 @@ shutdown=0
 # Set when a TERM to the child was refused, so the shutdown arm cannot claim a
 # graceful stop it never observed. Scoped to one child: start_radvd clears it.
 signal_failed=0
+# Set by both handlers so the loop can tell a trap-interrupted wait from a real
+# radvd exit. A status above 128 cannot: a SIGKILLed radvd exits 137 too.
+sig_seen=0
 on_hup() {
+  sig_seen=1
   if [ "$shutdown" -eq 1 ]; then
-    printf 'level=info msg="SIGHUP received during shutdown; reload ignored"\n' >&3
+    printf 'level=info msg="SIGHUP received during shutdown; reload ignored"\n' >&2
     return
   fi
   # The reload stops radvd before its replacement reads the config, so a bad or
@@ -56,7 +57,7 @@ on_hup() {
   # runs radvd's config PARSER and stops there, so everything radvd validates after
   # parsing passes this gate: a filter, not a guarantee.
   if ! [ -f "$CONF" ]; then
-    printf 'level=error msg="SIGHUP reload refused: radvd.conf is absent or not a regular file; radvd keeps serving its last good config" path="%s"\n' "$CONF" >&3
+    printf 'level=error msg="SIGHUP reload refused: radvd.conf is absent or not a regular file" path="%s"\n' "$CONF" >&2
     return
   fi
   hup_rc=0
@@ -65,12 +66,12 @@ on_hup() {
     # Neither timeout call site passes -k, so an elapsed budget is 124 (GNU) or
     # 143 (BusyBox, the shipped one) and 137 is unreachable at both.
     if [ "$hup_rc" -eq 124 ] || [ "$hup_rc" -eq 143 ]; then
-      printf 'level=error msg="SIGHUP reload refused: the config check did not finish within 5s; radvd keeps serving its last good config" path="%s"\n' "$CONF" >&3
+      printf 'level=error msg="SIGHUP reload refused: the config check did not finish within 5s" path="%s"\n' "$CONF" >&2
     else
-      printf 'level=error msg="SIGHUP reload refused: radvd rejected the mounted config; radvd keeps serving its last good config" path="%s"\n' "$CONF" >&3
+      printf 'level=error msg="SIGHUP reload refused: radvd rejected the mounted config" path="%s"\n' "$CONF" >&2
       # radvd's own text, verbatim and unstructured on purpose: README's
       # RadvdConfigError rule matches these bytes and scripts/smoke.sh asserts it.
-      printf '%s\n' "$hup_ct" >&3
+      printf '%s\n' "$hup_ct" >&2
     fi
     return
   fi
@@ -80,22 +81,26 @@ on_hup() {
   # same warn arm, so refusing there would refuse a reload that would have worked.
   if [ "$RADVD_DEBUG_LEVEL" -eq 0 ] \
     && printf '%s\n' "$hup_ct" | grep -q 'Insecure file permissions'; then
-    printf 'level=error msg="SIGHUP reload refused: radvd reports the config file permissions insecure and would exit at debug level 0; radvd keeps serving its last good config" path="%s"\n' "$CONF" >&3
-    printf '%s\n' "$hup_ct" >&3
+    printf 'level=error msg="SIGHUP reload refused: radvd reports the config file permissions insecure and would exit at debug level 0" path="%s"\n' "$CONF" >&2
+    printf '%s\n' "$hup_ct" >&2
     return
   fi
-  reload=1
-  printf 'level=info msg="SIGHUP received; restarting radvd to reload config"\n' >&3
-  if [ -n "$radvd_pid" ] && ! kill -TERM "$radvd_pid" 2>/dev/null; then
-    printf 'level=error msg="failed to deliver TERM to radvd; the container may lack CAP_KILL, or the child was already reaped" pid="%s"\n' "$radvd_pid" >&3
+  # reload=1 promises the loop that an exit is coming, so only an observed
+  # delivery may arm it.
+  if [ -n "$radvd_pid" ] && kill -TERM "$radvd_pid" 2>/dev/null; then
+    reload=1
+    printf 'level=info msg="SIGHUP received; restarting radvd to reload config"\n' >&2
+  else
+    printf 'level=error msg="SIGHUP reload refused: TERM delivery to radvd could not be confirmed; the container may lack CAP_KILL" pid="%s"\n' "$radvd_pid" >&2
   fi
 }
 on_term() {
+  sig_seen=1
   shutdown=1
-  printf 'level=info msg="shutdown signal received; stopping radvd"\n' >&3
+  printf 'level=info msg="shutdown signal received; stopping radvd"\n' >&2
   if [ -n "$radvd_pid" ] && ! kill -TERM "$radvd_pid" 2>/dev/null; then
     signal_failed=1
-    printf 'level=error msg="failed to deliver TERM to radvd; the container may lack CAP_KILL, or the child was already reaped" pid="%s"\n' "$radvd_pid" >&3
+    printf 'level=error msg="failed to deliver TERM to radvd; the container may lack CAP_KILL, or the child was already reaped" pid="%s"\n' "$radvd_pid" >&2
   fi
 }
 trap on_hup HUP
@@ -134,20 +139,14 @@ check_config_directives() {
     fi
     return 0
   fi
-  # radvd's scanner makes a double-quoted string one token (v2.21 scanner.l), so a
-  # `#` inside one is content: a naive strip from the first `#` erases the `;` after
-  # `AdvCaptivePortalAPI "…/#/login"` and the gates lose their anchor. This stage owns
-  # that token end to end. scanner.l's `string` macro is
-  # `[a-zA-Z0-9…]+|L?\"(\\.|[^\\"])*\"`, so the QUOTES are inside the match and reach
-  # `yylval.str` verbatim: radvd's name for `interface "eth0"` is the 6-byte `"eth0"`,
-  # and `"AdvRASrcAddress"` is a STRING, never the directive. So the quotes are
-  # re-emitted around the run and every byte that means something to the walk below —
-  # `{`, `}`, `;`, `#`, whitespace and the record separator — is replaced by `@` inside
-  # it. A quoted value therefore decides nothing. The masked bytes reach the
-  # iface= field, so a quoted name is reported as the scan holds it rather than
-  # as radvd does.
-  # Split on the quote, not byte by byte: a char loop costs seconds on a
-  # multi-megabyte config.
+  # radvd's scanner (v2.21 scanner.l:39) makes a double-quoted string ONE token and
+  # the quotes are part of the value: its name for `interface "eth0"` is the 6-byte
+  # `"eth0"`, and `"AdvRASrcAddress"` is a STRING, never the directive. So a naive
+  # strip from the first `#` erases the `;` after `AdvCaptivePortalAPI "…/#/login"`.
+  # This stage re-emits the quotes around the run and masks every byte meaningful to
+  # the walk below (`{`, `}`, `;`, `#`, whitespace, the record separator) with `@`
+  # inside it, so a quoted value decides nothing and reaches iface= masked.
+  # Split on the quote, not byte by byte: a char loop is seconds on a large config.
   conf_scan=$(printf '%s\n' "$conf_snapshot" | awk '
     {
       gsub(/\r/, "")
@@ -163,7 +162,7 @@ check_config_directives() {
           out = out s
         } else {
           # The bare string class at scanner.l:39 includes `#`, so the comment
-          # rule at scanner.l:41 wins the longest match only at a token
+          # rule at scanner.l:42 wins the longest match only at a token
           # boundary: `eth0#x` is one STRING token, not a name plus a comment.
           if (match(s, /(^|[{}; \t])#/)) {
             out = out substr(s, 1, RSTART + RLENGTH - 2)
@@ -259,8 +258,8 @@ check_config_directives() {
           pend = ""
           continue
         }
-        if (pend == "advsendadvert" && lt == "on") {
-          f_send = 1
+        if (pend == "advsendadvert") {
+          f_send = (lt == "on")
           pend = ""
           continue
         }
@@ -321,32 +320,27 @@ printf 'level=info msg="starting radvd" config="%s" debug_level="%s"\n' "$CONF" 
 start_radvd
 
 while :; do
-  # A trapped signal interrupts wait before radvd has terminated; keep reaping so
-  # the next start does not race a dying process. The inner wait refreshes status,
-  # which a refused reload (neither flag set) would otherwise leave at 129.
-  {
-    wait "$radvd_pid"
-    status=$?
-    while kill -0 "$radvd_pid" 2>/dev/null; do
-      wait "$radvd_pid"
-      status=$?
-    done
-  } 2>/dev/null
-  # Cleared as soon as the loop can no longer see the child: left set, a TERM in
-  # this gap reports a CAP_KILL fault that is not there. The handlers skip an empty
-  # radvd_pid and start_radvd's pre-pid latch delivers to the replacement.
+  wait "$radvd_pid"
+  status=$?
+  if [ "$sig_seen" -eq 1 ]; then
+    sig_seen=0
+    if [ "$shutdown" -eq 1 ]; then
+      # Exit 0 either way: an explicit `docker stop` must not read as a crash to a
+      # restart policy, so the refused delivery is reported rather than propagated.
+      if [ "$signal_failed" -eq 1 ]; then
+        printf 'level=warn msg="the TERM could not be delivered to radvd; a graceful stop cannot be confirmed"\n' >&2
+      else
+        wait "$radvd_pid"
+        printf 'level=info msg="radvd stopped on shutdown signal (SIGTERM/SIGINT)"\n' >&2
+      fi
+      exit 0
+    fi
+    # No flag armed means the trap refused its own delivery, so the child is still
+    # serving: keep supervising it rather than reading the interruption as an exit.
+    continue
+  fi
   radvd_pid=""
 
-  if [ "$shutdown" -eq 1 ]; then
-    # Exit 0 either way: an explicit `docker stop` must not read as a crash to a
-    # restart policy, so the refused delivery is reported rather than propagated.
-    if [ "$signal_failed" -eq 1 ]; then
-      printf 'level=warn msg="the TERM could not be delivered to radvd; a graceful stop cannot be confirmed"\n' >&2
-    else
-      printf 'level=info msg="radvd stopped on shutdown signal (SIGTERM/SIGINT)"\n' >&2
-    fi
-    exit 0
-  fi
   if [ "$reload" -eq 1 ]; then
     reload=0
     printf 'level=info msg="reloading radvd (config re-read via restart)"\n' >&2

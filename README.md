@@ -18,7 +18,7 @@ This image is a minimal Alpine wrapper around upstream `radvd`, compiled from th
 - **Validates the mounted `radvd.conf`** and warns, per interface block, about the misconfigurations radvd itself does not report: a block that enables no `AdvSendAdvert on` (radvd defaults it to off, so it runs and emits nothing), and an `AdvRASrcAddress` set to a non-link-local (global/ULA) address that RFC 4861 requires hosts to silently discard. A config radvd rejects outright, such as one defining no interface block, is left to radvd: radvd logs its own error and exits, and the entrypoint reports that exit. One shape is refused rather than warned about, at startup and on reload alike: a `radvd.conf` that is not a regular file, which radvd itself cannot consume, exits 1
 - **Creates `/run/radvd`** (radvd refuses to start without it)
 - **Drops privileges**: radvd opens its raw socket as root, then runs as the unprivileged `radvd` user (`-u radvd`) for the rest of its lifetime
-- **Supervises radvd**: turns `SIGHUP` into a clean config reload, refusing the reload and keeping the running daemon when the config would not start, forwards `SIGTERM` for graceful shutdown, and propagates an unexpected radvd exit to Docker's restart policy — until a `docker kill` disarms that policy for the rest of the container's run, unless a `stop_signal` is configured (see [Reloading](#reloading-configuration))
+- **Supervises radvd**: turns `SIGHUP` into a clean config reload, refusing the reload and keeping the running daemon when the config would not start, forwards `SIGTERM` for graceful shutdown, and propagates an unexpected radvd exit to Docker's restart policy — until a `docker kill` disarms that policy for the rest of the container's run (see [Reloading](#reloading-configuration))
 - **Logs to stderr** with structured key=value lines, captured by `docker logs`
 
 ### Why this design
@@ -111,9 +111,9 @@ The entrypoint restarts the daemon so it re-reads the config; `docker restart ra
 
 Most bad edits are refused before anything is stopped. The entrypoint config-tests the mounted file first, so the running radvd keeps serving its last good config. Four shapes are refused, each logging `SIGHUP reload refused`: malformed, absent or not a regular file, a check exceeding 5s, and permissions radvd calls insecure. The first and last also carry radvd's text. A refused reload does not re-run the directive checks, because those would describe a config that is not in effect.
 
-The check is `radvd -c … -u radvd`: radvd's config parser and nothing after it, so anything radvd validates later passes this gate: the interface's presence, every per-interface parameter bound (`MinRtrAdvInterval` against 3/4 of `MaxRtrAdvInterval`, lifetimes, prefix lengths, MTU), and a config replaced between the check and the daemon's own read. The `radvd.conf` permissions are the exception: the configtest runs under the daemon's own `-u radvd` identity and prints the verdict, so that edit costs a reload, not the emitter. What happens next depends on `IgnoreIfMissing`: `off` exits radvd and the container with it, `on` (the upstream default) leaves radvd running and healthy while that interface emits nothing at all. Either way the evidence is radvd's own error line, such as `MinRtrAdvInterval for eth0 (200.00) must be at least 3.00 but no more than 3/4 of MaxRtrAdvInterval (180.00)`. Verify with `rdisc6` after any config change, and alert on it: the `RadvdConfigError` rule below carries these lines.
+The check is `radvd -c … -u radvd`: radvd's config parser and nothing after it, so anything radvd validates later passes this gate: the interface's presence, every bound radvd checks only after the parse (`MinRtrAdvInterval` against 3/4 of `MaxRtrAdvInterval`, `AdvDefaultLifetime`, MTU), and a config replaced between the check and the daemon's own read. The `radvd.conf` permissions are the exception: the configtest runs under the daemon's own `-u radvd` identity and prints the verdict, so that edit costs a reload, not the emitter. What happens next depends on `IgnoreIfMissing`: `off` exits radvd and the container with it, `on` (the upstream default) leaves radvd running and healthy while that interface emits nothing at all. Either way the evidence is radvd's own error line, such as `MinRtrAdvInterval for eth0 (200.00) must be at least 3.00 but no more than 3/4 of MaxRtrAdvInterval (180.00)`. Verify with `rdisc6` after any config change, and alert on it: the `RadvdConfigError` rule below carries these lines.
 
-One Docker behaviour to plan for: any signal delivered with `docker kill` cancels the container's restart manager for the remainder of that run when no `stop_signal` is configured, so crash-recreate stays disarmed until the next `docker start` or `docker restart`. Prefer `docker restart` where crash-recreate matters, since starting a container resets the manager.
+One Docker behaviour to plan for: any signal delivered with `docker kill` cancels the container's restart manager for the remainder of that run, so crash-recreate stays disarmed until the next `docker start` or `docker restart`. Prefer `docker restart` where crash-recreate matters, since starting a container resets the manager.
 
 ## Configuration reference
 
@@ -179,7 +179,10 @@ what makes listing them necessary. None of the four can be dropped further:
   `a graceful stop cannot be confirmed` warning), so the final zero-lifetime
   Router Advertisement is never sent and LAN hosts keep this node as their
   default router until the advertised lifetime expires; and
-  `docker kill -s HUP` starts a second radvd that dies on the pid-file lock.
+  `docker kill -s HUP` logs `SIGHUP reload refused: TERM delivery to radvd
+  could not be confirmed` and leaves radvd serving its last good config. The
+  container stays up, which is load-bearing here: that `docker kill` has
+  already disarmed the restart policy for the rest of the run.
 
 ### Networking
 
@@ -189,7 +192,7 @@ what makes listing them necessary. None of the four can be dropped further:
 
 ## Healthcheck
 
-The built-in healthcheck runs `pidof radvd` every 30s (5s timeout, 3 retries, 15s start period), so a container whose daemon is up reports `healthy`. It is a liveness probe only, and it is not what reacts to a crash: when radvd dies the supervising entrypoint propagates the exit and the container stops within a second, so a crash is handled by your `restart` policy rather than by the container ageing into `unhealthy` — with the `docker kill` caveat in [Reloading](#reloading-configuration), which disarms that policy for the rest of the run when no `stop_signal` is configured.
+The built-in healthcheck runs `pidof radvd` every 30s (5s timeout, 3 retries, 15s start period), so a container whose daemon is up reports `healthy`. It is a liveness probe only, and it is not what reacts to a crash: when radvd dies the supervising entrypoint propagates the exit and the container stops within a second, so a crash is handled by your `restart` policy rather than by the container ageing into `unhealthy` — with the `docker kill` caveat in [Reloading](#reloading-configuration), which disarms that policy for the rest of the run.
 
 Neither the probe nor that exit propagation covers "RAs aren't being emitted because the source address is missing" (that's the HA case where radvd intentionally stays running but silent). The image ships upstream's own RA decoder, `radvdump`, so `docker exec radvd radvdump` is a first look at what is on the wire — run it on the peer node to confirm the BACKUP is staying silent; whether it sees this container's own RAs depends on multicast loopback. For end-to-end verification, run an off-host probe that listens for RAs on the LAN segment:
 
@@ -244,8 +247,8 @@ groups:
             profile above).
             Two groups pass the reload config test, so for them the
             rejected-edit reading does not hold: the interface's presence, and
-            the per-interface parameter bounds (interval bounds, lifetimes,
-            prefix lengths, MTU). With `IgnoreIfMissing off` the container
+            every bound radvd checks only after the parse (interval bounds,
+            `AdvDefaultLifetime`, MTU). With `IgnoreIfMissing off` the container
             crash-loops. With it on, the upstream default, radvd stays running
             and healthy while this alert is the only signal that the segment has
             no RA emitter; the `not found:` alternative names it.
