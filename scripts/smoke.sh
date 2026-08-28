@@ -238,12 +238,24 @@ pid_after=$(wait_for_reload "$C1" "$((reload_before + 1))" "$pid_before")
   || fail "container stopped after the reap-order reload"
 printf '[smoke] PASS  reap order: replacement waited for the previous radvd generation to exit\n'
 
-# --- 4. graceful shutdown on SIGTERM -----------------------------------------
-docker stop "$C1" >/dev/null
+# --- 4. graceful shutdown survives a second trapped signal during reap -------
+held=$(docker exec "$C1" pidof radvd) || fail "cannot read radvd pids before shutdown"
+read -r -a held_pids <<<"$held"
+docker exec "$C1" sh -c 'kill -STOP "$@"' _ "${held_pids[@]}"
+docker kill -s TERM "$C1" >/dev/null
+wait_for_log "$C1" 'shutdown signal received; stopping radvd' "PID 1 did not enter shutdown"
+docker kill -s HUP "$C1" >/dev/null
+sleep 1
+[ "$(docker inspect -f '{{.State.Running}}' "$C1")" = "true" ] \
+  || fail "a second trapped signal interrupted the shutdown reap while radvd was still held"
+docker logs "$C1" 2>&1 | grep -q 'radvd stopped on shutdown signal' \
+  && fail "PID 1 reported a graceful stop before the held radvd generation was reaped"
+docker exec "$C1" sh -c 'kill -CONT "$@"' _ "${held_pids[@]}"
+wait_until_stopped "$C1" "container did not stop after the held radvd generation resumed"
 ec=$(docker inspect -f '{{.State.ExitCode}}' "$C1")
-[ "$ec" = "0" ] || fail "docker stop exit code $ec, want 0"
-wait_for_log "$C1" 'radvd stopped on shutdown signal' "missing graceful shutdown log line"
-printf '[smoke] PASS  shutdown: SIGTERM exits 0 with graceful log\n'
+[ "$ec" = "0" ] || fail "second-signal shutdown exit code $ec, want 0"
+wait_for_log "$C1" 'radvd stopped on shutdown signal' "missing graceful shutdown log after the child was reaped"
+printf '[smoke] PASS  shutdown reap: a second trapped signal did not let PID 1 outlive its child\n'
 
 # The README's RadvdConfigError rule is an exact-string contract between the
 # entrypoint's fatal lines and an operator's Loki rule, so the refusal
@@ -511,6 +523,48 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
   docker logs "$C7" 2>&1 | grep -q 'radvd stopped on shutdown signal' \
     && fail "no-KILL shutdown falsely reported a graceful stop"
   printf '[smoke] PASS  no-KILL shutdown: refusal reported and PID 1 exited 0\n'
+)
+
+# --- 11. a TERM latched during preflight preserves structured logs ----------
+(
+  C8="radvd-smoke-startup-latch-$$"
+  slow_cat="$TMPDIR_FIXTURE/slow-cat"
+  cleanup_startup_latch() {
+    code=$?
+    if [ "$code" -ne 0 ] && docker inspect "$C8" >/dev/null 2>&1; then
+      printf -- '--- %s logs (tail) ---\n' "$C8" >&2
+      docker logs "$C8" 2>&1 | tail -25 >&2 || true
+    fi
+    docker rm -f "$C8" >/dev/null 2>&1 || true
+    rm -f "$slow_cat"
+  }
+  trap cleanup_startup_latch EXIT
+
+  printf '%s\n' '#!/bin/sh' ': >/tmp/slow-cat-entered' 'sleep 2' 'exec /bin/cat "$@"' >"$slow_cat"
+  chmod +x "$slow_cat"
+  docker create --name "$C8" --network none --cap-add NET_RAW \
+    -v "$slow_cat:/usr/local/bin/cat:ro" "$IMAGE" >/dev/null
+  docker cp "$TMPDIR_FIXTURE" "$C8:/etc/radvd" >/dev/null
+  docker start "$C8" >/dev/null
+  entered=""
+  for _ in $(seq 1 20); do
+    if docker exec "$C8" test -f /tmp/slow-cat-entered 2>/dev/null; then
+      entered=1
+      break
+    fi
+    sleep 0.1
+  done
+  [ -n "$entered" ] || fail "startup-latch preflight window did not open"
+  job_status_before=$(docker logs "$C8" 2>&1 | grep -Ec '^(Terminated|Killed|Aborted)$' || true)
+  docker kill -s TERM "$C8" >/dev/null
+  wait_until_stopped "$C8" "container did not honor TERM latched during preflight"
+  ec=$(docker inspect -f '{{.State.ExitCode}}' "$C8")
+  [ "$ec" = "0" ] || fail "startup-latch TERM exit code $ec, want 0"
+  wait_for_log "$C8" 'radvd stopped on shutdown signal' "startup-latch TERM was not delivered to the fresh child"
+  job_status_after=$(docker logs "$C8" 2>&1 | grep -Ec '^(Terminated|Killed|Aborted)$' || true)
+  [ "$job_status_after" -eq "$job_status_before" ] \
+    || fail "startup-latch TERM leaked a bare BusyBox ash job-status line into docker logs"
+  printf '[smoke] PASS  startup latch: preflight TERM reached the fresh child without corrupting structured logs\n'
 )
 
 printf '[smoke] OK — all signal-contract assertions passed for %s\n' "$IMAGE"

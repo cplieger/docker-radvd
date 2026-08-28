@@ -296,6 +296,19 @@ run_check
   && ok "an empty quoted interface name is still a name, so its block is not silently skipped" \
   || no "empty quoted interface name" "lines=$(wc -l <"$LOG"), log: $(cat "$LOG")"
 
+# The same `string` macro makes the optional `L` prefix part of the token: radvd reads
+# `L"eth0"` as one 7-byte STRING, so a token boundary inserted before the quote reports
+# `L` as the whole interface name. Expect the sanitized complete token, and assert the
+# bare prefix never appears on its own.
+setup
+printf 'interface L"eth0" {\n  AdvRASrcAddress { fe80::1; };\n};\n' >"$CONF"
+run_check
+[ "$_rc" -eq 0 ] && [ "$(wc -l <"$LOG")" -eq 1 ] \
+  && grep -q 'iface="L?eth0?"' "$LOG" \
+  && ! grep -q 'iface="L"' "$LOG" \
+  && ok "an L-prefixed quoted interface name remains one complete radvd STRING token" \
+  || no "L-prefixed quoted interface name" "lines=$(wc -l <"$LOG"), log: $(cat "$LOG")"
+
 # --- 13. a directive SPLIT across lines is still seen ------------------------------
 # radvd's lexer discards newlines, so `AdvSendAdvert` with its value `on;` on the
 # next line is valid config. The gates match a newline-folded stream for that reason;

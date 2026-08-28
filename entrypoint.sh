@@ -35,7 +35,7 @@ case "$RADVD_DEBUG_LEVEL" in
 esac
 
 # Armed before preflight because PID 1 receives no default-disposition signal: a
-# HUP/TERM during validation is latched here for start_radvd's pre-pid latch.
+# TERM during validation is latched here for start_radvd's pre-pid latch.
 radvd_pid=""
 reload=0
 shutdown=0
@@ -91,7 +91,7 @@ on_hup() {
     reload=1
     printf 'level=info msg="SIGHUP received; restarting radvd to reload config"\n' >&2
   else
-    printf 'level=error msg="SIGHUP reload refused: TERM delivery to radvd could not be confirmed; the container may lack CAP_KILL" pid="%s"\n' "$radvd_pid" >&2
+    printf 'level=error msg="SIGHUP reload refused: TERM delivery to radvd could not be confirmed; radvd may not be running yet, the child may already have been reaped, or the container may lack CAP_KILL" pid="%s"\n' "$radvd_pid" >&2
   fi
 }
 on_term() {
@@ -173,8 +173,11 @@ check_config_directives() {
         if (i < n) {
           # Re-emit the delimiter, padded so the quoted run is its own token: the
           # quotes ARE part of the STRING value radvd reads, and a token carrying
-          # them can never equal a directive keyword.
-          if (instr) { out = out "\" " } else { out = out " \"" }
+          # them can never equal a directive keyword. scanner.l:39 puts an optional
+          # `L` INSIDE that same token (`L?\"…\"`, either case because scanner.l:16
+          # sets `caseless`), so no boundary may go there; the boundary class is what
+          # still pads `ethL"0"`, which radvd itself lexes as two tokens.
+          if (instr) { out = out "\" " } else { out = out (s ~ /(^|[{}; \t])[Ll]$/ ? "\"" : " \"") }
           instr = !instr
         }
       }
@@ -306,9 +309,9 @@ start_radvd() {
   signal_failed=0
   radvd -C "$CONF" -n -m stderr -d "$RADVD_DEBUG_LEVEL" -u radvd &
   radvd_pid=$!
-  # A signal delivered before radvd_pid was assigned set its flag but skipped the
-  # kill; deliver it here so an early stop or reload is not swallowed.
-  if [ "$shutdown" -eq 1 ] || [ "$reload" -eq 1 ]; then
+  # A TERM delivered before radvd_pid was assigned set `shutdown` but skipped the
+  # kill; deliver it here so an early stop is not swallowed.
+  if [ "$shutdown" -eq 1 ]; then
     if ! kill -TERM "$radvd_pid" 2>/dev/null; then
       signal_failed=1
       printf 'level=error msg="failed to deliver TERM to radvd; the container may lack CAP_KILL, or the child was already reaped" pid="%s"\n' "$radvd_pid" >&2
@@ -320,7 +323,9 @@ printf 'level=info msg="starting radvd" config="%s" debug_level="%s"\n' "$CONF" 
 start_radvd
 
 while :; do
-  wait "$radvd_pid"
+  # ash writes a bare job-status word to fd2 for a child killed BY a signal (reachable
+  # through the pre-pid latch); a per-command redirect never reaches the traps' own fd2.
+  wait "$radvd_pid" 2>/dev/null
   status=$?
   if [ "$sig_seen" -eq 1 ]; then
     sig_seen=0
@@ -330,7 +335,11 @@ while :; do
       if [ "$signal_failed" -eq 1 ]; then
         printf 'level=warn msg="the TERM could not be delivered to radvd; a graceful stop cannot be confirmed"\n' >&2
       else
-        wait "$radvd_pid"
+        # A second trapped signal interrupts this reap, and only an unsignalable child
+        # licenses the graceful-stop line below.
+        while kill -0 "$radvd_pid" 2>/dev/null; do
+          wait "$radvd_pid" 2>/dev/null
+        done
         printf 'level=info msg="radvd stopped on shutdown signal (SIGTERM/SIGINT)"\n' >&2
       fi
       exit 0

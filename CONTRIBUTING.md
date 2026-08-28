@@ -95,9 +95,10 @@ contract.
   `polling for …` line (`radvd.c:518`) the README's Configuration reference calls
   noisy under `docker logs`. So before adding a warning, state three things: the
   upstream line, its level, and whether radvd reaches it in the HA topology the
-  README mandates. What is left for the scan is what radvd never says at a
-  verbosity this image runs: a composition mistake it accepts silently, and a
-  directive whose absence radvd defaults to the unwanted value. A worked example
+  README mandates. What is left for the scan is what radvd does not say at the
+  verbosity this image defaults to, or does not say at all in that topology: a
+  composition mistake it accepts silently, and a directive whose absence radvd
+  defaults to the unwanted value. A worked example
   of a warning that FAILS the test, so both sides of the rule are visible: a
   quoted interface name is not filable, because `update_device_index` prints
   `%s not found: %s` through `flog(LOG_ERR)` — unfiltered, so readable at the
@@ -219,9 +220,12 @@ opening a PR:
 
 ```sh
 shellcheck entrypoint.sh
-hadolint Dockerfile
+hadolint --ignore DL3018 --ignore DL3066 Dockerfile
 docker build -t docker-radvd:dev .   # runs tests/smoke.sh in the test stage
 ```
+
+Those two `--ignore` flags are what CI passes for every repo, so a bare
+`hadolint Dockerfile` reports findings the gate does not have.
 
 The `Dockerfile` opens with `# check=error=true`, so BuildKit build checks are
 promoted to errors, so a build with check warnings fails.

@@ -2,14 +2,14 @@
 # The signal path's unit-testable pieces: start_radvd()'s pre-pid latch, both
 # handlers' delivery skip while no child is assigned, on_hup()'s
 # refusal to reload during a shutdown, its refusal to reload a config radvd would
-# reject or cannot find, and the shutdown arm's two-branch report. The traps arm before the config validation, so a signal landing in that
+# reject or cannot find, and the shutdown arm's two-branch report. The traps arm before the config validation, so a TERM landing in that
 # window is LATCHED and delivered to the freshly assigned pid; without that,
-# `docker stop` during startup waits out its timeout and SIGKILLs while an early
-# HUP is swallowed. THE ORACLE IS THE DELIVERY, NOT THE DEATH — the stubbed
+# `docker stop` during startup waits out its timeout and SIGKILLs. THE ORACLE IS
+# THE DELIVERY, NOT THE DEATH — the stubbed
 # radvd's pre-exec bash can consume the latch TERM, so asserting "the child is
 # gone" races (~1 false failure in 15 runs before this rewrite); the recording
-# stub forwards to the real kill, and case 1 requires an empty record, so neither
-# latch case is a tautology.
+# stub forwards to the real kill, and case 1 requires an empty record, so the
+# latch case is not a tautology.
 #
 # A run may also show an intermittent bash `wait_for: No record of process <pid>`
 # line on stderr (measured: 12 of 30 whole-suite runs, 0-2 lines each, suite still
@@ -108,12 +108,15 @@ signalled "$radvd_pid" \
   || no "shutdown latch" "no TERM recorded for $radvd_pid; signals=[$(tr '\n' ' ' <"$SIGNALS")]"
 reap "$radvd_pid"
 
-# --- 3. same for a HUP latched before the pid existed ------------------------------
+# --- 3. a latched reload is NOT an operand of the pre-pid latch -------------------
+# `reload` is armed only after a confirmed TERM to an assigned pid, so it cannot
+# describe this pre-pid state; testing it here would only re-TERM a signalled child.
 shutdown=0 reload=1
 start
-signalled "$radvd_pid" \
-  && ok "a reload latched during validation is delivered as TERM so the loop restarts it" \
-  || no "reload latch" "no TERM recorded for $radvd_pid; signals=[$(tr '\n' ' ' <"$SIGNALS")]"
+sleep 0.2
+[ -n "$radvd_pid" ] && [ ! -s "$SIGNALS" ] && command kill -0 "$radvd_pid" 2>/dev/null \
+  && ok "a latched reload delivers nothing to the freshly started child" \
+  || no "reload latch" "radvd_pid='$radvd_pid', signals=[$(tr '\n' ' ' <"$SIGNALS")]"
 reap "$radvd_pid"
 
 # on_hup refuses any config that is not a regular file and config-tests the rest, so
@@ -265,9 +268,9 @@ printf 'interface eth0 { AdvSendAdvert on; };\n' >"$CONF"
 RADVD_DEBUG_LEVEL=0
 sleep 20 &
 radvd_pid=$!
-shutdown=0 reload=0
+shutdown=0 reload=0 sig_seen=0
 : >"$SIGNALS"
-on_hup 2>"$LOG" 3>&2
+on_hup 2>"$LOG"
 [ "$reload" -eq 0 ] && [ ! -s "$SIGNALS" ] \
   && command kill -0 "$radvd_pid" 2>/dev/null \
   && grep -Fq 'reports the config file permissions insecure' "$LOG" \
@@ -279,9 +282,9 @@ reap "$radvd_pid"
 RADVD_DEBUG_LEVEL=1
 sleep 20 &
 radvd_pid=$!
-shutdown=0 reload=0
+shutdown=0 reload=0 sig_seen=0
 : >"$SIGNALS"
-on_hup 2>"$LOG" 3>&2
+on_hup 2>"$LOG"
 [ "$reload" -eq 1 ] && signalled "$radvd_pid" \
   && ! grep -Fq 'SIGHUP reload refused' "$LOG" \
   && ok "at debug level 1 the same warning follows radvd's warn-and-continue path" \
@@ -311,15 +314,13 @@ registered=$(bash -c '
   || no "shutdown signal contract" "registered: $(tr '\n' ' ' <<<"$registered"), promise found: $(grep -c 'SIGTERM`/`SIGINT`' <<<"$PROMISE")"
 
 # --- 8. the shutdown arm reports a refused TERM as unconfirmable ------------------
-# The arm lives inline in the supervisor loop, so it is extracted as a RANGE. The
-# start anchor is the comment line, NOT `if [ "$shutdown" -eq 1 ]; then`: that
-# spelling matches on_hup's guard at the top of the file too, and a sed range
-# restarts, so it emitted both blocks concatenated — sourced with shutdown=1 the
-# guard's `return` fired and the subject never ran (measured: byte-identical
-# outcome against HEAD and against a collapsed arm, so it witnessed nothing).
-# Nothing else reads signal_failed: both arms exit 0, every container scenario
-# holds CAP_KILL, and README:173 publishes the refusal line, so without these
-# cases the branch can invert with the whole corpus green.
+# The arm lives inline in the supervisor loop, so it is extracted as a RANGE anchored
+# on this comment line: `if [ "$shutdown" -eq 1 ]; then` also matches on_hup's guard
+# and a sed range restarts, so that spelling emits both blocks and the subject never
+# runs. Nothing else reads signal_failed and both arms exit 0, so an inverted branch
+# changes only which line is logged; scripts/smoke.sh scenario 10 is the
+# container-level witness (hardened profile minus KILL) and these cases pin the arm
+# without a container.
 ARM=$(extract_range '^      # Exit 0 either way' '^      exit 0$' "$WORK/shutdown_arm.sh") || exit 1
 WARN='msg="the TERM could not be delivered to radvd; a graceful stop cannot be confirmed"'
 INFO='msg="radvd stopped on shutdown signal (SIGTERM/SIGINT)"'
