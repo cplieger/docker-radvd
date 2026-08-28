@@ -8,6 +8,35 @@ exec 3>&2
 
 CONF="/etc/radvd/radvd.conf"
 
+# Both tr stages replace 1:1 rather than delete: deletion shifts offsets and can
+# splice two fragments into one token of the bad= list. \040-\176 stands in for
+# [:print:], which BusyBox tr (v1.37.0) lacks, and LC_ALL=C makes the covered set
+# a property of the code. Every survivor is single-byte ASCII, so the cap below
+# cannot split a rune.
+sanitize_log_value() {
+  # shellcheck disable=SC1003 # not an escape attempt: tr maps `"` and `\` to literal `?` (verified on BusyBox v1.37.0)
+  _clean=$(printf '%s' "$1" | tr '"\\' '??' | LC_ALL=C tr -c '\040-\176' ' ')
+  _capped=$(printf '%s' "$_clean" | cut -c1-"$2")
+  if [ "${#_clean}" -gt "${#_capped}" ]; then
+    printf '%s[truncated]' "$_capped"
+  else
+    printf '%s' "$_capped"
+  fi
+}
+
+# Resolved and validated before the traps below, because on_hup reads it: a handler
+# that expands an unset name under `set -u` exits 2, and for PID 1 that is the
+# container.
+RADVD_DEBUG_LEVEL="${RADVD_DEBUG_LEVEL:-0}"
+case "$RADVD_DEBUG_LEVEL" in
+  [0-5]) ;;
+  *)
+    bad_level=$(sanitize_log_value "$RADVD_DEBUG_LEVEL" 32)
+    printf 'level=error msg="invalid RADVD_DEBUG_LEVEL; expected an integer 0-5" value="%s"\n' "$bad_level" >&2
+    exit 1
+    ;;
+esac
+
 # Armed before preflight because PID 1 receives no default-disposition signal: a
 # HUP/TERM during validation is latched here for start_radvd's pre-pid latch.
 radvd_pid=""
@@ -31,7 +60,7 @@ on_hup() {
     return
   fi
   hup_rc=0
-  hup_ct=$(timeout 5 radvd -c -C "$CONF" 2>&1) || hup_rc=$?
+  hup_ct=$(timeout 5 radvd -c -C "$CONF" -u radvd 2>&1) || hup_rc=$?
   if [ "$hup_rc" -ne 0 ]; then
     # Neither timeout call site passes -k, so an elapsed budget is 124 (GNU) or
     # 143 (BusyBox, the shipped one) and 137 is unreachable at both.
@@ -43,6 +72,16 @@ on_hup() {
       # RadvdConfigError rule matches these bytes and scripts/smoke.sh asserts it.
       printf '%s\n' "$hup_ct" >&3
     fi
+    return
+  fi
+  # `radvd -c` forces debuglevel 1 (radvd.c:289-290), which turns the conf_file
+  # permission refusal into a warning it exits 0 on (radvd.c:319-325); the daemon at
+  # debuglevel 0 exits 1 on the same file. At level 1 and above the daemon takes the
+  # same warn arm, so refusing there would refuse a reload that would have worked.
+  if [ "$RADVD_DEBUG_LEVEL" -eq 0 ] \
+    && printf '%s\n' "$hup_ct" | grep -q 'Insecure file permissions'; then
+    printf 'level=error msg="SIGHUP reload refused: radvd reports the config file permissions insecure and would exit at debug level 0; radvd keeps serving its last good config" path="%s"\n' "$CONF" >&3
+    printf '%s\n' "$hup_ct" >&3
     return
   fi
   reload=1
@@ -62,32 +101,6 @@ on_term() {
 trap on_hup HUP
 trap on_term TERM INT
 
-# Both tr stages replace 1:1 rather than delete: deletion shifts offsets and can
-# splice two fragments into one token of the bad= list. \040-\176 stands in for
-# [:print:], which BusyBox tr (v1.37.0) lacks, and LC_ALL=C makes the covered set
-# a property of the code. Every survivor is single-byte ASCII, so the cap below
-# cannot split a rune.
-sanitize_log_value() {
-  # shellcheck disable=SC1003 # not an escape attempt: tr maps `"` and `\` to literal `?` (verified on BusyBox v1.37.0)
-  _clean=$(printf '%s' "$1" | tr '"\\' '??' | LC_ALL=C tr -c '\040-\176' ' ')
-  _capped=$(printf '%s' "$_clean" | cut -c1-"$2")
-  if [ "${#_clean}" -gt "${#_capped}" ]; then
-    printf '%s[truncated]' "$_capped"
-  else
-    printf '%s' "$_capped"
-  fi
-}
-
-RADVD_DEBUG_LEVEL="${RADVD_DEBUG_LEVEL:-0}"
-case "$RADVD_DEBUG_LEVEL" in
-  [0-5]) ;;
-  *)
-    bad_level=$(sanitize_log_value "$RADVD_DEBUG_LEVEL" 32)
-    printf 'level=error msg="invalid RADVD_DEBUG_LEVEL; expected an integer 0-5" value="%s"\n' "$bad_level" >&2
-    exit 1
-    ;;
-esac
-
 # Warn-only except the non-regular-node refusal below, which exits 1 from both call
 # sites: no warning here is worth refusing the container over, and a single-node
 # operator legitimately deploys without HA. Why HA needs its directives:
@@ -99,7 +112,7 @@ check_config_directives() {
   # atomically, so the bounded read below is the backstop; one read serves every gate.
   warn_scan_degraded() {
     scan_err=$(sanitize_log_value "$1" 200)
-    printf 'level=warn msg="unable to scan mounted radvd config; HA-directive validation is incomplete" err="%s" path="%s"\n' "$scan_err" "$CONF" >&2
+    printf 'level=warn msg="unable to scan mounted radvd config; directive validation is incomplete" err="%s" path="%s"\n' "$scan_err" "$CONF" >&2
   }
   if [ -e "$CONF" ] && ! [ -f "$CONF" ]; then
     printf 'level=error msg="radvd.conf is not a regular file" path="%s"\n' "$CONF" >&2
@@ -130,7 +143,9 @@ check_config_directives() {
   # and `"AdvRASrcAddress"` is a STRING, never the directive. So the quotes are
   # re-emitted around the run and every byte that means something to the walk below —
   # `{`, `}`, `;`, `#`, whitespace and the record separator — is replaced by `@` inside
-  # it. A quoted value therefore decides nothing and reports itself as radvd reads it.
+  # it. A quoted value therefore decides nothing. The masked bytes reach the
+  # iface= field, so a quoted name is reported as the scan holds it rather than
+  # as radvd does.
   # Split on the quote, not byte by byte: a char loop costs seconds on a
   # multi-megabyte config.
   conf_scan=$(printf '%s\n' "$conf_snapshot" | awk '
@@ -147,8 +162,13 @@ check_config_directives() {
           gsub(/[{};# \t]/, "@", s)
           out = out s
         } else {
-          p = index(s, "#")
-          if (p > 0) { out = out substr(s, 1, p - 1); break }
+          # The bare string class at scanner.l:39 includes `#`, so the comment
+          # rule at scanner.l:41 wins the longest match only at a token
+          # boundary: `eth0#x` is one STRING token, not a name plus a comment.
+          if (match(s, /(^|[{}; \t])#/)) {
+            out = out substr(s, 1, RSTART + RLENGTH - 2)
+            break
+          }
           out = out s
         }
         if (i < n) {
@@ -177,16 +197,15 @@ check_config_directives() {
       entered = 0
       want_name = 0
       f_send = 0
-      f_src = 0
       srcdepth = 0
       pend = ""
       bad = ""
     }
     function flush() {
-      if (!entered) { return }
-      if (!f_send) { print "no_sendadvert " iface }
-      if (!f_src) { print "no_src " iface }
-      if (bad != "") { print "bad_src " iface " " bad }
+      if (entered) {
+        if (!f_send) { print "no_sendadvert " iface }
+        if (bad != "") { print "bad_src " iface " " bad }
+      }
       reset()
     }
     {
@@ -246,7 +265,6 @@ check_config_directives() {
           continue
         }
         if (lt == "advsendadvert" || lt == "advrasrcaddress") {
-          if (lt == "advrasrcaddress") { f_src = 1 }
           pend = lt
           continue
         }
@@ -262,9 +280,6 @@ check_config_directives() {
     case "$kind" in
       no_sendadvert)
         printf 'level=warn msg="no enabled AdvSendAdvert on directive found; radvd defaults it to off, so it will run and emit no router advertisements" iface="%s" path="%s"\n' "$(sanitize_log_value "$iface_name" 200)" "$CONF" >&2
-        ;;
-      no_src)
-        printf 'level=warn msg="no AdvRASrcAddress directive found in mounted radvd config (HA failover will not work correctly)" iface="%s" path="%s"\n' "$(sanitize_log_value "$iface_name" 200)" "$CONF" >&2
         ;;
       bad_src)
         printf 'level=warn msg="AdvRASrcAddress is set to a non-link-local address; RFC 4861 requires an RA source to be link-local (fe80::/10), so hosts will silently discard these RAs" bad="%s" iface="%s" path="%s"\n' "$(sanitize_log_value "$bad_addrs" 200)" "$(sanitize_log_value "$iface_name" 200)" "$CONF" >&2

@@ -59,8 +59,10 @@ contract.
   and reach `yylval.str`. Two consequences. A quoted value decides nothing,
   wrapped across lines or not and however short — `"AdvRASrcAddress"` is a STRING
   to radvd, never the directive. And a quoted interface name keeps its quotes,
-  because radvd's name for `interface "eth0"` is the 6-byte `"eth0"`; report
-  `eth0` and the operator looks for a device radvd never asked about. What is
+  because radvd keeps them: radvd's name for `interface "eth0"` is the 6-byte
+  `"eth0"`, and reporting `eth0` sends the operator after a device radvd never
+  asked about. The `iface=` field is not radvd's own token in every case, though —
+  a name carrying a masked structural byte is reported with the mask. What is
   left is
   tokenized with `{`, `}` and `;` as tokens of their own, so a name is only a
   directive on a statement boundary (`MyAdvSendAdvert on` is not one), a
@@ -69,7 +71,13 @@ contract.
   `AdvRASrcAddress {`, the no-space `AdvRASrcAddress{`, and a bare
   `AdvRASrcAddress` at end-of-line with the brace on the next — need no special
   case. The scan reads the `radvd.conf` the daemon itself is given with `-C`.
-  Keep those properties if you touch the walk.
+  Keep those properties if you touch the walk, and check them by extraction and
+  diff rather than by eye. Pull the two awk stages out the way `tests/shell/`
+  already extracts functions. Run your candidate and the shipped version over
+  the configs the directive-scan suite writes, plus randomised configs that mix
+  braces, semicolons, comments, quotes, backslash escapes, CRLF and both
+  `AdvRASrcAddress` spellings. Then diff the warning records the two emit: a
+  divergence no fixed case names is still a change in behaviour.
 - **Each directive is credited to the interface block it sits directly inside.**
   A directive lexed in a nested block belongs to that block, not to the
   enclosing interface, and every warning names its block in an `iface=` field.
@@ -77,20 +85,44 @@ contract.
   escaped string there), so it goes through `sanitize_log_value` like every
   other config value reaching the log stream.
 - **The wrapper reports what the CONFIG composes; radvd reports its own
-  diagnostics.** A state radvd itself announces — a config it rejects outright, an
-  `AdvRASrcAddress` link-local that is absent on this host — is left to radvd's own
-  line and to the supervisor loop that reports the daemon's exit. Do not add a
-  warning that predicts a diagnostic radvd already prints; alert on radvd's own
-  text instead (README.md "Alerting"). What is left for the scan is what radvd
-  never says: a composition mistake it accepts silently, and a directive whose
-  absence radvd defaults to the unwanted value.
+  diagnostics.** A state radvd announces UNCONDITIONALLY, through
+  `flog(LOG_ERR, …)`, is left to radvd's own line and to the supervisor's exit
+  report: a config it rejects outright (`radvd.c:330`, `:812`), and an interface
+  it cannot set up under `IgnoreIfMissing off` (`radvd.c:780-786`, then
+  `exit(1)`). Two classes are NOT covered by that, and stay the scan's: a
+  diagnostic radvd reaches only for an interface it has already brought up, and
+  one it emits only behind `-d`, because debug 1 also turns on the per-wakeup
+  `polling for …` line (`radvd.c:518`) the README's Configuration reference calls
+  noisy under `docker logs`. So before adding a warning, state three things: the
+  upstream line, its level, and whether radvd reaches it in the HA topology the
+  README mandates. What is left for the scan is what radvd never says at a
+  verbosity this image runs: a composition mistake it accepts silently, and a
+  directive whose absence radvd defaults to the unwanted value. A worked example
+  of a warning that FAILS the test, so both sides of the rule are visible: a
+  quoted interface name is not filable, because `update_device_index` prints
+  `%s not found: %s` through `flog(LOG_ERR)` — unfiltered, so readable at the
+  shipped debug 0 — and because a six-byte name whose first and last bytes are
+  quotes is a legal Linux device name (`dev_valid_name` does not reject quotes),
+  so the warning would fire on a valid interface.
 - **A check about a directive's absence is only correct while upstream's default
   for it is the unwanted value.** `AdvSendAdvert` defaults to off, so its absence
   from an interface block warns: radvd runs and emits nothing. That default is
   read out of the pinned source's `defaults.h` by `tests/smoke.sh`, which fails
-  the build if upstream moves it.
-- **The non-link-local check is per-block.** Beyond presence detection, the
-  `awk` scan walks every address inside every `AdvRASrcAddress` block and warns
+  the build if upstream moves it. radvd does print
+  `AdvSendAdvert is off for <iface>` itself (`send.c:914`), which is why that arm
+  rests on the reachability test above and not on the default alone: the line
+  arrives at debug 2, and only for an interface radvd has already brought up.
+  `send_ra_forall` returns at `send.c:86` unless `state_info.ready`, an interface
+  whose configured `AdvRASrcAddress` is absent on this host never becomes ready
+  (`interface.c:97-99`, `setup_iface=-6`), and `radvd.c:772-777` never schedules
+  it under `IgnoreIfMissing on`. On an HA backup nothing reports this state at
+  any verbosity, which is the case the warning exists for. The rule runs the
+  other way too: an absent `AdvRASrcAddress` draws no warning, because radvd's
+  default for it is the interface's own first link-local
+  (`device-common.c:191-193`), which is the wanted value and what RFC 4861 §6.1.2
+  requires of an RA source.
+- **The non-link-local check is per-block.** The `awk` scan walks every address
+  inside every `AdvRASrcAddress` block and warns
   if _any_ is not link-local (`fe80::/10`). This is
   deliberate: a correct link-local block must not mask a sibling block that
   points at a global VIP, so a multi-interface config with one
@@ -122,12 +154,22 @@ contract.
 - **The reload config-tests before it stops anything, and that is a filter, not
   a guarantee.** `on_hup` refuses the reload on a `radvd.conf` that is absent or
   not a regular file, and otherwise on any non-zero status from
-  `radvd -c -C "$CONF"` under a bound, so a bad edit costs the operator a reload
-  rather than the segment its RA emitter. `radvd -c` refuses nothing the daemon
+  `radvd -c -C "$CONF" -u radvd` under a bound, so a bad edit costs the operator a
+  reload rather than the segment its RA emitter. The `-u radvd` is load-bearing:
+  `check_conffile_perm` judges the config file against that user, so a gate
+  running without it asks a different question from the one the replacement
+  daemon answers. One verdict then needs reading rather than status alone.
+  `radvd -c` forces debuglevel 1 (`radvd.c:289-290`), which turns the
+  insecure-`conf_file` refusal into a warning it exits 0 on (`radvd.c:319-325`),
+  while the daemon at debuglevel 0 exits 1 on the same file — so at
+  `RADVD_DEBUG_LEVEL=0` the gate refuses on radvd's own captured
+  `Insecure file permissions` text, and above it does not, because there the
+  daemon takes the warn arm too. That is a read of radvd's reply, never a replica
+  of its check. `radvd -c` refuses nothing the daemon
   accepts, which is what makes the gate safe to add; startup stays ungated,
   because at boot there is no last good config to keep serving. What the gate
   cannot cover is everything radvd checks AFTER `readin_config`: `radvd -c` is
-  the parser and exits there, so the `radvd.conf` permissions, the interface's
+  the parser and exits there, so the interface's
   presence on the host, every per-interface parameter bound, and a config
   replaced between the check and the daemon's own read all pass it. That residue
   is published in the README's Reloading section by cause rather than closed. Do
@@ -165,11 +207,10 @@ contract.
   The counter-rule applies to all three, so this does not run the other
   way: do **not** add an alternative for a state something already matched
   reports, and do **not** add one for a warning that does not predict zero RA
-  output. That is why an absent `AdvRASrcAddress` is in neither pattern (it
-  breaks failover, not this node's emission), and why
+  output. That is why
   `radvd exited; propagating exit for restart policy`
-  must never be (it reports any unexpected radvd exit, whatever the cause, so it
-  would fire a config alert for a crash that has nothing to do with the config).
+  must never be one (it reports any unexpected radvd exit, whatever the cause, so
+  it would fire a config alert for a crash that has nothing to do with the config).
 
 ## Validating locally
 

@@ -155,9 +155,9 @@ printf '[smoke] starting %s (network none, fixture config)\n' "$C1"
 start_container "$C1" --cap-add NET_RAW
 logs=$(docker logs "$C1" 2>&1)
 grep -q 'msg="starting radvd"' <<<"$logs" || fail "missing startup log line"
-# tests/radvd.conf enables AdvSendAdvert and carries no AdvRASrcAddress, so startup
+# tests/radvd.conf enables IgnoreIfMissing and carries no AdvSendAdvert on, so startup
 # validation must emit exactly this warning (proves the preflight ran).
-grep -q 'no AdvRASrcAddress directive found' <<<"$logs" || fail "startup HA validation warning not emitted"
+grep -q 'no enabled AdvSendAdvert on directive found' <<<"$logs" || fail "startup directive validation warning not emitted"
 # Read Docker's own verdict instead of re-running the predicate: the shipped probe is
 # exec form, so a shell-form `docker exec ... pidof radvd` would verify neither the
 # probe nor its wiring, and start_container already required the predicate itself.
@@ -187,8 +187,8 @@ docker kill -s HUP "$C1" >/dev/null
 pid_after=$(wait_for_reload "$C1" 1 "$pid_before")
 [ -n "$pid_after" ] || fail "HUP did not reload radvd (no reload log, or PID unchanged)"
 [ "$(docker inspect -f '{{.State.Running}}' "$C1")" = "true" ] || fail "container not running after HUP reload"
-[ "$(docker logs "$C1" 2>&1 | grep -c 'no AdvRASrcAddress directive found')" -ge 2 ] \
-  || fail "reload did not re-run the HA-directive validation"
+[ "$(docker logs "$C1" 2>&1 | grep -c 'no enabled AdvSendAdvert on directive found')" -ge 2 ] \
+  || fail "reload did not re-run the directive validation"
 job_status_after=$(docker logs "$C1" 2>&1 | grep -Ec '^(Terminated|Killed)$' || true)
 [ "$job_status_after" -eq "$job_status_before" ] \
   || fail "HUP reload leaked a bare BusyBox ash job-status line into docker logs"
@@ -350,17 +350,26 @@ wait_for_log "$C1" 'radvd stopped on shutdown signal' "missing graceful shutdown
   || fail "a replacement radvd started after TERM took precedence over the in-flight HUP"
 printf '[smoke] PASS  signal precedence: shutdown beat the in-flight HUP reload\n'
 
-# --- 5. unexpected radvd death propagates to the container --------------------
-printf '[smoke] starting %s (exit-propagation scenario)\n' "$C2"
+# --- 5. a refused reload does not replace a later child exit status -----------
+printf '[smoke] starting %s (refused-reload status propagation scenario)\n' "$C2"
 start_container "$C2" --cap-add NET_RAW
+pid_before=$(docker exec "$C2" pidof radvd) || fail "cannot read radvd pid before the refused-reload status scenario"
+docker cp tests/radvd.bad.conf "$C2:/etc/radvd/radvd.conf" >/dev/null
+docker kill -s HUP "$C2" >/dev/null
+wait_for_log "$C2" 'SIGHUP reload refused' "the C2 malformed HUP replacement was not refused"
+[ "$(docker inspect -f '{{.State.Running}}' "$C2")" = "true" ] \
+  || fail "C2 stopped after the refused reload"
+[ "$(docker exec "$C2" pidof radvd)" = "$pid_before" ] \
+  || fail "C2 replaced radvd during the refused reload"
 # pidof returns both radvd pids (root parent + dropped -u worker); word
 # splitting inside the container shell is deliberate so kill gets each pid.
 docker exec "$C2" sh -c 'kill -KILL $(pidof radvd)'
-wait_until_stopped "$C2" "container still running after radvd was SIGKILLed"
+wait_until_stopped "$C2" "C2 still running after radvd was SIGKILLed following a refused reload"
 ec=$(docker inspect -f '{{.State.ExitCode}}' "$C2")
-[ "$ec" = "137" ] || fail "propagated exit code $ec, want 137 (128+SIGKILL)"
-wait_for_log "$C2" 'radvd exited; propagating exit for restart policy' "missing exit-propagation log line"
-printf '[smoke] PASS  propagation: radvd death exits container with 137\n'
+[ "$ec" = "137" ] || fail "post-refusal propagated exit code $ec, want 137 (128+SIGKILL)"
+wait_for_log "$C2" 'status="137"' "post-refusal propagation log did not carry the child status 137"
+wait_for_log "$C2" 'radvd exited; propagating exit for restart policy' "missing post-refusal exit-propagation log line"
+printf '[smoke] PASS  post-refusal propagation: radvd death exits container with 137\n'
 
 # --- 6. fail-closed RADVD_DEBUG_LEVEL validation -------------------------------
 printf '[smoke] starting %s (invalid RADVD_DEBUG_LEVEL scenario)\n' "$C3"
@@ -456,5 +465,40 @@ ec=$(docker inspect -f '{{.State.ExitCode}}' "$C6")
 [ "$ec" = "0" ] || fail "hardened profile: docker stop exit code $ec, want 0"
 wait_for_log "$C6" 'radvd stopped on shutdown signal' "hardened profile: missing graceful shutdown log line"
 printf '[smoke] PASS  hardened caps: the published profile boots, drops privileges, reloads on HUP (pid %s -> %s) and stops gracefully\n' "$pid_before" "$pid_after"
+
+# --- 10. shutdown without CAP_KILL reports the explicit disposition ----------
+(
+  C7="radvd-smoke-no-kill-$$"
+  cleanup_no_kill() {
+    code=$?
+    if [ "$code" -ne 0 ] && docker inspect "$C7" >/dev/null 2>&1; then
+      printf -- '--- %s logs (tail) ---\n' "$C7" >&2
+      docker logs "$C7" 2>&1 | tail -25 >&2 || true
+    fi
+    docker rm -f "$C7" >/dev/null 2>&1 || true
+  }
+  trap cleanup_no_kill EXIT
+
+  # Derived from the published set rather than re-spelled: a hand-copied near-duplicate
+  # drops out of step the moment the profile above changes.
+  NO_KILL_FLAGS=()
+  for f in "${HARDENED_FLAGS[@]}"; do
+    if [ "$f" = KILL ] && [ "${NO_KILL_FLAGS[-1]}" = --cap-add ]; then
+      unset "NO_KILL_FLAGS[-1]"
+      continue
+    fi
+    NO_KILL_FLAGS+=("$f")
+  done
+  printf '[smoke] starting %s (hardened profile without CAP_KILL)\n' "$C7"
+  start_container "$C7" "${NO_KILL_FLAGS[@]}" -v "$TMPDIR_FIXTURE:/etc/radvd:ro"
+  docker stop -t 5 "$C7" >/dev/null
+  ec=$(docker inspect -f '{{.State.ExitCode}}' "$C7")
+  [ "$ec" = "0" ] || fail "no-KILL docker stop exit code $ec, want 0"
+  wait_for_log "$C7" 'failed to deliver TERM to radvd' "no-KILL shutdown did not report the refused TERM"
+  wait_for_log "$C7" 'a graceful stop cannot be confirmed' "no-KILL shutdown did not report its terminal disposition"
+  docker logs "$C7" 2>&1 | grep -q 'radvd stopped on shutdown signal' \
+    && fail "no-KILL shutdown falsely reported a graceful stop"
+  printf '[smoke] PASS  no-KILL shutdown: refusal reported and PID 1 exited 0\n'
+)
 
 printf '[smoke] OK — all signal-contract assertions passed for %s\n' "$IMAGE"

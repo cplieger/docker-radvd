@@ -190,14 +190,6 @@ run_check
   && ok "a trailing same-line directive after the block close is not read as an address" \
   || no "trailing directive" "log: $(cat "$LOG")"
 
-# --- 10. missing AdvRASrcAddress warns (HA failover would not work) ---------------
-setup
-printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvSendAdvert on;\n};\n' >"$CONF"
-run_check
-logged 'msg="no AdvRASrcAddress directive found' \
-  && ok "a config without AdvRASrcAddress warns that HA failover will not work" \
-  || no "missing AdvRASrcAddress" "log: $(cat "$LOG")"
-
 # --- 11. a non-regular config node is REFUSED, and PID 1 must not hang -----------
 # A FIFO at radvd.conf: the regular-file probe refuses it before the read, which
 # without the probe would stall until the bounded read gave up and then degrade to
@@ -258,27 +250,16 @@ run_check
   && ok "a control byte inside the ADDRESS token named in bad= is neutralized in place" \
   || no "mid-token control byte in bad=" "lines=$(wc -l <"$LOG"), log: $(cat "$LOG")"
 
-# The control-byte arm of the same sanitizer, which the quote mapping cannot cover:
-# a control byte inside the address token. The one-line oracle is what the
-# \040-\176 substitution holds together.
-setup
-printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvSendAdvert on;\n  AdvRASrcAddress { fd00::\017 78; };\n};\n' >"$CONF"
-run_check
-[ "$_rc" -eq 0 ] && logged 'msg="AdvRASrcAddress is set to a non-link-local address' \
-  && [ "$(wc -l <"$LOG")" -eq 1 ] && ! grep -q 'fd00::'"$(printf '\017')" "$LOG" \
-  && ok "a control byte inside the address token is neutralized and the warning stays one line" \
-  || no "control byte in the address token" "lines=$(wc -l <"$LOG"), log: $(cat "$LOG")"
-
 # The interface NAME is the third config-to-log crossing on this path: radvd's
 # scanner accepts a quoted, backslash-escaped STRING token there (scanner.l,
 # gram.y), so the name reaching iface= is operator-supplied text and not a
 # kernel-validated device name. A control byte inside it must not reach the log
 # stream raw.
 setup
-printf 'interface eth\017x {\n  AdvSendAdvert on;\n};\n' >"$CONF"
+printf 'interface eth\017x {\n  AdvRASrcAddress { fe80::1; };\n};\n' >"$CONF"
 run_check
 [ "$_rc" -eq 0 ] && [ "$(wc -l <"$LOG")" -eq 1 ] \
-  && logged 'msg="no AdvRASrcAddress directive found' \
+  && logged 'msg="no enabled AdvSendAdvert on directive found' \
   && ! grep -q 'iface="eth'"$(printf '\017')" "$LOG" \
   && grep -q 'iface="eth x"' "$LOG" \
   && ok "a control byte in the interface NAME is neutralized in the iface= field" \
@@ -294,7 +275,7 @@ run_check
 # spelling AND that the bare 4-byte name never appears, so a scanner that goes back to
 # stripping the quotes fails here.
 setup
-printf 'interface "eth0" {\n  AdvSendAdvert on;\n};\n' >"$CONF"
+printf 'interface "eth0" {\n  AdvRASrcAddress { fe80::1; };\n};\n' >"$CONF"
 run_check
 [ "$_rc" -eq 0 ] && [ "$(wc -l <"$LOG")" -eq 1 ] \
   && grep -q 'iface="?eth0?"' "$LOG" \
@@ -309,9 +290,8 @@ run_check
 setup
 printf 'interface "" {\n  AdvCaptivePortalAPI "x";\n};\n' >"$CONF"
 run_check
-[ "$_rc" -eq 0 ] && [ "$(wc -l <"$LOG")" -eq 2 ] \
+[ "$_rc" -eq 0 ] && [ "$(wc -l <"$LOG")" -eq 1 ] \
   && logged 'msg="no enabled AdvSendAdvert on directive found' \
-  && logged 'msg="no AdvRASrcAddress directive found' \
   && grep -cq 'iface="??"' "$LOG" \
   && ok "an empty quoted interface name is still a name, so its block is not silently skipped" \
   || no "empty quoted interface name" "lines=$(wc -l <"$LOG"), log: $(cat "$LOG")"
@@ -403,16 +383,18 @@ msg_set "$LOG" >"$WORK/plain.msgs"
 # The case above baits with a MULTI-WORD payload, whose interior whitespace is masked
 # on its own, so it passed even while a SINGLE-WORD payload did not: a lone quoted
 # word carries no byte the mask touches, so stripping the quotes left it
-# indistinguishable from a bare directive and it satisfied the AdvRASrcAddress gate.
-# radvd returns STRING for `"AdvRASrcAddress"` and T_RASRCADDRESS only for the bare
-# spelling, so the two must not agree here either. Same differential oracle.
+# indistinguishable from a bare directive. radvd returns STRING for
+# `"AdvRASrcAddress"` and T_RASRCADDRESS only for the bare spelling, so the two must
+# not agree here either — the quoted word must not OPEN an address block, whose
+# tokens would then reach the bad= field as non-link-local addresses. Same
+# differential oracle.
 setup
-printf 'interface eth0 {\n  AdvSendAdvert on;\n  AdvCaptivePortalAPI "AdvRASrcAddress";\n};\n' >"$CONF"
+printf 'interface eth0 {\n  AdvCaptivePortalAPI "AdvRASrcAddress" { fd00::78; };\n};\n' >"$CONF"
 run_check
 word_rc=$_rc
 msg_set "$LOG" >"$WORK/word.msgs"
 setup
-printf 'interface eth0 {\n  AdvSendAdvert on;\n  AdvCaptivePortalAPI "https://portal.example/login";\n};\n' >"$CONF"
+printf 'interface eth0 {\n  AdvCaptivePortalAPI "https://portal.example/login" { fd00::78; };\n};\n' >"$CONF"
 run_check
 msg_set "$LOG" >"$WORK/word-plain.msgs"
 [ "$word_rc" -eq 0 ] && [ "$_rc" -eq 0 ] && [ -s "$WORK/word-plain.msgs" ] \

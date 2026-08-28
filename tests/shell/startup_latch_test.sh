@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# The signal path's unit-testable pieces: start_radvd()'s pre-pid latch, on_hup()'s
+# The signal path's unit-testable pieces: start_radvd()'s pre-pid latch, both
+# handlers' delivery skip while no child is assigned, on_hup()'s
 # refusal to reload during a shutdown, its refusal to reload a config radvd would
 # reject or cannot find, and the shutdown arm's two-branch report. The traps arm before the config validation, so a signal landing in that
 # window is LATCHED and delivered to the freshly assigned pid; without that,
@@ -132,6 +133,27 @@ stub_radvd 0
   && ok "the reload cases have a regular-file config and a radvd stub on PATH" \
   || no "hup fixture" "CONF=$CONF, stub=$HUPDIR/bin/radvd"
 
+# --- signal handlers skip delivery while no child is assigned ----------------
+radvd_pid=""
+shutdown=0 reload=0 signal_failed=0
+: >"$SIGNALS"
+on_term 2>"$LOG" 3>&2
+[ "$shutdown" -eq 1 ] && [ "$signal_failed" -eq 0 ] && [ ! -s "$SIGNALS" ] \
+  && grep -Fq 'msg="shutdown signal received; stopping radvd"' "$LOG" \
+  && ! grep -Fq 'failed to deliver TERM to radvd' "$LOG" \
+  && ok "TERM with no assigned child latches shutdown without reporting a delivery failure" \
+  || no "empty-pid TERM" "shutdown=$shutdown, signal_failed=$signal_failed, signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
+
+radvd_pid=""
+shutdown=0 reload=0 signal_failed=0
+: >"$SIGNALS"
+on_hup 2>"$LOG" 3>&2
+[ "$reload" -eq 1 ] && [ "$signal_failed" -eq 0 ] && [ ! -s "$SIGNALS" ] \
+  && grep -Fq 'msg="SIGHUP received; restarting radvd to reload config"' "$LOG" \
+  && ! grep -Fq 'failed to deliver TERM to radvd' "$LOG" \
+  && ok "HUP with no assigned child latches reload without reporting a delivery failure" \
+  || no "empty-pid HUP" "reload=$reload, signal_failed=$signal_failed, signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
+
 # --- 4. control: a HUP outside a shutdown does reload -----------------------------
 # Without it, case 5 below would pass against an on_hup that ignores every HUP.
 # The throwaway child stands in for radvd for the same reason the cases above use
@@ -168,12 +190,13 @@ reap "$radvd_pid"
 
 # --- 6. a SIGHUP whose config check fails is REFUSED, and radvd keeps serving -----
 # The reload stops radvd before its replacement reads the config, so accepting a
-# bad edit costs the segment its RA emitter for nothing. Three arms, none
-# redundant: the refusal (no flag, no signal, child untouched), the absent-config
-# arm an ordinary editing accident takes (an editor's write-rename window, a mount
-# hiccup) where there is no file for radvd to reject, and the control that a
-# passing check still reloads — without which both refusals would pass against an
-# on_hup that refuses every HUP.
+# bad edit costs the segment its RA emitter for nothing. Two arms, none
+# redundant: the refusal (no flag, no signal, child untouched), and the
+# absent-config arm an ordinary editing accident takes (an editor's write-rename
+# window, a mount hiccup) where there is no file for radvd to reject. Case 4 is
+# the control that keeps both honest against an on_hup that refuses every HUP;
+# recovery after a refusal — the operator fixes the config and reloads again — is
+# pinned against a real container by scripts/smoke.sh's malformed-reload scenario.
 printf 'interface eth0 { AdvSendAdvert on; };\n' >"$CONF"
 stub_radvd 1
 sleep 20 &
@@ -200,18 +223,6 @@ on_hup 2>"$LOG" 3>&2
   && grep -Fq 'radvd.conf is absent' "$LOG" \
   && ok "a HUP with the config gone is refused too, where a config check has nothing to reject" \
   || no "absent-config reload" "reload=$reload, signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
-reap "$radvd_pid"
-
-printf 'interface eth0 { AdvSendAdvert on; };\n' >"$CONF"
-stub_radvd 0
-sleep 20 &
-radvd_pid=$!
-shutdown=0 reload=0
-: >"$SIGNALS"
-on_hup 2>"$LOG" 3>&2
-[ "$reload" -eq 1 ] && signalled "$radvd_pid" \
-  && ok "a HUP whose config check passes still sets the reload flag and TERMs the daemon" \
-  || no "accepted reload" "reload=$reload, signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
 reap "$radvd_pid"
 
 # --- 7. the trap maps BOTH published shutdown signals to on_term --------------------
