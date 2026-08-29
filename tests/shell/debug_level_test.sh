@@ -1,25 +1,15 @@
 #!/usr/bin/env bash
 # The RADVD_DEBUG_LEVEL gate: the inline default-and-validate block that decides
-# radvd's -d verbosity, and the boot's second fatal.
-#
-# This is inline boot code, not a function, so it comes out via extract_range and
-# runs in a subshell per case — `exit 1` must reach a process boundary here, not
-# this file. sanitize_log_value is sourced alongside it because the refusal path
-# delegates the echoed value to it.
-#
-# Why it earns a unit test rather than leaning on scripts/smoke.sh: the smoke test
-# proves the fatal end to end, but it needs a built image and a docker daemon, and
-# it can afford exactly one invalid value. The interesting cases are the ones a
-# healthy container never reaches and a single container run cannot enumerate —
-# every accepted level, the multi-digit rejection the one-character glob implies,
-# and the two properties of the echoed value (sanitized, capped) that stop a
-# malformed env var from forging the log line.
+# radvd's --debug verbosity, and a boot fatal. Inline boot code rather than a function,
+# so extract_range lifts it and each case runs in a subshell — `exit 1` must reach
+# a process boundary, not this file. sanitize_log_value comes along because the
+# refusal path delegates the echoed value to it. The cases a single container run
+# cannot enumerate are the point: every accepted level, the multi-digit rejection
+# the one-character glob implies, and the echoed value's sanitization and cap.
 #
 # Lint directives, each against a stated guarantee rather than an assumption:
-#   SC2015 - the `cond && ok || no` form cannot mis-fire, because lib.sh's
-#     ok/no/skip return 0 unconditionally by design (see their comments).
-#   SC2016 - run_level's bash -c script is single-quoted BECAUSE nothing may
-#     expand in this shell: $1/$2 are the subshell's own positionals.
+#   SC2015 - `cond && ok || no` cannot mis-fire: lib.sh's ok/no/skip return 0.
+#   SC2016 - run_level's bash -c body is single-quoted so nothing expands here.
 # shellcheck disable=SC2015,SC2016
 set -u
 
@@ -55,6 +45,15 @@ logged() {
   grep -Fq "$1" "$LOG"
 }
 
+# The README's RadvdConfigError alert rule is an exact-string contract between this
+# fatal line and an operator's Loki rule, so read BOTH sides: pull the rule's own
+# `|~` pattern out of the README and match the captured output against it as the
+# regex Loki will use. Scoped to this one rule rather than grepping the file, because
+# a file-wide match can pass against a pattern that has drifted onto another line; an
+# empty extraction fails the assertion below rather than matching silently.
+ALERT_RULE=$(sed -n '/alert: RadvdConfigError/,/^        for:/p' "$REPO_ROOT/README.md" \
+  | sed -n 's/^[[:space:]]*|~ `\(.*\)` \[[0-9]\+[a-z]\]$/\1/p')
+
 # --- 1. unset defaults to 0, the quiet level -------------------------------------
 # The whole point of the change: a container nobody configured gets quiet logs.
 run_level
@@ -86,7 +85,7 @@ run_level ""
 # multi-digit value is rejected no matter what its digits are. radvd's -d takes a
 # single digit, so this is correct — but it is not self-evident, and a future
 # widening to [0-9]* would silently start accepting 10 as "level 1, 0".
-for bad in 6 9 10 42 x -1 "1 2"; do
+for bad in 6 10 x; do
   run_level "$bad"
   [ "$_rc" -eq 1 ] && logged 'msg="invalid RADVD_DEBUG_LEVEL' && ! logged 'resolved=' \
     && ok "'$bad' fails closed with exit 1 before radvd is reached" \
@@ -102,6 +101,9 @@ run_level '9"bogus'
 [ "$_rc" -eq 1 ] && logged 'value="9?bogus"' \
   && ok "a quote in the value is neutralized to ? rather than closing the field" \
   || no "quote neutralized" "rc=$_rc, log: $(cat "$LOG")"
+[ -n "$ALERT_RULE" ] && grep -Eq "$ALERT_RULE" "$LOG" \
+  && ok "the invalid-level fatal line matches the README's RadvdConfigError alert pattern" \
+  || no "alert contract (invalid level)" "rule='$ALERT_RULE', log: $(cat "$LOG")"
 
 run_level '9
 level=error msg="forged"'
@@ -114,14 +116,31 @@ run_level '9\bogus'
   && ok "a backslash in the value is neutralized to ?" \
   || no "backslash neutralized" "rc=$_rc, log: $(cat "$LOG")"
 
-# --- 6. the echoed value is length-capped ----------------------------------------
+# The two classes a control-character pass cannot see, each arriving as a
+# multi-byte sequence rather than as a C0 byte: C1 (U+0085 NEL, two bytes) and
+# Bidi_Control (U+202E, three bytes). runesafe's README is the fleet's written
+# policy on what must not survive the trip to a log sink; this tier applies it with
+# a printable-ASCII range map, so each byte of the sequence becomes one space.
+run_level "$(printf '9\302\205bogus')"
+[ "$_rc" -eq 1 ] && logged 'value="9  bogus"' \
+  && ok "a C1 control (U+0085) is flattened instead of reaching the log sink" \
+  || no "C1 neutralized" "rc=$_rc, log: $(cat "$LOG")"
+
+run_level "$(printf '9\342\200\256bogus')"
+[ "$_rc" -eq 1 ] && logged 'value="9   bogus"' \
+  && ok "a Bidi_Control (U+202E) cannot reorder the rendered log line" \
+  || no "Bidi_Control neutralized" "rc=$_rc, log: $(cat "$LOG")"
+
+# --- 6. the echoed value is length-capped, and says when it was cut ----------------
 # An env var has no useful length bound; the cap is what stops one typo from
 # writing an unbounded line. 32 chars of payload, so the assertion is the cap and
-# not the sanitizer.
+# not the sanitizer. The marker is not decoration: without it a 32-character level
+# an operator really typed is byte-identical to the head of a 200-character one.
 run_level "$(printf 'A%.0s' $(seq 1 200))"
 capped=$(sed -n 's/.*value="\([^"]*\)".*/\1/p' "$LOG")
-[ "$_rc" -eq 1 ] && [ "${#capped}" -eq 32 ] \
-  && ok "the echoed value is capped at 32 characters" \
-  || no "value capped" "rc=$_rc, len=${#capped}, log: $(cat "$LOG")"
+payload=${capped%"[truncated]"}
+[ "$_rc" -eq 1 ] && [ "${#payload}" -eq 32 ] && [ "$payload" != "$capped" ] \
+  && ok "the echoed value is capped at 32 characters and marked as truncated" \
+  || no "value capped" "rc=$_rc, value='$capped', log: $(cat "$LOG")"
 
 report

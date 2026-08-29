@@ -1,40 +1,27 @@
 #!/usr/bin/env bash
-# Runs every entrypoint.sh unit test in this directory.
+# Runs every entrypoint.sh unit test in this directory. The filename is the
+# contract: cplieger/ci's shell-ci.yaml runs this path when it exists and skips
+# otherwise, so committing the file is how a repo opts in — keep the name.
 #
-# This filename is the contract: cplieger/ci's shell-ci.yaml runs
-# `tests/shell/run.sh` when it exists, and skips otherwise, so a repo opts into
-# shell unit testing by committing this file. Keep the name.
-#
-# The hook tests -f and invokes this through `bash`, so the exec bit is not
-# load-bearing (it was committed 100644 once, which under an -x check would have
-# skipped the whole suite silently and still reported CI green). The bit is set
-# anyway, for anyone running it directly.
-#
-# WHAT THIS REPO'S SUITE COVERS. This file is repo-owned (lib.sh and
-# harness_test.sh beside it are synced from cplieger/ci), so the per-repo scope
-# rationale lives here.
-#
-# 118 of
-# entrypoint.sh's 260 lines are a hand-written radvd-config validator (comment-
-# stripped directive gates plus an awk block-scanner), and its consequential
-# branches are warn-only guards a healthy container never shows: a config that
-# cannot be scanned, an AdvRASrcAddress pointing at a global VIP whose RAs every
-# host silently discards (RFC 4861 §6.1.2), a commented-out IgnoreIfMissing that
-# looks configured. tests/smoke.sh (Dockerfile test stage) asserts the radvd
-# BINARY; scripts/smoke.sh asserts the supervisor's signal contract against a real
-# container. Neither can reach the validator's individual arms, nor the pre-pid
-# signal latch, which no container test hits deterministically. These do.
-#
-# Each *_test.sh is a separate process, so one test's stubs, traps and shell
-# options cannot leak into another's. All of them run even when an early one
-# fails: a boot path's tests are cheap, and a maintainer wants the whole picture
-# from one CI log rather than one failure at a time.
+# Scope (repo-owned, per lib.sh): this suite owns entrypoint.sh's validator arms
+# AND its signal-handler pieces — the warn-only diagnostics a healthy container
+# never shows, one refusal for a config node radvd itself cannot open, the pre-pid
+# latch, and the shutdown arm that lives inline in the supervisor loop; plus one
+# repo-contract case asserting that the Smoke workflow still invokes
+# scripts/smoke.sh against the image it builds — the one thing this suite owns that
+# is not entrypoint.sh behaviour, and it lives here because ci / validate is the
+# check that stays green when the Smoke workflow stops asserting. tests/smoke.sh
+# owns the radvd binary; scripts/smoke.sh owns the assembled-container lifecycle
+# contract and is the only test that exercises the supervisor loop itself rather
+# than an extracted arm.
 set -u
 
 cd -- "$(dirname -- "$0")" || exit 1
 
 failed=0
 ran=0
+# Each *_test.sh is a separate process, so one test's stubs, traps and shell
+# options cannot leak into another's, and all of them run even when one fails.
 for t in ./*_test.sh; do
   # A glob that matches nothing expands to itself; treat that as a harness fault
   # rather than a green run, since an empty suite passing silently is how a
@@ -44,12 +31,8 @@ for t in ./*_test.sh; do
     exit 1
   fi
   printf '=== %s\n' "$(basename "$t")"
-  if bash "$t"; then
-    ran=$((ran + 1))
-  else
-    ran=$((ran + 1))
-    failed=$((failed + 1))
-  fi
+  ran=$((ran + 1))
+  bash "$t" || failed=$((failed + 1))
   printf '\n'
 done
 
