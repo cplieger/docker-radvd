@@ -146,6 +146,25 @@ if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
   fi
 fi
 
+# Pin the upstream behavior consumed by on_hup's permission gate.
+if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
+  insecure_conf=$(mktemp)
+  cp "$d/radvd.conf" "$insecure_conf"
+  chmod 0666 "$insecure_conf"
+  insecure_rc=0
+  insecure_out=$(radvd -c -C "$insecure_conf" -u radvd 2>&1) || insecure_rc=$?
+  rm -f "$insecure_conf"
+  if [ "$insecure_rc" -ne 0 ]; then
+    err "FAIL: pinned radvd no longer accepts an insecure config in configtest mode"
+    err "$insecure_out"
+    fail=1
+  elif ! printf '%s\n' "$insecure_out" | grep -Fq 'Insecure file permissions'; then
+    err "FAIL: pinned radvd configtest no longer emits the permission marker used by the reload gate"
+    err "$insecure_out"
+    fail=1
+  fi
+fi
+
 # Both blocks below run an extracted entrypoint function against the image's own
 # BusyBox userland, so both need every function the extraction depends on present
 # and LOADABLE before their own oracle can mean anything. Enumerating the anchors

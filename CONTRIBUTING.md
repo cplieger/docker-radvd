@@ -52,7 +52,7 @@ contract.
 - **The scan lexes the config; it does not grep it.** Comments are stripped
   first (so a commented-out `# AdvSendAdvert on` correctly fails the check), and
   a double-quoted value becomes ONE opaque token: its quotes are kept, and every
-  byte that means something to the walk (`{`, `}`, `;`, `#`, whitespace, and the
+  byte that means something to the walk (`{`, `}`, `;`, whitespace, and the
   newline that ends a record) is neutralised inside them. Keeping the quotes
   matches upstream. `scanner.l`'s `string` macro is
   `[a-zA-Z0-9…]+|L?\"(\\.|[^\\"])*\"`, so the delimiters are part of the match
@@ -61,9 +61,16 @@ contract.
   to radvd, never the directive. And a quoted interface name keeps its quotes,
   because radvd keeps them: radvd's name for `interface "eth0"` is the 6-byte
   `"eth0"`, and reporting `eth0` sends the operator after a device radvd never
-  asked about. The `iface=` field is not radvd's own token in every case, though —
-  a name carrying a masked structural byte is reported with the mask. What is
-  left is
+  asked about. The `iface=` field is not radvd's own token in every case, though:
+  every byte of that class inside a quoted name reaches `iface=` as `@`. Three of
+  them are structural — `{`, `}` and `;`, which the walk gives a meaning beyond
+  separating tokens — and their masking is the irreducible cost of one masked
+  stream. The rest of the class cannot name a real interface: whitespace and the
+  record separator that a string holds open are both `isspace()` bytes, and
+  `dev_valid_name` rejects any of those, so a quoted `interface "eth 0"` reported
+  as `"eth@0"` only ever misspells a name radvd itself refuses to set up. The
+  block the warning is ABOUT is never wrong — only its spelling — so the verdict
+  does not depend on the mask. What is left is
   tokenized with `{`, `}` and `;` as tokens of their own, so a name is only a
   directive on a statement boundary (`MyAdvSendAdvert on` is not one), a
   directive whose value sits on the next line is still one statement (radvd's

@@ -356,4 +356,52 @@ grep -Fq 'a graceful stop cannot be confirmed' "$REPO_ROOT/README.md" \
   && ok "the README still publishes the refusal line the shutdown arm prints" \
   || no "published refusal line" "README.md no longer carries 'a graceful stop cannot be confirmed'"
 
+# --- 11. a latched shutdown whose TERM was refused does not wait for the child -----
+# The skip lives inline in the loop, so it is extracted as a self-balanced RANGE. The
+# `&&` is what makes the start anchor unique: `if [ "$shutdown" -eq 1 ]` alone also
+# matches on_hup's guard and the arm below, and a sed range that restarts emits both
+# blocks. The block's own `fi` is the first at that indent, and it holds no nested `if`.
+# Its whole content is a control-flow decision, so the oracle is whether the block
+# returns while a live child is still running.
+# The anchors are the entrypoint's own literal text, `$` included, so the single quotes
+# are required exactly as case 7's are.
+# shellcheck disable=SC2016
+SKIP=$(extract_range '^  if \[ "\$shutdown" -eq 1 \] && \[ "\$signal_failed" -eq 1 \]' \
+  '^  fi$' "$WORK/wait_skip.sh") || exit 1
+# Bounded, so a reverted skip fails this case instead of hanging the file; the child
+# outlives the bound on purpose. BusyBox `timeout` reports 143 where GNU reports 124
+# (shell.md), so the blocking arm asserts only "non-zero".
+# The inner script is the CHILD shell's, so its `$1`/`$2`/`$status` must not expand
+# here. shellcheck reads a `bash -c` string as a nested script only when `bash` is the
+# command word, and the bound in front of it is not optional — case 8 needs no
+# directive for the same construct because it has no `timeout`.
+# shellcheck disable=SC2016
+run_skip() {
+  timeout 3 bash -c '
+    set -u
+    shutdown=$1
+    signal_failed=$2
+    sleep 5 &
+    radvd_pid=$!
+    . "$3"
+    printf "status=%s\n" "$status"
+    command kill -TERM "$radvd_pid" 2>/dev/null || true
+  ' _ "$1" "$2" "$SKIP"
+}
+
+out=$(run_skip 1 1)
+rc=$?
+[ "$rc" -eq 0 ] && [ "$out" = "status=0" ] \
+  && ok "a shutdown latched before the loop whose TERM was refused does not wait for the child" \
+  || no "latched refused shutdown skips the wait" "rc=$rc, out: $out"
+
+# --- 12. control: a delivered shutdown still waits for the child -------------------
+# Without it, case 11 would pass against a block that skipped the wait
+# unconditionally — the same collapse case 9 exists to prevent one arm below.
+out=$(run_skip 1 0)
+rc=$?
+[ "$rc" -ne 0 ] \
+  && ok "with the TERM delivered the loop still waits for the child's own exit" \
+  || no "delivered shutdown still waits" "rc=$rc, out: $out"
+
 report

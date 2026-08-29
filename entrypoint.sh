@@ -144,12 +144,11 @@ check_config_directives() {
   # `"eth0"`, and `"AdvRASrcAddress"` is a STRING, never the directive. So a naive
   # strip from the first `#` erases the `;` after `AdvCaptivePortalAPI "…/#/login"`.
   # This stage re-emits the quotes around the run and masks every byte meaningful to
-  # the walk below (`{`, `}`, `;`, `#`, whitespace, the record separator) with `@`
+  # the walk below (`{`, `}`, `;`, whitespace, the record separator) with `@`
   # inside it, so a quoted value decides nothing and reaches iface= masked.
   # Split on the quote, not byte by byte: a char loop is seconds on a large config.
   conf_scan=$(printf '%s\n' "$conf_snapshot" | awk '
     {
-      gsub(/\r/, "")
       # radvd scanner.l:39 makes a string backslash-escape aware, so an ODD
       # number of \" inside a value would invert a naive quote split.
       gsub(/\\./, "@@")
@@ -158,9 +157,12 @@ check_config_directives() {
       for (i = 1; i <= n; i++) {
         s = seg[i]
         if (instr) {
-          gsub(/[{};# \t]/, "@", s)
+          gsub(/[{}; \t]/, "@", s)
           out = out s
         } else {
+          # Only outside a quoted run: scanner.l:39 counts a CR inside a STRING
+          # as part of the value, so deleting it there misspells the name.
+          gsub(/\r/, "", s)
           # The bare string class at scanner.l:39 includes `#`, so the comment
           # rule at scanner.l:42 wins the longest match only at a token
           # boundary: `eth0#x` is one STRING token, not a name plus a comment.
@@ -323,10 +325,16 @@ printf 'level=info msg="starting radvd" config="%s" debug_level="%s"\n' "$CONF" 
 start_radvd
 
 while :; do
-  # ash writes a bare job-status word to fd2 for a child killed BY a signal (reachable
-  # through the pre-pid latch); a per-command redirect never reaches the traps' own fd2.
-  wait "$radvd_pid" 2>/dev/null
-  status=$?
+  # A shutdown latched before this loop whose TERM was refused has no exit still
+  # coming: there is nothing to wait for, so fall through to the disposition below.
+  if [ "$shutdown" -eq 1 ] && [ "$signal_failed" -eq 1 ]; then
+    status=0
+  else
+    # ash writes a bare job-status word to fd2 for a child killed BY a signal (reachable
+    # through the pre-pid latch); a per-command redirect never reaches the traps' own fd2.
+    wait "$radvd_pid" 2>/dev/null
+    status=$?
+  fi
   if [ "$sig_seen" -eq 1 ]; then
     sig_seen=0
     if [ "$shutdown" -eq 1 ]; then

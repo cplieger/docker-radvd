@@ -15,7 +15,7 @@ Run [radvd](https://radvd.litech.org/) (the Linux IPv6 Router Advertisement Daem
 
 This image is a minimal Alpine wrapper around upstream `radvd`, compiled from the pinned release tarball, plus a small POSIX entrypoint that:
 
-- **Validates the mounted `radvd.conf`** and warns, per interface block, about the misconfigurations radvd itself does not report: a block that enables no `AdvSendAdvert on` (radvd defaults it to off, so it runs and emits nothing), and an `AdvRASrcAddress` set to a non-link-local (global/ULA) address that RFC 4861 requires hosts to silently discard. A config radvd rejects outright, such as one defining no interface block, is left to radvd: radvd logs its own error and exits, and the entrypoint reports that exit. One shape is refused rather than warned about, at startup and on reload alike: a `radvd.conf` that is not a regular file, which radvd itself cannot consume, exits 1
+- **Validates the mounted `radvd.conf`** and warns, per interface block, about two misconfigurations: a block that enables no `AdvSendAdvert on` (radvd defaults it to off, so it runs and emits nothing), and an `AdvRASrcAddress` set to a non-link-local (global/ULA) address that RFC 4861 requires hosts to silently discard. A config radvd rejects outright, such as one defining no interface block, is left to radvd: radvd logs its own error and exits, and the entrypoint reports that exit. One shape is refused rather than warned about, at startup and on reload alike: a `radvd.conf` that is not a regular file, which radvd itself cannot consume, exits 1
 - **Creates `/run/radvd`** (radvd refuses to start without it)
 - **Drops privileges**: radvd opens its raw socket as root, then runs as the unprivileged `radvd` user (`-u radvd`) for the rest of its lifetime
 - **Supervises radvd**: turns `SIGHUP` into a clean config reload, refusing the reload and keeping the running daemon when the config would not start, forwards `SIGTERM` for graceful shutdown, and propagates an unexpected radvd exit to Docker's restart policy (see [Reloading](#reloading-configuration) for what `docker kill` does to that policy)
@@ -111,7 +111,7 @@ The entrypoint restarts the daemon so it re-reads the config; `docker restart ra
 
 Most bad edits are refused before anything is stopped. The entrypoint config-tests the mounted file first, so the running radvd keeps serving its last good config. Five shapes are refused, each logging `SIGHUP reload refused`: malformed, absent or not a regular file, a check exceeding 5s, permissions radvd calls insecure, and a TERM to radvd whose delivery could not be confirmed. The malformed and insecure-permissions shapes also carry radvd's text. A refused reload does not re-run the directive checks, because those would describe a config that is not in effect.
 
-The check is `radvd -c … -u radvd`: radvd's config parser and nothing after it, so anything radvd validates later passes this gate: the interface's presence, every bound radvd checks only after the parse (`MinRtrAdvInterval` against 3/4 of `MaxRtrAdvInterval`, `AdvDefaultLifetime`, MTU), and a config replaced between the check and the daemon's own read. The `radvd.conf` permissions are the exception: the configtest runs under the daemon's own `-u radvd` identity and prints the verdict, so that edit costs a reload, not the emitter. What happens next depends on `IgnoreIfMissing`: `off` exits radvd and the container with it, `on` (the upstream default) leaves radvd running and healthy while that interface emits nothing at all. Either way the evidence is radvd's own error line, such as `MinRtrAdvInterval for eth0 (200.00) must be at least 3.00 but no more than 3/4 of MaxRtrAdvInterval (180.00)`. Verify with `rdisc6` after any config change, and alert on it: the `RadvdConfigError` rule below carries these lines.
+The check is `radvd -c … -u radvd`: radvd's config parser and nothing after it, so anything radvd checks later slips past unchecked: the interface's presence, every bound radvd checks only after the parse (`MinRtrAdvInterval` against 3/4 of `MaxRtrAdvInterval`, `AdvDefaultLifetime`, MTU), and a config replaced between the check and the daemon's own read. The `radvd.conf` permissions are the exception: the configtest runs under the daemon's own `-u radvd` identity and prints the verdict, so that edit costs a reload, not the emitter. What happens next depends on `IgnoreIfMissing`: `off` exits radvd and the container with it, `on` (the upstream default) leaves radvd running and healthy while that interface emits nothing at all. Either way the evidence is radvd's own error line, such as `MinRtrAdvInterval for eth0 (200.00) must be at least 3.00 but no more than 3/4 of MaxRtrAdvInterval (180.00)`. Verify with `rdisc6` after any config change, and alert on it: the `RadvdConfigError` rule below carries these lines.
 
 One Docker behaviour to plan for: `docker kill` cancels the container's restart manager for the rest of the run — for any signal when the container configures no `stop_signal` (this image and the `compose.yaml` here set none), and for `SIGKILL` or the configured stop signal otherwise. So crash-recreate stays disarmed until the next `docker start` or `docker restart`; prefer `docker restart` where it matters. An operator who does set `stop_signal` keeps `always` and `on-failure` armed for other signals, while `unless-stopped` is disarmed by the kill regardless.
 
@@ -128,8 +128,8 @@ only controls how much radvd logs.
 
 ### Volumes
 
-| Mount        | Description                                              |
-| ------------ | -------------------------------------------------------- |
+| Mount | Description |
+| --- | --- |
 | `/etc/radvd` | Directory containing your `radvd.conf`. Mount read-only. |
 
 ### Capabilities
@@ -187,8 +187,8 @@ what makes listing them necessary. None of the four can be dropped further:
 
 ### Networking
 
-| Setting        | Value                 | Reason                                                                                      |
-| -------------- | --------------------- | ------------------------------------------------------------------------------------------- |
+| Setting | Value | Reason |
+| --- | --- | --- |
 | `network_mode` | `host` (or `macvlan`) | RAs are emitted via ICMPv6 on a real LAN interface; container networking would isolate them |
 
 ## Healthcheck
@@ -325,10 +325,10 @@ All dependencies are updated automatically via [Renovate](https://github.com/ren
 - **radvd** is compiled from the pinned upstream release tarball (the `RADVD_VERSION` build argument, tracked by Renovate against upstream tags) and verified against a pinned SHA256 before extraction. The shipped daemon version is explicit and updates by pull request instead of floating with the Alpine package index.
 - **The Alpine base image** is pinned by SHA digest. The base userland around the radvd binary (musl, busybox, and friends) floats forward at image rebuild time (`apk upgrade` in the Dockerfile), and scheduled rebuilds bound how stale a published image can get.
 
-| Dependency | Source                                                                  |
-| ---------- | ----------------------------------------------------------------------- |
-| alpine     | [Docker Hub](https://hub.docker.com/_/alpine)                           |
-| radvd      | [GitHub](https://github.com/radvd-project/radvd) (pinned source build)  |
+| Dependency | Source |
+| --- | --- |
+| alpine | [Docker Hub](https://hub.docker.com/_/alpine) |
+| radvd | [GitHub](https://github.com/radvd-project/radvd) (pinned source build) |
 
 **Major-version updates:** a breaking radvd release arrives as a Renovate PR bumping `RADVD_VERSION` and ships as a new major version of this image. Before upgrading, review the [upstream changelog](https://github.com/radvd-project/radvd/blob/master/CHANGES) for `radvd.conf` syntax changes; the mounted config is the only interface that can break.
 

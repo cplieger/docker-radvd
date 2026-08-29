@@ -182,14 +182,14 @@ printf '[smoke] PASS  startup: radvd up, preflight warned, healthcheck healthy, 
 
 # --- 2. HUP reload (world-readable config) -----------------------------------
 pid_before=$(docker exec "$C1" pidof radvd) || fail "cannot read radvd pid"
-job_status_before=$(docker logs "$C1" 2>&1 | grep -Ec '^(Terminated|Killed)$' || true)
+job_status_before=$(docker logs "$C1" 2>&1 | grep -Ec '^(Terminated|Killed|Aborted)$' || true)
 docker kill -s HUP "$C1" >/dev/null
 pid_after=$(wait_for_reload "$C1" 1 "$pid_before")
 [ -n "$pid_after" ] || fail "HUP did not reload radvd (no reload log, or PID unchanged)"
 [ "$(docker inspect -f '{{.State.Running}}' "$C1")" = "true" ] || fail "container not running after HUP reload"
 [ "$(docker logs "$C1" 2>&1 | grep -c 'no enabled AdvSendAdvert on directive found')" -ge 2 ] \
   || fail "reload did not re-run the directive validation"
-job_status_after=$(docker logs "$C1" 2>&1 | grep -Ec '^(Terminated|Killed)$' || true)
+job_status_after=$(docker logs "$C1" 2>&1 | grep -Ec '^(Terminated|Killed|Aborted)$' || true)
 [ "$job_status_after" -eq "$job_status_before" ] \
   || fail "HUP reload leaked a bare BusyBox ash job-status line into docker logs"
 printf '[smoke] PASS  HUP reload: radvd restarted (pid %s -> %s), validation re-ran, container Up\n' "$pid_before" "$pid_after"
@@ -540,7 +540,9 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
   }
   trap cleanup_startup_latch EXIT
 
-  printf '%s\n' '#!/bin/sh' ': >/tmp/slow-cat-entered' 'sleep 2' 'exec /bin/cat "$@"' >"$slow_cat"
+  printf '%s\n' '#!/bin/sh' ': >/tmp/slow-cat-entered' \
+    'while [ ! -f /tmp/slow-cat-release ]; do sleep 0.1; done' \
+    'exec /bin/cat "$@"' >"$slow_cat"
   chmod +x "$slow_cat"
   docker create --name "$C8" --network none --cap-add NET_RAW \
     -v "$slow_cat:/usr/local/bin/cat:ro" "$IMAGE" >/dev/null
@@ -557,10 +559,30 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
   [ -n "$entered" ] || fail "startup-latch preflight window did not open"
   job_status_before=$(docker logs "$C8" 2>&1 | grep -Ec '^(Terminated|Killed|Aborted)$' || true)
   docker kill -s TERM "$C8" >/dev/null
+  # The shim holds the entrypoint inside its only pre-start read until this file
+  # appears, so the TERM lands in the preflight window by construction rather than by
+  # beating a sleep. A failed exec means the container already moved on; the order
+  # assertion below is the oracle either way.
+  docker exec "$C8" touch /tmp/slow-cat-release >/dev/null 2>&1 || true
   wait_until_stopped "$C8" "container did not honor TERM latched during preflight"
   ec=$(docker inspect -f '{{.State.ExitCode}}' "$C8")
   [ "$ec" = "0" ] || fail "startup-latch TERM exit code $ec, want 0"
   wait_for_log "$C8" 'radvd stopped on shutdown signal' "startup-latch TERM was not delivered to the fresh child"
+  latch_logs=$(docker logs "$C8" 2>&1) || fail "startup-latch: could not read the container logs"
+  # on_term's first record (entrypoint.sh:100) precedes the pre-start record
+  # (entrypoint.sh:322) only when the TERM was handled during preflight; both are
+  # sequential writes from one process to one stderr. One awk pass over one snapshot:
+  # nothing can SIGPIPE the producer, and an unreadable log fails above instead of
+  # reading as an absent line.
+  order=$(printf '%s\n' "$latch_logs" | awk '
+    /msg="shutdown signal received; stopping radvd"/ && !latched { latched = NR }
+    /msg="starting radvd"/ && !started { started = NR }
+    END { print latched + 0, started + 0 }
+  ')
+  latched_at=${order% *}
+  started_at=${order#* }
+  [ "$latched_at" -gt 0 ] && [ "$started_at" -gt 0 ] && [ "$latched_at" -lt "$started_at" ] \
+    || fail "startup-latch TERM was not handled during preflight (shutdown record $latched_at, startup record $started_at)"
   job_status_after=$(docker logs "$C8" 2>&1 | grep -Ec '^(Terminated|Killed|Aborted)$' || true)
   [ "$job_status_after" -eq "$job_status_before" ] \
     || fail "startup-latch TERM leaked a bare BusyBox ash job-status line into docker logs"

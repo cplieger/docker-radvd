@@ -309,6 +309,34 @@ run_check
   && ok "an L-prefixed quoted interface name remains one complete radvd STRING token" \
   || no "L-prefixed quoted interface name" "lines=$(wc -l <"$LOG"), log: $(cat "$LOG")"
 
+# Three witnesses to one boundary: a quoted name keeps the bytes radvd's scanner
+# keeps until sanitize_log_value transforms them at the log edge. The mask sentinel
+# `@` is not special-cased on the way through, and `#` is data inside a STRING (only
+# the out-of-quote comment rule reads one). So is a CR, which is why the third
+# expectation is a SPACE: the sanitizer maps a control byte in place, keeping every
+# later byte at its own offset.
+setup
+printf 'interface "eth@0" {\n};\n' >"$CONF"
+run_check
+[ "$_rc" -eq 0 ] && grep -Fq 'iface="?eth@0?"' "$LOG" \
+  && ok "a literal @ in a quoted interface name remains @ in the warning identity" \
+  || no "quoted interface literal @" "rc=$_rc, log: $(cat "$LOG")"
+
+setup
+printf 'interface "eth#0" {\n};\n' >"$CONF"
+run_check
+[ "$_rc" -eq 0 ] && grep -Fq 'iface="?eth#0?"' "$LOG" \
+  && ok "a # inside a quoted interface name remains data in the warning identity" \
+  || no "quoted interface # identity" "rc=$_rc, log: $(cat "$LOG")"
+
+setup
+printf 'interface "eth\r0" {\n};\n' >"$CONF"
+run_check
+[ "$_rc" -eq 0 ] && grep -Fq 'iface="?eth 0?"' "$LOG" \
+  && ! grep -Fq 'iface="?eth0?"' "$LOG" \
+  && ok "a retained carriage return is sanitized in place rather than collapsed" \
+  || no "quoted interface carriage-return identity" "rc=$_rc, log: $(cat "$LOG")"
+
 # --- 13. a directive SPLIT across lines is still seen ------------------------------
 # radvd's lexer discards newlines, so `AdvSendAdvert` with its value `on;` on the
 # next line is valid config. The gates match a newline-folded stream for that reason;
