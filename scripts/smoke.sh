@@ -65,6 +65,14 @@ printf '[smoke] PASS  published contract: compose.yaml and the README agree on n
 # the file the daemon is given with -C).
 TMPDIR_FIXTURE=$(mktemp -d)
 cp tests/radvd.conf "$TMPDIR_FIXTURE/radvd.conf"
+# Scenarios 9 and 10 bind-mount this directory under profiles that drop DAC_OVERRIDE,
+# so container-root cannot bypass the 0700 `mktemp -d` gives it, and the mode belongs to
+# whoever runs the suite. As root that is invisible; as an unprivileged CI user radvd
+# exits "permissions on conf_file invalid" before the scenario's first assertion. These
+# modes are also what a real mount looks like: a deployed radvd.conf is 0644, and radvd's
+# own conf_file check refuses only world-writable or radvd-writable files.
+chmod 0755 "$TMPDIR_FIXTURE"
+chmod 0644 "$TMPDIR_FIXTURE/radvd.conf"
 
 # Second fixture, for scenario 7: a DIRECTORY where radvd.conf belongs. This is
 # the shape a bind mount produces when the host path does not exist, and it is a
