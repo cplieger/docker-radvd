@@ -61,7 +61,7 @@ on_hup() {
     return
   fi
   hup_rc=0
-  hup_ct=$(timeout 5 radvd -c -C "$CONF" -u radvd 2>&1) || hup_rc=$?
+  hup_ct=$(timeout 5 radvd --configtest --config="$CONF" --username=radvd 2>&1) || hup_rc=$?
   if [ "$hup_rc" -ne 0 ]; then
     # Neither timeout call site passes -k, so an elapsed budget is 124 (GNU) or
     # 143 (BusyBox, the shipped one) and 137 is unreachable at both.
@@ -150,7 +150,9 @@ check_config_directives() {
   conf_scan=$(printf '%s\n' "$conf_snapshot" | awk '
     {
       # radvd scanner.l:39 makes a string backslash-escape aware, so an ODD
-      # number of \" inside a value would invert a naive quote split.
+      # number of \" inside a value would invert a naive quote split. It runs
+      # before the split, so its `@@` also reaches iface=: widening it widens
+      # what the operator is told the interface is called (CONTRIBUTING).
       gsub(/\\./, "@@")
       n = split($0, seg, "\"")
       out = ""
@@ -309,7 +311,7 @@ fi
 
 start_radvd() {
   signal_failed=0
-  radvd -C "$CONF" -n -m stderr -d "$RADVD_DEBUG_LEVEL" -u radvd &
+  radvd --config="$CONF" --nodaemon --logmethod=stderr --debug="$RADVD_DEBUG_LEVEL" --username=radvd &
   radvd_pid=$!
   # A TERM delivered before radvd_pid was assigned set `shutdown` but skipped the
   # kill; deliver it here so an early stop is not swallowed.
@@ -356,6 +358,9 @@ while :; do
     # serving: keep supervising it rather than reading the interruption as an exit.
     continue
   fi
+  # Cleared before the next start: left set, a TERM landing in this gap takes
+  # on_term's kill arm against an already-reaped child and logs a delivery failure
+  # no path owes — reload re-delivers through start_radvd, exit has nothing to stop.
   radvd_pid=""
 
   if [ "$reload" -eq 1 ]; then

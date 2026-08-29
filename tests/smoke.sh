@@ -152,7 +152,7 @@ if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
   cp "$d/radvd.conf" "$insecure_conf"
   chmod 0666 "$insecure_conf"
   insecure_rc=0
-  insecure_out=$(radvd -c -C "$insecure_conf" -u radvd 2>&1) || insecure_rc=$?
+  insecure_out=$(radvd --configtest --config="$insecure_conf" --username=radvd 2>&1) || insecure_rc=$?
   rm -f "$insecure_conf"
   if [ "$insecure_rc" -ne 0 ]; then
     err "FAIL: pinned radvd no longer accepts an insecure config in configtest mode"

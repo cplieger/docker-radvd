@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The RADVD_DEBUG_LEVEL gate: the inline default-and-validate block that decides
-# radvd's -d verbosity, and a boot fatal. Inline boot code rather than a function,
+# radvd's --debug verbosity, and a boot fatal. Inline boot code rather than a function,
 # so extract_range lifts it and each case runs in a subshell — `exit 1` must reach
 # a process boundary, not this file. sanitize_log_value comes along because the
 # refusal path delegates the echoed value to it. The cases a single container run

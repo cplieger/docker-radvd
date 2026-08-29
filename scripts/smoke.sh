@@ -169,9 +169,9 @@ for _ in $(seq 1 12); do
   sleep 5
 done
 [ "$health" = "healthy" ] || fail "shipped HEALTHCHECK never reported healthy (last status: $health)"
-# The daemon runs as two processes (a root parent plus the dropped -u radvd worker),
+# The daemon runs as two processes (a root parent plus the dropped --username=radvd worker),
 # so the drop is evidenced by the PRESENCE of a radvd-owned one, never by the absence
-# of a root-owned one. Dropping `-u radvd` from the entrypoint fails this by name.
+# of a root-owned one. Dropping `--username=radvd` from the entrypoint fails this by name.
 owners=$(docker exec "$C1" ps -o user,comm | awk '$2 ~ /radvd/ { print $1 }' | sort -u)
 grep -qx 'radvd' <<<"$owners" || fail "no radvd-owned radvd process; observed owners: $(tr '\n' ' ' <<<"$owners")"
 # The directory entrypoint.sh creates must be the one radvd's compiled-in
@@ -540,30 +540,15 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
   }
   trap cleanup_startup_latch EXIT
 
-  printf '%s\n' '#!/bin/sh' ': >/tmp/slow-cat-entered' \
-    'while [ ! -f /tmp/slow-cat-release ]; do sleep 0.1; done' \
-    'exec /bin/cat "$@"' >"$slow_cat"
+  # The shim IS the entrypoint's only pre-start read, so a TERM raised from inside it
+  # lands in the preflight window by construction rather than by beating a sleep.
+  printf '%s\n' '#!/bin/sh' 'kill -TERM 1' 'exec /bin/cat "$@"' >"$slow_cat"
   chmod +x "$slow_cat"
   docker create --name "$C8" --network none --cap-add NET_RAW \
     -v "$slow_cat:/usr/local/bin/cat:ro" "$IMAGE" >/dev/null
   docker cp "$TMPDIR_FIXTURE" "$C8:/etc/radvd" >/dev/null
-  docker start "$C8" >/dev/null
-  entered=""
-  for _ in $(seq 1 20); do
-    if docker exec "$C8" test -f /tmp/slow-cat-entered 2>/dev/null; then
-      entered=1
-      break
-    fi
-    sleep 0.1
-  done
-  [ -n "$entered" ] || fail "startup-latch preflight window did not open"
   job_status_before=$(docker logs "$C8" 2>&1 | grep -Ec '^(Terminated|Killed|Aborted)$' || true)
-  docker kill -s TERM "$C8" >/dev/null
-  # The shim holds the entrypoint inside its only pre-start read until this file
-  # appears, so the TERM lands in the preflight window by construction rather than by
-  # beating a sleep. A failed exec means the container already moved on; the order
-  # assertion below is the oracle either way.
-  docker exec "$C8" touch /tmp/slow-cat-release >/dev/null 2>&1 || true
+  docker start "$C8" >/dev/null
   wait_until_stopped "$C8" "container did not honor TERM latched during preflight"
   ec=$(docker inspect -f '{{.State.ExitCode}}' "$C8")
   [ "$ec" = "0" ] || fail "startup-latch TERM exit code $ec, want 0"

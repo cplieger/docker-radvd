@@ -17,7 +17,7 @@ This image is a minimal Alpine wrapper around upstream `radvd`, compiled from th
 
 - **Validates the mounted `radvd.conf`** and warns, per interface block, about two misconfigurations: a block that enables no `AdvSendAdvert on` (radvd defaults it to off, so it runs and emits nothing), and an `AdvRASrcAddress` set to a non-link-local (global/ULA) address that RFC 4861 requires hosts to silently discard. A config radvd rejects outright, such as one defining no interface block, is left to radvd: radvd logs its own error and exits, and the entrypoint reports that exit. One shape is refused rather than warned about, at startup and on reload alike: a `radvd.conf` that is not a regular file, which radvd itself cannot consume, exits 1
 - **Creates `/run/radvd`** (radvd refuses to start without it)
-- **Drops privileges**: radvd opens its raw socket as root, then runs as the unprivileged `radvd` user (`-u radvd`) for the rest of its lifetime
+- **Drops privileges**: radvd opens its raw socket as root, then runs as the unprivileged `radvd` user (`--username=radvd`) for the rest of its lifetime
 - **Supervises radvd**: turns `SIGHUP` into a clean config reload, refusing the reload and keeping the running daemon when the config would not start, forwards `SIGTERM` for graceful shutdown, and propagates an unexpected radvd exit to Docker's restart policy (see [Reloading](#reloading-configuration) for what `docker kill` does to that policy)
 - **Logs to stderr** with structured key=value lines, captured by `docker logs`
 
@@ -111,7 +111,7 @@ The entrypoint restarts the daemon so it re-reads the config; `docker restart ra
 
 Most bad edits are refused before anything is stopped. The entrypoint config-tests the mounted file first, so the running radvd keeps serving its last good config. Five shapes are refused, each logging `SIGHUP reload refused`: malformed, absent or not a regular file, a check exceeding 5s, permissions radvd calls insecure, and a TERM to radvd whose delivery could not be confirmed. The malformed and insecure-permissions shapes also carry radvd's text. A refused reload does not re-run the directive checks, because those would describe a config that is not in effect.
 
-The check is `radvd -c … -u radvd`: radvd's config parser and nothing after it, so anything radvd checks later slips past unchecked: the interface's presence, every bound radvd checks only after the parse (`MinRtrAdvInterval` against 3/4 of `MaxRtrAdvInterval`, `AdvDefaultLifetime`, MTU), and a config replaced between the check and the daemon's own read. The `radvd.conf` permissions are the exception: the configtest runs under the daemon's own `-u radvd` identity and prints the verdict, so that edit costs a reload, not the emitter. What happens next depends on `IgnoreIfMissing`: `off` exits radvd and the container with it, `on` (the upstream default) leaves radvd running and healthy while that interface emits nothing at all. Either way the evidence is radvd's own error line, such as `MinRtrAdvInterval for eth0 (200.00) must be at least 3.00 but no more than 3/4 of MaxRtrAdvInterval (180.00)`. Verify with `rdisc6` after any config change, and alert on it: the `RadvdConfigError` rule below carries these lines.
+The check is `radvd --configtest … --username=radvd`: radvd's config parser and nothing after it, so anything radvd checks later slips past unchecked: the interface's presence, every bound radvd checks only after the parse (`MinRtrAdvInterval` against 3/4 of `MaxRtrAdvInterval`, `AdvDefaultLifetime`, MTU), and a config replaced between the check and the daemon's own read. The `radvd.conf` permissions are the exception: the configtest runs under the daemon's own `--username=radvd` identity and prints the verdict, so that edit costs a reload, not the emitter. What happens next depends on `IgnoreIfMissing`: `off` exits radvd and the container with it, `on` (the upstream default) leaves radvd running and healthy while that interface emits nothing at all. Either way the evidence is radvd's own error line, such as `MinRtrAdvInterval for eth0 (200.00) must be at least 3.00 but no more than 3/4 of MaxRtrAdvInterval (180.00)`. Verify with `rdisc6` after any config change, and alert on it: the `RadvdConfigError` rule below carries these lines.
 
 One Docker behaviour to plan for: `docker kill` cancels the container's restart manager for the rest of the run — for any signal when the container configures no `stop_signal` (this image and the `compose.yaml` here set none), and for `SIGKILL` or the configured stop signal otherwise. So crash-recreate stays disarmed until the next `docker start` or `docker restart`; prefer `docker restart` where it matters. An operator who does set `stop_signal` keeps `always` and `on-failure` armed for other signals, while `unless-stopped` is disarmed by the kill regardless.
 
@@ -121,7 +121,7 @@ One Docker behaviour to plan for: `docker kill` cancels the container's restart 
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `RADVD_DEBUG_LEVEL` | `0` | radvd's `-d` debug level, `0`–`5`. At `0` radvd still logs its startup banner and every warning and error; `1` adds a config `syntax ok` confirmation plus a per-wakeup `polling for ...` line that is noisy under `docker logs`; `2` adds radvd's own `AdvSendAdvert is off for <iface>` line, qualified under [Alerting](#alerting); higher levels are progressively chattier. An invalid value fails startup with a clear error rather than running at an unintended verbosity. |
+| `RADVD_DEBUG_LEVEL` | `0` | radvd's `--debug` level, `0`–`5`. At `0` radvd still logs its startup banner and every warning and error; `1` adds a config `syntax ok` confirmation plus a per-wakeup `polling for ...` line that is noisy under `docker logs`; `2` adds radvd's own `AdvSendAdvert is off for <iface>` line, qualified under [Alerting](#alerting); higher levels are progressively chattier. An invalid value fails startup with a clear error rather than running at an unintended verbosity. |
 
 Everything else about the daemon comes from the mounted `radvd.conf`; this variable
 only controls how much radvd logs.
@@ -248,7 +248,7 @@ groups:
             crash-loop the container before radvd ever starts, and radvd's
             `unable to drop root privileges`, which is not a config fault at
             all: the container was started without the SETUID and SETGID
-            capabilities, so `-u radvd` cannot take effect (see the hardened
+            capabilities, so `--username=radvd` cannot take effect (see the hardened
             profile above).
             Two groups pass the reload config test, so for them the
             rejected-edit reading does not hold: the interface's presence, and

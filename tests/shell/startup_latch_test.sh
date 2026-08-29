@@ -40,8 +40,8 @@ TRAPS=$(extract_range '^trap on_hup HUP$' '^trap on_term' "$WORK/traps.sh") || e
 
 # The stub: the function body backgrounds `radvd ... &`, so exec makes the
 # subshell BE the sleeper, and $! names it. It records its argv first: the two
-# flags that carry the app's whole log contract (`-m stderr`, which routes radvd's
-# own diagnostics into `docker logs`, and `-d` with the validated level) are
+# flags that carry the app's whole log contract (`--logmethod=stderr`, which routes radvd's
+# own diagnostics into `docker logs`, and `--debug` with the validated level) are
 # otherwise asserted by nothing, so either can be deleted with the corpus green.
 radvd() {
   printf '%s\n' "$*" >>"$ARGV"
@@ -49,15 +49,15 @@ radvd() {
 }
 
 CONF=/dev/null
-# start_radvd passes RADVD_DEBUG_LEVEL to radvd's -d. In the boot path the value
+# start_radvd passes RADVD_DEBUG_LEVEL to radvd's --debug. In the boot path the value
 # is assigned and validated at top level before this function is ever reached, so
 # the extraction needs it supplied here for the same reason CONF is: under set -u
 # an unbound one aborts the function before it backgrounds anything, which reads
 # as a signal-latch failure rather than as the missing variable it is.
 RADVD_DEBUG_LEVEL=0
 # Both handlers record the trap entry here so the supervisor loop can tell an
-# interrupted wait from a real radvd exit; the loop is not unit-tested, so the
-# cases below are the only place that placement is pinned.
+# interrupted wait from a real radvd exit; the cases below are where that
+# placement is pinned.
 sig_seen=0
 SIGNALS="$WORK/signals"
 ARGV="$WORK/argv"
@@ -90,14 +90,18 @@ start() {
 # own would fail the liveness half, and a function that signals unconditionally
 # would fail the empty-record half.
 shutdown=0 reload=0
+signal_failed=1
 start
 sleep 0.2
 [ -n "$radvd_pid" ] && [ ! -s "$SIGNALS" ] && command kill -0 "$radvd_pid" 2>/dev/null \
   && ok "with no latched signal nothing is delivered and the started child stays up" \
   || no "control" "radvd_pid='$radvd_pid', signals=[$(tr '\n' ' ' <"$SIGNALS")]"
-grep -Fq -- '-m stderr' "$ARGV" && grep -Fq -- "-d $RADVD_DEBUG_LEVEL" "$ARGV" \
+grep -Fq -- '--logmethod=stderr' "$ARGV" && grep -Fq -- "--debug=$RADVD_DEBUG_LEVEL" "$ARGV" \
   && ok "the radvd invocation routes logs to stderr and passes the resolved debug level" \
   || no "radvd argv" "recorded: $(cat "$ARGV")"
+[ "$signal_failed" -eq 0 ] \
+  && ok "starting a child clears a prior generation's delivery refusal" \
+  || no "delivery-refusal scope" "signal_failed=$signal_failed after start_radvd"
 reap "$radvd_pid"
 
 # --- 2. a TERM latched before the pid existed is delivered to the fresh child -----
@@ -121,7 +125,7 @@ reap "$radvd_pid"
 
 # on_hup refuses any config that is not a regular file and config-tests the rest, so
 # every case from here down needs a real regular-file config and a real `radvd` on
-# PATH: `timeout 5 radvd -c` execs, and the recording shell function above is
+# PATH: `timeout 5 radvd --configtest` execs, and the recording shell function above is
 # invisible to that exec.
 HUPDIR=$(mktemp -d "$WORK/hup.XXXXXX")
 mkdir "$HUPDIR/bin"
@@ -216,7 +220,7 @@ on_hup 2>"$LOG"
 [ "$reload" -eq 0 ] && [ ! -s "$SIGNALS" ] && [ "$sig_seen" -eq 1 ] \
   && command kill -0 "$radvd_pid" 2>/dev/null \
   && grep -Fq 'msg="SIGHUP reload refused: radvd rejected the mounted config"' "$LOG" \
-  && grep -Eq 'radvd stub: -c -C .* -u radvd( |$)' "$LOG" \
+  && grep -Eq 'radvd stub: --configtest --config=.* --username=radvd( |$)' "$LOG" \
   && ok "a HUP whose config check fails is refused: no reload flag, no signal, radvd untouched" \
   || no "refused reload" "reload=$reload, sig_seen=$sig_seen, signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
 reap "$radvd_pid"
@@ -237,7 +241,7 @@ for hup_timeout_rc in 124 143; do
   [ "$reload" -eq 0 ] && [ ! -s "$SIGNALS" ] && [ "$sig_seen" -eq 1 ] \
     && command kill -0 "$radvd_pid" 2>/dev/null \
     && grep -Fq 'msg="SIGHUP reload refused: the config check did not finish within 5s"' "$LOG" \
-    && ! grep -Fq 'radvd stub: -c -C ' "$LOG" \
+    && ! grep -Fq 'radvd stub: --configtest ' "$LOG" \
     && ok "a config check exiting $hup_timeout_rc is refused as a timeout, with no captured output republished" \
     || no "timeout reload rc=$hup_timeout_rc" "reload=$reload, sig_seen=$sig_seen, signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
   reap "$radvd_pid"
@@ -295,23 +299,30 @@ RADVD_DEBUG_LEVEL=0
 # --- 7. the trap maps BOTH published shutdown signals to on_term --------------------
 # CONTRIBUTING's "Design boundaries (please preserve)" promises SIGTERM/SIGINT and
 # nothing else reads either side, so deleting INT is invisible to the whole corpus.
-# Both sides are read at run time: the registration is executed, and the promise is
-# pulled out of the bullet that makes it.
+# All three reads happen at run time: the TERM registration is executed, the INT one
+# is read from the extracted trap line, and the promise is pulled out of the bullet
+# that makes it.
+# A signal ignored on entry to a non-interactive shell cannot be trapped (POSIX
+# `trap`), so under an asynchronous launcher a child oracle for INT reports 1
+# while entrypoint.sh's trap line is unchanged. TERM is never ignored on entry,
+# so it stays an executed registration. The TRAPS extraction above is what makes
+# the signal list assertable as text — see its own comment.
 PROMISE=$(sed -n '/^- \*\*The entrypoint supervises radvd/,/^- \*\*/p' \
   "$REPO_ROOT/CONTRIBUTING.md")
 registered=$(bash -c '
   set -u
   . "$1"
   . "$2"
-  trap -p TERM INT
+  trap -p TERM
 ' _ "$WORK/on_term.sh" "$TRAPS" 2>/dev/null)
 # The searched string is CONTRIBUTING's literal markdown, backticks included, so the
 # single quotes are required: expansion here would run `/` as a command substitution.
 # shellcheck disable=SC2016
-[ "$(grep -c 'on_term' <<<"$registered")" -eq 2 ] \
+[ "$(grep -c 'on_term' <<<"$registered")" -eq 1 ] \
+  && grep -q '^trap on_term TERM INT$' "$TRAPS" \
   && grep -q 'SIGTERM`/`SIGINT`' <<<"$PROMISE" \
   && ok "both published shutdown signals are trapped to on_term, and CONTRIBUTING still promises both" \
-  || no "shutdown signal contract" "registered: $(tr '\n' ' ' <<<"$registered"), promise found: $(grep -c 'SIGTERM`/`SIGINT`' <<<"$PROMISE")"
+  || no "shutdown signal contract" "registered: $(tr '\n' ' ' <<<"$registered"), signal list: $(grep -c '^trap on_term TERM INT$' "$TRAPS"), promise found: $(grep -c 'SIGTERM`/`SIGINT`' <<<"$PROMISE")"
 
 # --- 8. the shutdown arm reports a refused TERM as unconfirmable ------------------
 # The arm lives inline in the supervisor loop, so it is extracted as a RANGE anchored

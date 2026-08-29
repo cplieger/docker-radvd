@@ -21,7 +21,7 @@ The files with real logic are:
   bump commit, so no manual step is needed.
 - `entrypoint.sh`: a POSIX `sh` script (runs on Alpine's BusyBox shell, not
   bash) that validates the mounted `radvd.conf`, creates `/run/radvd`, and
-  supervises radvd in the foreground as the non-root `radvd` user (`-u radvd`):
+  supervises radvd in the foreground as the non-root `radvd` user (`--username=radvd`):
   it turns `SIGHUP`
   into a config reload (refusing it, and keeping the running daemon, when the
   mounted config would not start), forwards `SIGTERM`/`SIGINT` for graceful
@@ -69,15 +69,22 @@ contract.
   record separator that a string holds open are both `isspace()` bytes, and
   `dev_valid_name` rejects any of those, so a quoted `interface "eth 0"` reported
   as `"eth@0"` only ever misspells a name radvd itself refuses to set up. The
-  block the warning is ABOUT is never wrong — only its spelling — so the verdict
-  does not depend on the mask. What is left is
+  verdict does not depend on the mask — the walk reads the masked stream, so the
+  block a warning is ABOUT is right. What that block is CALLED can collide: the
+  three structural bytes and any backslash pair are all legal interface-name
+  bytes, and both masks reach `iface=`: the in-quote mask makes
+  `interface "eth;0"` and `interface "eth{0"` both report `iface="?eth@0?"`, and
+  the line-wide backslash mask makes a bare `interface a\b` report
+  `iface="a@@"`. Read the block names in the file: the candidates for a
+  colliding name are the blocks whose own names mask to the spelling reported.
+  What is left is
   tokenized with `{`, `}` and `;` as tokens of their own, so a name is only a
   directive on a statement boundary (`MyAdvSendAdvert on` is not one), a
   directive whose value sits on the next line is still one statement (radvd's
   lexer discards newlines), and all three `AdvRASrcAddress` spellings —
   `AdvRASrcAddress {`, the no-space `AdvRASrcAddress{`, and a bare
   `AdvRASrcAddress` at end-of-line with the brace on the next — need no special
-  case. The scan reads the `radvd.conf` the daemon itself is given with `-C`.
+  case. The scan reads the `radvd.conf` the daemon itself is given with `--config`.
   Keep those properties if you touch the walk, and check them by extraction and
   diff rather than by eye. Pull the two awk stages out the way `tests/shell/`
   already extracts functions. Run your candidate and the shipped version over
@@ -140,8 +147,8 @@ contract.
   `awk`; an earlier version stopped at the first link-local address it saw and
   could stay silent on exactly that mixed config.
 - **radvd drops to a non-root user.** The Dockerfile creates an unprivileged
-  `radvd` user/group and the entrypoint runs `radvd … -u radvd`, which opens
-  the raw socket as root then drops the worker to that user. Keep the `-u radvd`
+  `radvd` user/group and the entrypoint runs `radvd … --username=radvd`, which opens
+  the raw socket as root then drops the worker to that user. Keep the `--username=radvd`
   flag and the Dockerfile user together. radvd has **no `-g`/group flag** (it
   derives the GID from `-u`'s primary group), so do not add one; an unrecognized
   flag makes radvd exit before opening its socket and the container crash-loops.
@@ -162,8 +169,8 @@ contract.
 - **The reload config-tests before it stops anything, and that is a filter, not
   a guarantee.** `on_hup` refuses the reload on a `radvd.conf` that is absent or
   not a regular file, and otherwise on any non-zero status from
-  `radvd -c -C "$CONF" -u radvd` under a bound, so a bad edit costs the operator a
-  reload rather than the segment its RA emitter. The `-u radvd` is load-bearing:
+  `radvd --configtest --config="$CONF" --username=radvd` under a bound, so a bad edit costs the operator a
+  reload rather than the segment its RA emitter. The `--username=radvd` is load-bearing:
   `check_conffile_perm` judges the config file against that user, so a gate
   running without it asks a different question from the one the replacement
   daemon answers. One verdict then needs reading rather than status alone.
