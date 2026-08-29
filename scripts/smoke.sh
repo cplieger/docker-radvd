@@ -480,6 +480,7 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
 # --- 10. without CAP_KILL both signal paths report their own refusal ---------
 (
   C7="radvd-smoke-no-kill-$$"
+  # shellcheck disable=SC2317,SC2329  # invoked indirectly via trap
   cleanup_no_kill() {
     code=$?
     if [ "$code" -ne 0 ] && docker inspect "$C7" >/dev/null 2>&1; then
@@ -529,6 +530,7 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
 (
   C8="radvd-smoke-startup-latch-$$"
   slow_cat="$TMPDIR_FIXTURE/slow-cat"
+  # shellcheck disable=SC2317,SC2329  # invoked indirectly via trap
   cleanup_startup_latch() {
     code=$?
     if [ "$code" -ne 0 ] && docker inspect "$C8" >/dev/null 2>&1; then

@@ -235,6 +235,7 @@ opening a PR:
 ```sh
 shellcheck entrypoint.sh
 hadolint --ignore DL3018 --ignore DL3066 Dockerfile
+bash tests/shell/run.sh   # entrypoint unit tests; two cases are uid-gated and skip as root
 docker build -t docker-radvd:dev .   # runs tests/smoke.sh in the test stage
 ```
 
