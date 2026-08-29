@@ -147,10 +147,21 @@ wait_until_stopped() {
 # the same commit had passed on its PR branch seven minutes earlier. An absence
 # assertion cannot be polled, so keep those single-shot and place them AFTER a
 # wait_for_log on the same container has proven the log flushed.
+# `docker logs … | grep -q` is a SIGPIPE trap under `pipefail`, and it reads as a flake.
+# `grep -q` exits at its FIRST match and closes the pipe, so `docker logs` dies with 141 and
+# the whole pipeline fails even though the line was there. Whether it bites depends on
+# whether the writer finished before the reader left, so the same assertion passes and fails
+# on identical code. It bit this suite when the RadvdConfigError pattern grew alternatives
+# that match radvd's own startup lines near the TOP of a long log, maximising the window.
+# So capture once and match the capture, per shell.md: a pipeline's status is the last
+# command's, so capture and fan out rather than piping into a short-circuiting reader.
+log_has() { grep -q -- "$2" <<<"$(docker logs "$1" 2>&1)"; }
+log_has_re() { grep -Eq -- "$2" <<<"$(docker logs "$1" 2>&1)"; }
+
 wait_for_log() {
   local name=$1 pattern=$2 what=$3
   for _ in $(seq 1 10); do
-    if docker logs "$name" 2>&1 | grep -q "$pattern"; then
+    if log_has "$name" "$pattern"; then
       return 0
     fi
     sleep 1
@@ -211,7 +222,7 @@ docker kill -s HUP "$C1" >/dev/null
 pid_after=$(wait_for_reload "$C1" 2 "$pid_before")
 [ -n "$pid_after" ] || fail "HUP under a root-only config did not reload radvd"
 [ "$(docker inspect -f '{{.State.Running}}' "$C1")" = "true" ] || fail "container died on HUP under a root-only config (the 8e7a792 regression)"
-docker logs "$C1" 2>&1 | grep -q 'failed to read config file' \
+log_has "$C1" 'failed to read config file' \
   && fail "radvd attempted its own unprivileged config reread (supervisor bypassed?)"
 printf '[smoke] PASS  hardened reload: root-only config reloaded cleanly (pid %s -> %s)\n' "$pid_before" "$pid_after"
 
@@ -256,7 +267,7 @@ docker kill -s HUP "$C1" >/dev/null
 sleep 1
 [ "$(docker inspect -f '{{.State.Running}}' "$C1")" = "true" ] \
   || fail "a second trapped signal interrupted the shutdown reap while radvd was still held"
-docker logs "$C1" 2>&1 | grep -q 'radvd stopped on shutdown signal' \
+log_has "$C1" 'radvd stopped on shutdown signal' \
   && fail "PID 1 reported a graceful stop before the held radvd generation was reaped"
 docker exec "$C1" sh -c 'kill -CONT "$@"' _ "${held_pids[@]}"
 wait_until_stopped "$C1" "container did not stop after the held radvd generation resumed"
@@ -303,7 +314,7 @@ wait_for_log "$C1" 'SIGHUP reload refused' "the malformed HUP replacement was no
   || fail "the container died on a refused HUP reload instead of keeping its last good config"
 [ "$(docker exec "$C1" pidof radvd)" = "$pid_before" ] \
   || fail "a refused reload replaced the running radvd (pids moved from $pid_before)"
-docker logs "$C1" 2>&1 | grep -Eq "$ALERT_RULE" \
+log_has_re "$C1" "$ALERT_RULE" \
   || fail "the refused reload's radvd output does not match the README's RadvdConfigError pattern"
 # Absence assertion: single-shot on purpose, and safe here only because the
 # wait_for_log above already proved this container's log is flushed.
@@ -407,7 +418,7 @@ wait_for_log "$C3" 'msg="invalid RADVD_DEBUG_LEVEL' "missing invalid-RADVD_DEBUG
 wait_for_log "$C3" 'value="9?  bogus"' "sanitizer did not neutralize the quote and the C1 byte in the echoed value"
 # Absence assertion: single-shot on purpose, and safe here only because the two
 # wait_for_log calls above already proved this container's log is flushed.
-docker logs "$C3" 2>&1 | grep -q 'msg="starting radvd"' && fail "radvd was started despite an invalid RADVD_DEBUG_LEVEL"
+log_has "$C3" 'msg="starting radvd"' && fail "radvd was started despite an invalid RADVD_DEBUG_LEVEL"
 printf '[smoke] PASS  validation: invalid RADVD_DEBUG_LEVEL fails closed (exit 1, sanitized error)\n'
 
 # --- 7. a non-regular node at the config path fails closed ---------------------
@@ -425,11 +436,11 @@ wait_until_stopped "$C4" "container still running with a non-regular radvd.conf"
 ec=$(docker inspect -f '{{.State.ExitCode}}' "$C4")
 [ "$ec" = "1" ] || fail "non-regular radvd.conf exit code $ec, want 1"
 wait_for_log "$C4" 'msg="radvd.conf is not a regular file' "missing non-regular-config fatal line"
-docker logs "$C4" 2>&1 | grep -Eq "$ALERT_RULE" \
+log_has_re "$C4" "$ALERT_RULE" \
   || fail "the non-regular-config fatal does not match the README's RadvdConfigError pattern"
 # Absence assertion: single-shot on purpose, and safe here only because the
 # wait_for_log above already proved this container's log is flushed.
-docker logs "$C4" 2>&1 | grep -q 'msg="starting radvd"' && fail "radvd was started despite a non-regular radvd.conf"
+log_has "$C4" 'msg="starting radvd"' && fail "radvd was started despite a non-regular radvd.conf"
 printf '[smoke] PASS  refusal: a non-regular radvd.conf fails closed (exit 1, alert-matching)\n'
 
 # --- 8. read_only without a /run tmpfs fails closed ---------------------------
@@ -446,9 +457,9 @@ wait_until_stopped "$C5" "container still running with a read-only /run"
 ec=$(docker inspect -f '{{.State.ExitCode}}' "$C5")
 [ "$ec" = "1" ] || fail "read-only /run exit code $ec, want 1"
 wait_for_log "$C5" 'failed to create radvd PID directory' "missing PID-directory fatal line"
-docker logs "$C5" 2>&1 | grep -Eq "$ALERT_RULE" \
+log_has_re "$C5" "$ALERT_RULE" \
   || fail "the PID-directory fatal does not match the README's RadvdConfigError pattern"
-docker logs "$C5" 2>&1 | grep -q 'msg="starting radvd"' && fail "radvd was started despite a read-only /run"
+log_has "$C5" 'msg="starting radvd"' && fail "radvd was started despite a read-only /run"
 printf '[smoke] PASS  hardening: read_only without a /run tmpfs fails closed (exit 1)\n'
 
 # --- 9. the README's hardened profile boots AND keeps the signal contract ------
@@ -529,7 +540,7 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
   [ "$ec" = "0" ] || fail "no-KILL docker stop exit code $ec, want 0"
   wait_for_log "$C7" 'failed to deliver TERM to radvd' "no-KILL shutdown did not report the refused TERM"
   wait_for_log "$C7" 'a graceful stop cannot be confirmed' "no-KILL shutdown did not report its terminal disposition"
-  docker logs "$C7" 2>&1 | grep -q 'radvd stopped on shutdown signal' \
+  log_has "$C7" 'radvd stopped on shutdown signal' \
     && fail "no-KILL shutdown falsely reported a graceful stop"
   printf '[smoke] PASS  no-KILL shutdown: refusal reported and PID 1 exited 0\n'
 )
