@@ -164,8 +164,14 @@ contract.
   SIGTERM — keeps crash-recreate armed under `always` or `on-failure`, so how bad
   a reload death is depends on that setting. The supervisor loop turns `SIGHUP`
   into a radvd restart (re-reads as root), forwards `SIGTERM`/`SIGINT`, and
-  propagates an unexpected radvd exit. `exec radvd` is simpler but reintroduces
-  the reload-death, so keep the supervise-and-restart loop.
+  propagates an unexpected radvd exit. A stop that lands while no radvd exists
+  (during preflight, or the reload gap between generations) wins without radvd
+  starting: `start_radvd`'s gate exits 0 rather than forking a daemon whose own
+  handler installation the forwarded TERM would race — a lost race swallows the
+  signal and strands PID 1 in `wait` until the stop grace SIGKILLs it (measured
+  at 29-59% per hit under CPU contention). Keep the gate ahead of the fork.
+  `exec radvd` is simpler
+  but reintroduces the reload-death, so keep the supervise-and-restart loop.
 - **The reload config-tests before it stops anything, and that is a filter, not
   a guarantee.** `on_hup` refuses the reload on a `radvd.conf` that is absent or
   not a regular file, and otherwise on any non-zero status from

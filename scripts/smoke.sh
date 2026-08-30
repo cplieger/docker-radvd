@@ -545,7 +545,7 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
   printf '[smoke] PASS  no-KILL shutdown: refusal reported and PID 1 exited 0\n'
 )
 
-# --- 11. a TERM latched during preflight preserves structured logs ----------
+# --- 11. a TERM latched during preflight refuses the start and exits 0 -------
 (
   C8="radvd-smoke-startup-latch-$$"
   slow_cat="$TMPDIR_FIXTURE/slow-cat"
@@ -570,48 +570,42 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
   docker cp "$TMPDIR_FIXTURE" "$C8:/etc/radvd" >/dev/null
   job_status_before=$(docker logs "$C8" 2>&1 | grep -Ec '^(Terminated|Killed|Aborted)$' || true)
   docker start "$C8" >/dev/null
-  # What this scenario can and cannot assert, because the difference cost a red required
-  # check on main. PID 1 latches the preflight TERM and then signals the child it has just
-  # spawned (entrypoint.sh:318), so the delivery RACES radvd installing its own TERM
-  # handler. Lose that race and the signal is swallowed by radvd's startup: the kill
-  # reports success, radvd keeps running, and PID 1 blocks in `wait` on a child that will
-  # never exit. Measured — 12/12 clean exits on an idle 20-core host, and a reproducible
-  # stall on a loaded GitHub runner, where the log ends at `starting radvd` with no refusal
-  # line. So neither "the container stops" nor "the child was stopped" is a property of
-  # this image; both are properties of who won a race inside radvd. Asserting them made
-  # this scenario a coin flip.
-  # What IS deterministic is the latch itself, which is this scenario's actual subject and
-  # is asserted below: PID 1 handled the TERM during preflight rather than dying on the
-  # default disposition, and it did so without corrupting its structured log. The stop is
-  # then forced explicitly, so the scenario ends in a known state either way. The delivery
-  # path each disposition takes is already pinned deterministically elsewhere — the refused
-  # arm by scenario 10, and the latch-to-fresh-child arm stub-free by cases 11/12 of
-  # tests/shell/startup_latch_test.sh.
+  # A stop that arrives before radvd exists must win without radvd ever running:
+  # start_radvd's gate exits 0 instead of forking a child whose handler
+  # installation the latched TERM's delivery would race — the race that once
+  # kept this scenario from asserting the stop at all. Everything below is
+  # deterministic: the latch, the self-exit with code 0, the refusal record,
+  # the absent start, their order, and the uncorrupted structured log.
   wait_for_log "$C8" 'shutdown signal received; stopping radvd' \
     "the preflight TERM was not latched by PID 1"
-  docker stop -t 10 "$C8" >/dev/null
-  wait_until_stopped "$C8" "container did not stop after a latched preflight TERM"
+  wait_until_stopped "$C8" "PID 1 did not exit on its own after a latched preflight TERM"
   ec=$(docker inspect -f '{{.State.ExitCode}}' "$C8")
   [ "$ec" = "0" ] || fail "startup-latch TERM exit code $ec, want 0"
+  # The gate's record is the container's last write, so this poll doubles as the
+  # log-flush proof for the single-shot reads below (an absence assertion cannot
+  # be polled; it must follow a wait_for_log on the same container).
+  wait_for_log "$C8" 'shutdown signal received before radvd started; exiting without starting it' \
+    "the gate's refusal record is missing"
   latch_logs=$(docker logs "$C8" 2>&1) || fail "startup-latch: could not read the container logs"
-  # on_term's first record (entrypoint.sh:100) precedes the pre-start record
-  # (entrypoint.sh:322) only when the TERM was handled during preflight; both are
-  # sequential writes from one process to one stderr. One awk pass over one snapshot:
-  # nothing can SIGPIPE the producer, and an unreadable log fails above instead of
-  # reading as an absent line.
+  grep -q -- 'msg="starting radvd"' <<<"$latch_logs" \
+    && fail "radvd was started despite the latched shutdown"
+  # on_term's record precedes the gate's; both are sequential writes from one
+  # process to one stderr, so their order pins WHEN the TERM was handled. One awk
+  # pass over one snapshot: nothing can SIGPIPE the producer, and an unreadable
+  # log fails above instead of reading as an absent line.
   order=$(printf '%s\n' "$latch_logs" | awk '
     /msg="shutdown signal received; stopping radvd"/ && !latched { latched = NR }
-    /msg="starting radvd"/ && !started { started = NR }
-    END { print latched + 0, started + 0 }
+    /msg="shutdown signal received before radvd started/ && !gated { gated = NR }
+    END { print latched + 0, gated + 0 }
   ')
   latched_at=${order% *}
-  started_at=${order#* }
-  [ "$latched_at" -gt 0 ] && [ "$started_at" -gt 0 ] && [ "$latched_at" -lt "$started_at" ] \
-    || fail "startup-latch TERM was not handled during preflight (shutdown record $latched_at, startup record $started_at)"
+  gated_at=${order#* }
+  [ "$latched_at" -gt 0 ] && [ "$gated_at" -gt 0 ] && [ "$latched_at" -lt "$gated_at" ] \
+    || fail "startup-latch TERM was not handled during preflight (shutdown record $latched_at, gate record $gated_at)"
   job_status_after=$(docker logs "$C8" 2>&1 | grep -Ec '^(Terminated|Killed|Aborted)$' || true)
   [ "$job_status_after" -eq "$job_status_before" ] \
     || fail "startup-latch TERM leaked a bare BusyBox ash job-status line into docker logs"
-  printf '[smoke] PASS  startup latch: PID 1 handled a preflight TERM in order, without corrupting structured logs\n'
+  printf '[smoke] PASS  startup latch: a preflight TERM refused the start, exited 0, kept structured logs in order\n'
 )
 
 printf '[smoke] OK — all signal-contract assertions passed for %s\n' "$IMAGE"
