@@ -35,7 +35,7 @@ case "$RADVD_DEBUG_LEVEL" in
 esac
 
 # Armed before preflight because PID 1 receives no default-disposition signal: a
-# TERM during validation is latched here for start_radvd's pre-pid latch.
+# TERM during validation is latched here for start_radvd's shutdown gate.
 radvd_pid=""
 reload=0
 shutdown=0
@@ -311,10 +311,23 @@ fi
 
 start_radvd() {
   signal_failed=0
+  # A shutdown latched while no radvd existed (preflight, or the reload gap
+  # between reaping one generation and starting the next) is a stop that arrived
+  # first. Starting radvd just to signal it races its own handler installation:
+  # a lost race swallows the TERM and leaves PID 1 in `wait` until the stop
+  # grace expires in SIGKILL — measured at 29-59% per hit under CPU contention.
+  # The stop wins instead.
+  if [ "$shutdown" -eq 1 ]; then
+    printf 'level=info msg="shutdown signal received before radvd started; exiting without starting it"\n' >&2
+    exit 0
+  fi
+  printf 'level=info msg="starting radvd" config="%s" debug_level="%s"\n' "$CONF" "$RADVD_DEBUG_LEVEL" >&2
   radvd --config="$CONF" --nodaemon --logmethod=stderr --debug="$RADVD_DEBUG_LEVEL" --username=radvd &
   radvd_pid=$!
-  # A TERM delivered before radvd_pid was assigned set `shutdown` but skipped the
-  # kill; deliver it here so an early stop is not swallowed.
+  # A TERM landing between the gate above and the assignment just made latched
+  # without a kill. That slice is microseconds against the ~250ms preflight the
+  # gate closed, and this delivery still races radvd's handler installation;
+  # the runtime's kill-after-grace is the backstop when it loses.
   if [ "$shutdown" -eq 1 ]; then
     if ! kill -TERM "$radvd_pid" 2>/dev/null; then
       signal_failed=1
@@ -323,7 +336,6 @@ start_radvd() {
   fi
 }
 
-printf 'level=info msg="starting radvd" config="%s" debug_level="%s"\n' "$CONF" "$RADVD_DEBUG_LEVEL" >&2
 start_radvd
 
 while :; do
@@ -360,7 +372,7 @@ while :; do
   fi
   # Cleared before the next start: left set, a TERM landing in this gap takes
   # on_term's kill arm against an already-reaped child and logs a delivery failure
-  # no path owes — reload re-delivers through start_radvd, exit has nothing to stop.
+  # no path owes — reload resolves it at start_radvd's gate, exit has nothing to stop.
   radvd_pid=""
 
   if [ "$reload" -eq 1 ]; then

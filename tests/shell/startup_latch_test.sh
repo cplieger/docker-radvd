@@ -1,23 +1,18 @@
 #!/usr/bin/env bash
-# The signal path's unit-testable pieces: start_radvd()'s pre-pid latch, both
-# handlers' delivery skip while no child is assigned, on_hup()'s
-# refusal to reload during a shutdown, its refusal to reload a config radvd would
-# reject or cannot find, and the shutdown arm's two-branch report. The traps arm before the config validation, so a TERM landing in that
-# window is LATCHED and delivered to the freshly assigned pid; without that,
-# `docker stop` during startup waits out its timeout and SIGKILLs. THE ORACLE IS
-# THE DELIVERY, NOT THE DEATH — the stubbed
-# radvd's pre-exec bash can consume the latch TERM, so asserting "the child is
-# gone" races (~1 false failure in 15 runs before this rewrite); the recording
-# stub forwards to the real kill, and case 1 requires an empty record, so the
-# latch case is not a tautology.
+# The signal path's unit-testable pieces: start_radvd()'s shutdown gate (a stop
+# latched while no radvd existed refuses the start rather than forking a daemon
+# whose handler installation the delivery would race), the post-fork residue
+# delivery and its refusal report, both handlers' delivery skip while no child
+# is assigned, on_hup()'s refusal to reload during a shutdown, its refusal to
+# reload a config radvd would reject or cannot find, and the shutdown arm's
+# two-branch report. The traps arm before the config validation, so a TERM
+# landing in that window is latched for the gate; without the latch, `docker
+# stop` during startup waits out its timeout and SIGKILLs.
 #
-# A run may also show an intermittent bash `wait_for: No record of process <pid>`
-# line on stderr (measured: 12 of 30 whole-suite runs, 0-2 lines each, suite still
-# green). It comes from the stub subshell dying inside that same pre-exec window and
-# unwinding through lib.sh's inherited EXIT trap, not from reap()'s `wait`; it is
-# bash-only and cannot occur in the image's ash. Do not chase it: the only
-# redirection that reaches the writer covers the fork, and it swallows
-# start_radvd()'s own `failed to deliver TERM` error.
+# A run may show an intermittent bash `wait_for: No record of process <pid>`
+# line on stderr. It comes from a stubbed child dying inside its pre-exec bash
+# and unwinding through lib.sh's inherited EXIT trap, not from reap()'s `wait`;
+# it is bash-only and cannot occur in the image's ash. Do not chase it.
 #
 # Lint directives, each against a stated guarantee rather than an assumption:
 #   SC2015 - `cond && ok || no` cannot mis-fire: lib.sh's ok/no/skip return 0.
@@ -82,7 +77,7 @@ start() {
   : >"$SIGNALS"
   : >"$ARGV"
   radvd_pid=""
-  start_radvd
+  start_radvd 2>"$LOG"
 }
 
 # --- 1. control: no latched signal, nothing is delivered --------------------------
@@ -99,27 +94,82 @@ sleep 0.2
 grep -Fq -- '--logmethod=stderr' "$ARGV" && grep -Fq -- "--debug=$RADVD_DEBUG_LEVEL" "$ARGV" \
   && ok "the radvd invocation routes logs to stderr and passes the resolved debug level" \
   || no "radvd argv" "recorded: $(cat "$ARGV")"
+grep -Fq 'msg="starting radvd"' "$LOG" \
+  && ok "the un-gated path logs the start" \
+  || no "start log line" "log: $(cat "$LOG")"
 [ "$signal_failed" -eq 0 ] \
   && ok "starting a child clears a prior generation's delivery refusal" \
   || no "delivery-refusal scope" "signal_failed=$signal_failed after start_radvd"
 reap "$radvd_pid"
 
-# --- 2. a TERM latched before the pid existed is delivered to the fresh child -----
+# --- 2. a shutdown latched before the pid existed refuses the start ---------------
+# The stop arrived while no radvd existed, so there is nothing to signal and
+# nothing worth starting: forking a daemon just to TERM it races its handler
+# installation (the gate's own comment carries the measured loss rate). The
+# subshell contains the gate's exit 0; the empty ARGV proves the fork never
+# happened, the empty SIGNALS that nothing was delivered.
 shutdown=1 reload=0
-start
-signalled "$radvd_pid" \
-  && ok "a shutdown latched during validation is delivered as TERM to the freshly started child" \
-  || no "shutdown latch" "no TERM recorded for $radvd_pid; signals=[$(tr '\n' ' ' <"$SIGNALS")]"
-reap "$radvd_pid"
+: >"$SIGNALS"
+: >"$ARGV"
+radvd_pid=""
+(start_radvd) 2>"$LOG"
+rc=$?
+[ "$rc" -eq 0 ] && [ ! -s "$ARGV" ] && [ ! -s "$SIGNALS" ] \
+  && grep -Fq 'msg="shutdown signal received before radvd started; exiting without starting it"' "$LOG" \
+  && ! grep -Fq 'msg="starting radvd"' "$LOG" \
+  && ok "a shutdown latched while no child existed refuses the start: exit 0, no fork, no delivery" \
+  || no "shutdown gate" "rc=$rc, argv=[$(tr '\n' ' ' <"$ARGV")], signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
 
-# --- 3. a latched reload is NOT an operand of the pre-pid latch -------------------
+# --- the post-fork residue delivery and its refusal report ------------------------
+# A TERM landing between the gate's check and the pid assignment latches without
+# a kill; the block after the fork is what still delivers it. It cannot be
+# driven through start_radvd (the flip happens mid-function), so it is extracted
+# as a RANGE like the shutdown arm: the range starts after the gate's `fi`, so
+# `^  fi$` first matches this block's own closer. Real kill, no recorder: the
+# oracle for delivery is the child's wait status, 128+15 for a TERM death.
+RESIDUE=$(extract_range '^  # A TERM landing between the gate' '^  fi$' "$WORK/residue.sh") || exit 1
+out=$(bash -c '
+  set -u
+  shutdown=1
+  signal_failed=0
+  sleep 3 &
+  radvd_pid=$!
+  . "$1"
+  wait "$radvd_pid"
+  printf "signal_failed=%s wait_rc=%s\n" "$signal_failed" "$?"
+' _ "$RESIDUE" 2>"$LOG")
+[ "$out" = "signal_failed=0 wait_rc=143" ] && ! grep -Fq 'failed to deliver TERM' "$LOG" \
+  && ok "a shutdown latched after the gate is still delivered to the fresh pid" \
+  || no "residue delivery" "out: $out, log: $(cat "$LOG")"
+
+# The refusal arm: an undeliverable TERM arms signal_failed so the supervisor
+# loop's skip (cases 11/12 below) does not wait for an exit that is not coming,
+# and reports the failure. A reaped pid is the injectable stand-in for the real
+# causes the message names.
+out=$(bash -c '
+  set -u
+  shutdown=1
+  signal_failed=0
+  sleep 0.1 &
+  radvd_pid=$!
+  wait "$radvd_pid"
+  . "$1"
+  printf "signal_failed=%s\n" "$signal_failed"
+' _ "$RESIDUE" 2>"$LOG")
+[ "$out" = "signal_failed=1" ] \
+  && grep -Fq 'msg="failed to deliver TERM to radvd; the container may lack CAP_KILL, or the child was already reaped"' "$LOG" \
+  && ok "a refused residue delivery arms signal_failed and reports it" \
+  || no "residue refusal" "out: $out, log: $(cat "$LOG")"
+
+# --- 3. a latched reload is NOT an operand of the shutdown gate -------------------
 # `reload` is armed only after a confirmed TERM to an assigned pid, so it cannot
-# describe this pre-pid state; testing it here would only re-TERM a signalled child.
+# describe a no-child state: a reload must neither refuse the start nor deliver
+# anything to the fresh child.
 shutdown=0 reload=1
 start
 sleep 0.2
 [ -n "$radvd_pid" ] && [ ! -s "$SIGNALS" ] && command kill -0 "$radvd_pid" 2>/dev/null \
-  && ok "a latched reload delivers nothing to the freshly started child" \
+  && ok "a latched reload neither gates the start nor delivers to the fresh child" \
   || no "reload latch" "radvd_pid='$radvd_pid', signals=[$(tr '\n' ' ' <"$SIGNALS")]"
 reap "$radvd_pid"
 
