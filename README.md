@@ -7,6 +7,7 @@
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/docker-radvd/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/docker-radvd)
 [![SBOM](https://img.shields.io/badge/SBOM-SPDX-1D4ED8)](https://github.com/cplieger/docker-radvd/releases)
 
+<!-- hub-overview BEGIN -->
 Run [radvd](https://radvd.litech.org/) (the Linux IPv6 Router Advertisement Daemon) in a container. Bring your own `radvd.conf`.
 
 ## What it does
@@ -28,6 +29,7 @@ This image is a minimal Alpine wrapper around upstream `radvd`, compiled from th
 - **Entrypoint warns on HA misconfig**: warn-only apart from a `radvd.conf` that is not a regular file, since single-node operators legitimately deploy without HA (see [High-availability with keepalived](#high-availability-with-keepalived))
 - **Healthcheck**: `pidof radvd` (CMD form, no shell needed)
 - **Multi-arch**: `linux/amd64` and `linux/arm64`
+<!-- hub-overview END -->
 
 ## Quick start
 
