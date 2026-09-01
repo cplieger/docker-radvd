@@ -257,7 +257,7 @@ ALERT_RULE=$(sed -n '/alert: RadvdConfigError/,/^        for:/p' README.md \
 
 # --- a malformed replacement config on HUP is refused, and radvd keeps serving --
 # The reload stops radvd before its replacement reads the config, so accepting a
-# bad edit costs the segment its RA emitter. The configtest in on_hup refuses
+# bad edit costs the segment its RA emitter. request_reload's configtest refuses
 # instead, and radvd's own rejection text still reaches the log for the operator's
 # alert rule.
 printf '[smoke] restarting %s (malformed HUP replacement scenario)\n' "$C1"
@@ -612,14 +612,118 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
     -v "$scenario_dir/radvd:/usr/sbin/radvd:ro" "$IMAGE" >/dev/null
   docker cp "$TMPDIR_FIXTURE" "$C9:/etc/radvd" >/dev/null
   docker start "$C9" >/dev/null
-  wait_for_log "$C9" 'SIGHUP reload refused: TERM delivery to radvd could not be confirmed' \
-    "the pre-pid HUP was not refused"
-  wait_for_log "$C9" 'pid=""' "the HUP did not land before radvd_pid was assigned"
+  wait_for_log "$C9" 'SIGHUP received before radvd started' \
+    "the pre-pid HUP was not consumed before radvd started"
   wait_until_stopped "$C9" "the daemon stub exit was not propagated after the pre-pid HUP"
   ec=$(docker inspect -f '{{.State.ExitCode}}' "$C9")
   [ "$ec" = "3" ] || fail "pre-pid HUP propagated exit code $ec, want 3"
   wait_for_log "$C9" 'status="3"' "the propagation log lost the child status after the pre-pid HUP"
   printf '[smoke] PASS  pre-pid HUP status: the later radvd exit remained 3\n'
+)
+
+# A TERM that lands during the reload configtest must stop the child without
+# misclassifying the interrupted check as a config refusal.
+(
+  C10="radvd-smoke-hup-term-check-$$"
+  scenario_dir=$(mktemp -d)
+  # shellcheck disable=SC2317,SC2329  # invoked indirectly via trap
+  cleanup_hup_term_check() {
+    code=$?
+    if [ "$code" -ne 0 ] && docker inspect "$C10" >/dev/null 2>&1; then
+      printf -- '--- %s logs (tail) ---\n' "$C10" >&2
+      docker logs "$C10" 2>&1 | tail -25 >&2 || true
+    fi
+    docker rm -f "$C10" >/dev/null 2>&1 || true
+    rm -rf "$scenario_dir"
+  }
+  trap cleanup_hup_term_check EXIT
+
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'case " $* " in' \
+    '  *" --configtest "*)' \
+    '    : >/tmp/slow-configtest-started' \
+    '    sleep 8' \
+    '    ;;' \
+    'esac' \
+    'exec /usr/sbin/radvd "$@"' >"$scenario_dir/radvd"
+  chmod +x "$scenario_dir/radvd"
+
+  start_container "$C10" --cap-add NET_RAW \
+    -v "$scenario_dir/radvd:/usr/local/bin/radvd:ro"
+  docker kill -s HUP "$C10" >/dev/null
+  check_started=""
+  for _ in $(seq 1 20); do
+    if docker exec "$C10" test -e /tmp/slow-configtest-started; then
+      check_started=1
+      break
+    fi
+    sleep 0.1
+  done
+  [ -n "$check_started" ] || fail "HUP+TERM: the slow configtest did not start"
+  sleep 2
+  docker kill -s TERM "$C10" >/dev/null
+  wait_for_log "$C10" 'SIGHUP received during shutdown; reload ignored' \
+    "HUP+TERM: shutdown did not replace the in-flight reload"
+  wait_until_stopped "$C10" "HUP+TERM: container did not stop after the configtest returned"
+  ec=$(docker inspect -f '{{.State.ExitCode}}' "$C10")
+  [ "$ec" = "0" ] || fail "HUP+TERM exit code $ec, want 0"
+  log_has "$C10" 'SIGHUP reload refused' \
+    && fail "HUP+TERM misclassified the interrupted configtest as a reload refusal"
+  printf '[smoke] PASS  HUP+TERM configtest: shutdown won without a false reload refusal\n'
+)
+
+# A second HUP during configtest coalesces into the restart already being prepared.
+(
+  C11="radvd-smoke-double-hup-$$"
+  scenario_dir=$(mktemp -d)
+  # shellcheck disable=SC2317,SC2329  # invoked indirectly via trap
+  cleanup_double_hup() {
+    code=$?
+    if [ "$code" -ne 0 ] && docker inspect "$C11" >/dev/null 2>&1; then
+      printf -- '--- %s logs (tail) ---\n' "$C11" >&2
+      docker logs "$C11" 2>&1 | tail -25 >&2 || true
+    fi
+    docker rm -f "$C11" >/dev/null 2>&1 || true
+    rm -rf "$scenario_dir"
+  }
+  trap cleanup_double_hup EXIT
+
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'case " $* " in' \
+    '  *" --configtest "*)' \
+    '    : >/tmp/slow-configtest-started' \
+    '    sleep 8' \
+    '    ;;' \
+    'esac' \
+    'exec /usr/sbin/radvd "$@"' >"$scenario_dir/radvd"
+  chmod +x "$scenario_dir/radvd"
+
+  start_container "$C11" --cap-add NET_RAW \
+    -v "$scenario_dir/radvd:/usr/local/bin/radvd:ro"
+  pid_before=$(docker exec "$C11" pidof radvd) || fail "double-HUP: cannot read radvd pid"
+  docker kill -s HUP "$C11" >/dev/null
+  check_started=""
+  for _ in $(seq 1 20); do
+    if docker exec "$C11" test -e /tmp/slow-configtest-started; then
+      check_started=1
+      break
+    fi
+    sleep 0.1
+  done
+  [ -n "$check_started" ] || fail "double-HUP: the slow configtest did not start"
+  docker kill -s HUP "$C11" >/dev/null
+  pid_after=$(wait_for_reload "$C11" 1 "$pid_before")
+  [ -n "$pid_after" ] || fail "double-HUP: the coalesced reload did not complete"
+  logs=$(docker logs "$C11" 2>&1)
+  [ "$(grep -c 'msg="SIGHUP received; restarting radvd to reload config"' <<<"$logs")" -eq 1 ] \
+    || fail "double-HUP produced more than one accepted reload"
+  [ "$(grep -c 'msg="reloading radvd (config re-read via restart)"' <<<"$logs")" -eq 1 ] \
+    || fail "double-HUP produced more than one daemon restart"
+  grep -q 'SIGHUP reload refused' <<<"$logs" \
+    && fail "double-HUP produced a reload refusal"
+  printf '[smoke] PASS  double HUP: one reload completed without a refusal (pid %s -> %s)\n' "$pid_before" "$pid_after"
 )
 
 printf '[smoke] OK — all signal-contract assertions passed for %s\n' "$IMAGE"

@@ -50,9 +50,7 @@ run_triage
   || no "absent config warn" "rc=$_rc, log: $(cat "$LOG")"
 
 # --- 3. the triage's fatal: the config exists but cannot be read ---------------
-# Warn-and-continue would boot a radvd that exits on the same unreadable file with
-# a less actionable error; the entrypoint names the real cause and refuses. Root
-# reads through any file mode, so the branch is unreachable as root — a hard
+# Root reads through any file mode, so the branch is unreachable as root — a hard
 # assertion here would fail for a root maintainer while passing in CI.
 setup
 printf 'interface eth0 { IgnoreIfMissing on; };\n' >"$CONF"

@@ -16,21 +16,8 @@ sanitize_log_value() {
   fi
 }
 
-# Resolved and validated before the traps below, because on_hup reads it: a handler
-# that expands an unset name under `set -u` exits 2, and for PID 1 that is the
-# container.
-RADVD_DEBUG_LEVEL="${RADVD_DEBUG_LEVEL:-0}"
-case "$RADVD_DEBUG_LEVEL" in
-  [0-5]) ;;
-  *)
-    bad_level=$(sanitize_log_value "$RADVD_DEBUG_LEVEL" 32)
-    printf 'level=error msg="invalid RADVD_DEBUG_LEVEL; expected an integer 0-5" value="%s"\n' "$bad_level" >&2
-    exit 1
-    ;;
-esac
-
-# Armed before preflight because PID 1 receives no default-disposition signal: a
-# TERM during validation is latched here for start_radvd's shutdown gate.
+# Armed before the debug-level gate and preflight, so PID 1 can latch a stop
+# before start_radvd decides whether a child may start.
 radvd_pid=""
 reload=0
 shutdown=0
@@ -40,8 +27,22 @@ signal_failed=0
 # Set by both handlers so the loop can tell a trap-interrupted wait from a real
 # radvd exit. A status above 128 cannot: a SIGKILLed radvd exits 137 too.
 sig_seen=0
+hup_pending=0
+term_pending=0
+
 on_hup() {
   sig_seen=1
+  hup_pending=1
+}
+
+on_term() {
+  sig_seen=1
+  shutdown=1
+  term_pending=1
+  printf 'level=info msg="shutdown signal received; stopping radvd"\n' >&2
+}
+
+request_reload() {
   if [ "$shutdown" -eq 1 ]; then
     printf 'level=info msg="SIGHUP received during shutdown; reload ignored"\n' >&2
     return
@@ -53,6 +54,12 @@ on_hup() {
   fi
   hup_rc=0
   hup_ct=$({ timeout 5 radvd --configtest --config="$CONF" --username=radvd 2>&1; } 2>/dev/null) || hup_rc=$?
+  # Re-read before classifying the check: a nested shutdown must win even when a
+  # trapped signal changes the check status under BusyBox ash.
+  if [ "$shutdown" -eq 1 ]; then
+    printf 'level=info msg="SIGHUP received during shutdown; reload ignored"\n' >&2
+    return
+  fi
   if [ "$hup_rc" -ne 0 ]; then
     # Neither timeout call site passes -k, so an elapsed budget is 124 (GNU) or
     # 143 (BusyBox, the shipped one) and 137 is unreachable at both.
@@ -76,14 +83,6 @@ on_hup() {
     printf '%s\n' "$hup_ct" >&2
     return
   fi
-  # Re-read after the bounded config check: a TERM landing inside it runs on_term at
-  # the command-substitution boundary, so arming a reload here would announce a
-  # restart of the daemon on_term is stopping, or report a delivery failure for a
-  # TERM on_term already made.
-  if [ "$shutdown" -eq 1 ]; then
-    printf 'level=info msg="SIGHUP received during shutdown; reload ignored"\n' >&2
-    return
-  fi
   # reload=1 promises the loop that an exit is coming, so only an observed
   # delivery may arm it.
   if [ -n "$radvd_pid" ] && kill -TERM "$radvd_pid" 2>/dev/null; then
@@ -93,17 +92,45 @@ on_hup() {
     printf 'level=error msg="SIGHUP reload refused: TERM delivery to radvd could not be confirmed; radvd may not be running yet, the child may already have been reaped, or the container may lack CAP_KILL" pid="%s"\n' "$radvd_pid" >&2
   fi
 }
-on_term() {
-  sig_seen=1
-  shutdown=1
-  printf 'level=info msg="shutdown signal received; stopping radvd"\n' >&2
+
+request_shutdown() {
   if [ -n "$radvd_pid" ] && ! kill -TERM "$radvd_pid" 2>/dev/null; then
     signal_failed=1
     printf 'level=error msg="failed to deliver TERM to radvd; the container may lack CAP_KILL, or the child was already reaped" pid="%s"\n' "$radvd_pid" >&2
   fi
 }
+
+drain_signals() {
+  while [ "$term_pending" -eq 1 ] || [ "$hup_pending" -eq 1 ]; do
+    if [ "$term_pending" -eq 1 ]; then
+      term_pending=0
+      request_shutdown
+    fi
+    if [ "$hup_pending" -eq 1 ]; then
+      hup_pending=0
+      if [ "$shutdown" -eq 1 ]; then
+        printf 'level=info msg="SIGHUP received during shutdown; reload ignored"\n' >&2
+      elif [ "$reload" -eq 0 ]; then
+        request_reload
+      fi
+    fi
+  done
+}
+
 trap on_hup HUP
 trap on_term TERM INT
+
+# Resolve and validate before the supervisor loop can call request_reload or
+# start_radvd; neither trap handler reads this value.
+RADVD_DEBUG_LEVEL="${RADVD_DEBUG_LEVEL:-0}"
+case "$RADVD_DEBUG_LEVEL" in
+  [0-5]) ;;
+  *)
+    bad_level=$(sanitize_log_value "$RADVD_DEBUG_LEVEL" 32)
+    printf 'level=error msg="invalid RADVD_DEBUG_LEVEL; expected an integer 0-5" value="%s"\n' "$bad_level" >&2
+    exit 1
+    ;;
+esac
 
 # Warn-only except the non-regular-node refusal below, which exits 1 from both call
 # sites: no warning here is worth refusing the container over, and a single-node
@@ -320,24 +347,19 @@ start_radvd() {
     printf 'level=info msg="shutdown signal received before radvd started; exiting without starting it"\n' >&2
     exit 0
   fi
+  if [ "$hup_pending" -eq 1 ]; then
+    hup_pending=0
+    printf 'level=info msg="SIGHUP received before radvd started; the daemon reads the config as it starts, so no reload is needed"\n' >&2
+  fi
   printf 'level=info msg="starting radvd" config="%s" debug_level="%s"\n' "$CONF" "$RADVD_DEBUG_LEVEL" >&2
   radvd --config="$CONF" --nodaemon --logmethod=stderr --debug="$RADVD_DEBUG_LEVEL" --username=radvd &
   radvd_pid=$!
-  # A TERM landing between the gate above and the assignment just made latched
-  # without a kill. That slice is microseconds against the ~250ms preflight the
-  # gate closed, and this delivery still races radvd's handler installation;
-  # the runtime's kill-after-grace is the backstop when it loses.
-  if [ "$shutdown" -eq 1 ]; then
-    if ! kill -TERM "$radvd_pid" 2>/dev/null; then
-      signal_failed=1
-      printf 'level=error msg="failed to deliver TERM to radvd; the container may lack CAP_KILL, or the child was already reaped" pid="%s"\n' "$radvd_pid" >&2
-    fi
-  fi
 }
 
 start_radvd
 
 while :; do
+  drain_signals
   # A shutdown latched before this loop whose TERM was refused has no exit still
   # coming: there is nothing to wait for, so fall through to the disposition below.
   if [ "$shutdown" -eq 1 ] && [ "$signal_failed" -eq 1 ]; then
@@ -350,6 +372,7 @@ while :; do
   fi
   if [ "$sig_seen" -eq 1 ]; then
     sig_seen=0
+    drain_signals
     if [ "$shutdown" -eq 1 ]; then
       # Exit 0 either way: an explicit `docker stop` must not read as a crash to a
       # restart policy, so the refused delivery is reported rather than propagated.
@@ -369,9 +392,8 @@ while :; do
     # serving: keep supervising it rather than reading the interruption as an exit.
     continue
   fi
-  # Cleared before the next start: left set, a TERM landing in this gap takes
-  # on_term's kill arm against an already-reaped child and logs a delivery failure
-  # no path owes — reload resolves it at start_radvd's gate, exit has nothing to stop.
+  # Cleared before the next start: left set, request_shutdown can target a reaped child.
+  # start_radvd's gate resolves a reload-gap TERM; exit has nothing to stop.
   radvd_pid=""
 
   if [ "$reload" -eq 1 ]; then

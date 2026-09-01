@@ -10,7 +10,7 @@ FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6ee
 
 SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
 
-RUN apk add --no-cache bison build-base flex linux-headers pkgconf
+RUN apk add --no-cache bison build-base curl flex linux-headers pkgconf
 
 ARG RADVD_VERSION
 ARG RADVD_SHA256
@@ -23,7 +23,7 @@ WORKDIR /build/radvd
 # a coupling neither file can state in code. `make gram.h` first works around a parallel-build race.
 RUN url="https://github.com/radvd-project/radvd/releases/download/${RADVD_VERSION}/radvd-${RADVD_VERSION#v}.tar.gz" \
     && tarball="${url##*/}" \
-    && wget -q --timeout=30 "$url" \
+    && curl -fsSL --connect-timeout 10 --max-time 120 --retry 3 --retry-delay 5 --retry-all-errors -o "$tarball" "$url" \
     && echo "${RADVD_SHA256}  ${tarball}" | sha256sum -c - \
     && tar xzf "$tarball" --strip-components=1 --no-same-owner \
     && rm "$tarball" \

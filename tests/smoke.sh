@@ -119,7 +119,7 @@ if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
   fi
 fi
 
-# Pin the upstream behavior consumed by on_hup's permission gate.
+# Pin the upstream behavior consumed by request_reload's permission gate.
 if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
   insecure_conf=$(mktemp)
   cp "$d/radvd.conf" "$insecure_conf"
@@ -218,8 +218,8 @@ if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
       shutdown=0
       signal_failed=0
       sig_seen=0
-      on_hup
-    ' _ "$runtime_dir/fn-on_hup.sh" "$runtime_dir/radvd.conf" 2>&1) || hup_rc_probe=$?
+      request_reload
+    ' _ "$runtime_dir/fn-request_reload.sh" "$runtime_dir/radvd.conf" 2>&1) || hup_rc_probe=$?
     if [ "$hup_rc_probe" -ne 0 ]; then
       err "FAIL: elapsed SIGHUP configtest probe did not return through its refusal (rc=$hup_rc_probe)"
       err "$hup_out"

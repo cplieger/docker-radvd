@@ -177,8 +177,8 @@ contract.
   `exec radvd` is simpler
   but reintroduces the reload-death, so keep the supervise-and-restart loop.
 - **The reload config-tests before it stops anything, and that is a filter, not
-  a guarantee.** `on_hup` refuses the reload on a `radvd.conf` that is absent or
-  not a regular file, and otherwise on any non-zero status from
+  a guarantee.** `request_reload` refuses the reload when `radvd.conf` is absent
+  or not a regular file, and otherwise on any non-zero status from
   `radvd --configtest --config="$CONF" --username=radvd` under a bound, so a bad edit costs the operator a
   reload rather than the segment its RA emitter. The `--username=radvd` is load-bearing:
   `check_conffile_perm` judges the config file against that user, so a gate
@@ -206,7 +206,7 @@ contract.
   the `RadvdConfigError` pattern carries those lines.
 - **Logs are structured `key=value` to stderr.** Match the existing
   `level=... msg="..."` shape so `docker logs` output stays greppable. One
-  deliberate exception: `on_hup`'s refusal arm republishes radvd's captured
+  deliberate exception: `request_reload`'s refusal arm republishes radvd's captured
   stderr verbatim and unstructured, because the README's `RadvdConfigError` rule
   matches those bytes and `scripts/smoke.sh` asserts it. Do not route that
   through `sanitize_log_value`.

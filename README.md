@@ -241,9 +241,8 @@ groups:
             `SIGHUP reload refused` line — for all but one arm a rejected edit
             to fix, not an outage. The remaining arm reports that PID 1 could
             not confirm the TERM reached radvd; its `pid` field says which
-            state it was in (empty: radvd had not started yet), and the `KILL`
-            bullet under [Capabilities](#capabilities) covers the capability
-            case. The
+            state it was in, and the `KILL` bullet under
+            [Capabilities](#capabilities) covers the capability case. The
             pattern also matches the entrypoint's own fatal startup errors (an
             invalid RADVD_DEBUG_LEVEL, an unreadable radvd.conf, a radvd.conf
             that is not a regular file, a failed /run/radvd creation), which

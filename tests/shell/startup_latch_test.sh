@@ -11,6 +11,9 @@ new_workdir >/dev/null
 load_function start_radvd
 load_function on_hup
 load_function on_term
+load_function request_reload
+load_function request_shutdown
+load_function drain_signals
 # Keep the trap range anchored to the registered signals.
 TRAPS=$(extract_range '^trap on_hup HUP$' '^trap on_term' "$WORK/traps.sh") || exit 1
 
@@ -24,6 +27,8 @@ CONF=/dev/null
 # Extracted start_radvd needs the top-level value under set -u.
 RADVD_DEBUG_LEVEL=0
 sig_seen=0
+hup_pending=0
+term_pending=0
 SIGNALS="$WORK/signals"
 ARGV="$WORK/argv"
 LOG="$WORK/log"
@@ -84,37 +89,30 @@ rc=$?
   && ok "a shutdown latched while no child existed refuses the start: exit 0, no fork, no delivery" \
   || no "shutdown gate" "rc=$rc, argv=[$(tr '\n' ' ' <"$ARGV")], signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
 
-# Extract the post-fork shutdown block by its stable source anchors.
-RESIDUE=$(extract_range '^  # A TERM landing between the gate' '^  fi$' "$WORK/residue.sh") || exit 1
-out=$(bash -c '
-  set -u
-  shutdown=1
-  signal_failed=0
-  sleep 3 &
-  radvd_pid=$!
-  . "$1"
-  wait "$radvd_pid"
-  printf "signal_failed=%s wait_rc=%s\n" "$signal_failed" "$?"
-' _ "$RESIDUE" 2>"$LOG")
-[ "$out" = "signal_failed=0 wait_rc=143" ] && ! grep -Fq 'failed to deliver TERM' "$LOG" \
-  && ok "a shutdown latched after the gate is still delivered to the fresh pid" \
-  || no "residue delivery" "out: $out, log: $(cat "$LOG")"
+# request_shutdown delivers a latched stop to the assigned child.
+signal_failed=0
+sleep 3 &
+radvd_pid=$!
+: >"$SIGNALS"
+request_shutdown 2>"$LOG"
+wait "$radvd_pid"
+rc=$?
+[ "$signal_failed" -eq 0 ] && signalled "$radvd_pid" \
+  && ! command kill -0 "$radvd_pid" 2>/dev/null \
+  && ! grep -Fq 'failed to deliver TERM' "$LOG" \
+  && ok "a shutdown request is delivered to the assigned child" \
+  || no "shutdown delivery" "signal_failed=$signal_failed, wait_rc=$rc, signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
 
-# A refused post-fork TERM must set signal_failed for the supervisor.
-out=$(bash -c '
-  set -u
-  shutdown=1
-  signal_failed=0
-  sleep 0.1 &
-  radvd_pid=$!
-  wait "$radvd_pid"
-  . "$1"
-  printf "signal_failed=%s\n" "$signal_failed"
-' _ "$RESIDUE" 2>"$LOG")
-[ "$out" = "signal_failed=1" ] \
+# A refused TERM must set signal_failed for the supervisor.
+signal_failed=0
+sleep 0.1 &
+radvd_pid=$!
+wait "$radvd_pid"
+request_shutdown 2>"$LOG"
+[ "$signal_failed" -eq 1 ] \
   && grep -Fq 'msg="failed to deliver TERM to radvd; the container may lack CAP_KILL, or the child was already reaped"' "$LOG" \
-  && ok "a refused residue delivery arms signal_failed and reports it" \
-  || no "residue refusal" "out: $out, log: $(cat "$LOG")"
+  && ok "a refused shutdown request arms signal_failed and reports it" \
+  || no "shutdown refusal" "signal_failed=$signal_failed, log: $(cat "$LOG")"
 
 # --- 3. a latched reload is NOT an operand of the shutdown gate -------------------
 # `reload` is armed only after a confirmed TERM to an assigned pid, so it cannot
@@ -128,10 +126,9 @@ sleep 0.2
   || no "reload latch" "radvd_pid='$radvd_pid', signals=[$(tr '\n' ' ' <"$SIGNALS")]"
 reap "$radvd_pid"
 
-# on_hup refuses any config that is not a regular file and config-tests the rest, so
-# every case from here down needs a real regular-file config and a real `radvd` on
-# PATH: `timeout 5 radvd --configtest` execs, and the recording shell function above is
-# invisible to that exec.
+# request_reload refuses any config that is not a regular file and config-tests the
+# rest, so every case from here down needs a real regular-file config and an
+# executable `radvd` on PATH; the recording shell function is invisible to timeout.
 HUPDIR=$(mktemp -d "$WORK/hup.XXXXXX")
 mkdir "$HUPDIR/bin"
 CONF="$HUPDIR/radvd.conf"
@@ -143,8 +140,8 @@ PATH="$HUPDIR/bin:$PATH"
 printf 'interface eth0 { AdvSendAdvert on; };\n' >"$CONF"
 stub_radvd 0
 # Asserted before it is relied on: a missing fixture produces the same refusal as a
-# correctly refusing on_hup, which would turn the control below green for the wrong
-# reason and take case 5 with it.
+# correctly refusing request_reload, which would turn the control below green for the
+# wrong reason and take case 5 with it.
 [ -f "$CONF" ] && [ -x "$HUPDIR/bin/radvd" ] \
   && ok "the reload cases have a regular-file config and a radvd stub on PATH" \
   || no "hup fixture" "CONF=$CONF, stub=$HUPDIR/bin/radvd"
@@ -160,20 +157,30 @@ on_term 2>"$LOG"
   && ok "TERM with no assigned child latches shutdown without reporting a delivery failure" \
   || no "empty-pid TERM" "shutdown=$shutdown, signal_failed=$signal_failed, sig_seen=$sig_seen, signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
 
-# A HUP with nothing to signal cannot observe a delivery, so it is REFUSED rather
-# than latched: radvd has not read the config yet, and arming the reload flag would
-# promise the loop an exit that is never coming. The trap entry is still recorded.
+# A HUP with no assigned child is latched without claiming a delivery failure.
 radvd_pid=""
-shutdown=0 reload=0 signal_failed=0 sig_seen=0
+shutdown=0 reload=0 signal_failed=0 sig_seen=0 hup_pending=0
 : >"$SIGNALS"
 on_hup 2>"$LOG"
-[ "$reload" -eq 0 ] && [ "$signal_failed" -eq 0 ] && [ "$sig_seen" -eq 1 ] && [ ! -s "$SIGNALS" ] \
-  && grep -Fq 'msg="SIGHUP reload refused: TERM delivery to radvd could not be confirmed' "$LOG" \
-  && ok "HUP with no assigned child is refused, not latched, and still records the trap entry" \
-  || no "empty-pid HUP" "reload=$reload, signal_failed=$signal_failed, sig_seen=$sig_seen, signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
+[ "$reload" -eq 0 ] && [ "$signal_failed" -eq 0 ] && [ "$sig_seen" -eq 1 ] \
+  && [ "$hup_pending" -eq 1 ] && [ ! -s "$SIGNALS" ] \
+  && ! grep -Fq 'SIGHUP reload refused' "$LOG" \
+  && ok "HUP with no assigned child latches the reload request without signalling or refusing it" \
+  || no "empty-pid HUP latch" "reload=$reload, signal_failed=$signal_failed, sig_seen=$sig_seen, hup_pending=$hup_pending, signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
+
+shutdown=0 reload=0 hup_pending=1
+start
+sleep 0.2
+[ "$hup_pending" -eq 0 ] && [ -n "$radvd_pid" ] && [ ! -s "$SIGNALS" ] \
+  && command kill -0 "$radvd_pid" 2>/dev/null \
+  && grep -Fq 'msg="SIGHUP received before radvd started; the daemon reads the config as it starts, so no reload is needed"' "$LOG" \
+  && grep -Fq 'msg="starting radvd"' "$LOG" \
+  && ok "start_radvd consumes a pre-pid HUP before starting the child" \
+  || no "pre-pid HUP consumption" "hup_pending=$hup_pending, radvd_pid=$radvd_pid, signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
+reap "$radvd_pid"
 
 # --- 4. control: a HUP outside a shutdown does reload -----------------------------
-# Without it, case 5 below would pass against an on_hup that ignores every HUP.
+# Without it, case 5 below would pass against request_reload ignoring every HUP.
 # The throwaway child stands in for radvd for the same reason the cases above use
 # one: the recorder FORWARDS the signal, and radvd_pid=$$ would deliver the TERM to
 # the process running this file, aborting it before report.
@@ -181,7 +188,7 @@ sleep 20 &
 radvd_pid=$!
 shutdown=0 reload=0
 : >"$SIGNALS"
-on_hup 2>"$LOG"
+request_reload 2>"$LOG"
 [ "$reload" -eq 1 ] && signalled "$radvd_pid" \
   && grep -Fq 'msg="SIGHUP received; restarting radvd to reload config"' "$LOG" \
   && ok "a HUP outside a shutdown sets the reload flag and TERMs the daemon" \
@@ -203,7 +210,7 @@ sleep 20 &
 radvd_pid=$!
 shutdown=1 reload=0
 : >"$SIGNALS"
-on_hup 2>"$LOG"
+request_reload 2>"$LOG"
 [ ! -s "$ARGV_HUP" ] && [ ! -s "$SIGNALS" ] && [ "$reload" -eq 0 ] \
   && grep -Fq 'msg="SIGHUP received during shutdown; reload ignored"' "$LOG" \
   && command kill -0 "$radvd_pid" 2>/dev/null \
@@ -211,8 +218,8 @@ on_hup 2>"$LOG"
   || no "hup during shutdown" "reload=$reload, argv=[$(tr '\n' ' ' <"$ARGV_HUP")], signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
 reap "$radvd_pid"
 
-# --- 5b. a TERM inside configtest is re-read before reload is armed ---------------
-# The recorded argv distinguishes this guard from case 5's entry guard.
+# --- 5b. a TERM inside configtest is drained after the check returns ---------------
+# The recorded signal proves request_shutdown serves the latch set mid-check.
 : >"$ARGV_HUP"
 printf '%s\n' \
   '#!/bin/sh' \
@@ -220,18 +227,23 @@ printf '%s\n' \
   'kill -TERM "$HUP_SHELL_PID"' \
   'exit 0' >"$HUPDIR/bin/radvd"
 chmod +x "$HUPDIR/bin/radvd"
+: >"$SIGNALS"
 (
   HUP_SHELL_PID=$BASHPID
   export HUP_SHELL_PID
   trap on_term TERM
-  radvd_pid="" shutdown=0 reload=0 signal_failed=0 sig_seen=0
-  on_hup 2>"$LOG"
+  sleep 20 &
+  radvd_pid=$!
+  shutdown=0 reload=0 signal_failed=0 sig_seen=0 hup_pending=1 term_pending=0
+  drain_signals 2>"$LOG"
+  wait "$radvd_pid"
 )
 grep -Fq 'radvd stub: --configtest' "$ARGV_HUP" \
   && grep -Fq 'msg="SIGHUP received during shutdown; reload ignored"' "$LOG" \
   && ! grep -Fq 'msg="SIGHUP received; restarting radvd to reload config"' "$LOG" \
-  && ok "a TERM landing inside the bounded config check is re-read: the reload is refused after the check ran" \
-  || no "latch re-read after configtest" "argv=[$(tr '\n' ' ' <"$ARGV_HUP")], log: $(cat "$LOG")"
+  && signalled "$(sed -n 's/^-TERM //p' "$SIGNALS" | head -n 1)" \
+  && ok "a TERM landing inside the bounded config check is drained and delivered after the check returns" \
+  || no "latch drain after configtest" "argv=[$(tr '\n' ' ' <"$ARGV_HUP")], signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
 
 # --- 6. a SIGHUP whose config check fails is REFUSED, and radvd keeps serving -----
 # The reload stops radvd before its replacement reads the config, so accepting a
@@ -239,7 +251,7 @@ grep -Fq 'radvd stub: --configtest' "$ARGV_HUP" \
 # redundant: the refusal (no flag, no signal, child untouched), and the
 # absent-config arm an ordinary editing accident takes (an editor's write-rename
 # window, a mount hiccup) where there is no file for radvd to reject. Case 4 is
-# the control that keeps both honest against an on_hup that refuses every HUP;
+# the control that keeps both honest against request_reload refusing every HUP;
 # recovery after a refusal — the operator fixes the config and reloads again — is
 # pinned against a real container by scripts/smoke.sh's malformed-reload scenario.
 printf 'interface eth0 { AdvSendAdvert on; };\n' >"$CONF"
@@ -248,8 +260,8 @@ sleep 20 &
 radvd_pid=$!
 shutdown=0 reload=0 sig_seen=0
 : >"$SIGNALS"
-on_hup 2>"$LOG"
-[ "$reload" -eq 0 ] && [ ! -s "$SIGNALS" ] && [ "$sig_seen" -eq 1 ] \
+request_reload 2>"$LOG"
+[ "$reload" -eq 0 ] && [ ! -s "$SIGNALS" ] \
   && command kill -0 "$radvd_pid" 2>/dev/null \
   && grep -Fq 'msg="SIGHUP reload refused: radvd rejected the mounted config"' "$LOG" \
   && grep -Eq 'radvd stub: --configtest --config=.* --username=radvd( |$)' "$LOG" \
@@ -269,8 +281,8 @@ for hup_timeout_rc in 124 143; do
   radvd_pid=$!
   shutdown=0 reload=0 sig_seen=0
   : >"$SIGNALS"
-  on_hup 2>"$LOG"
-  [ "$reload" -eq 0 ] && [ ! -s "$SIGNALS" ] && [ "$sig_seen" -eq 1 ] \
+  request_reload 2>"$LOG"
+  [ "$reload" -eq 0 ] && [ ! -s "$SIGNALS" ] \
     && command kill -0 "$radvd_pid" 2>/dev/null \
     && grep -Fq 'msg="SIGHUP reload refused: the config check did not finish within 5s"' "$LOG" \
     && ! grep -Fq 'radvd stub: --configtest ' "$LOG" \
@@ -285,7 +297,7 @@ sleep 20 &
 radvd_pid=$!
 shutdown=0 reload=0 sig_seen=0
 : >"$SIGNALS"
-on_hup 2>"$LOG"
+request_reload 2>"$LOG"
 [ "$reload" -eq 0 ] && [ ! -s "$SIGNALS" ] \
   && command kill -0 "$radvd_pid" 2>/dev/null \
   && grep -Fq 'radvd.conf is absent' "$LOG" \
@@ -306,7 +318,7 @@ sleep 20 &
 radvd_pid=$!
 shutdown=0 reload=0 sig_seen=0
 : >"$SIGNALS"
-on_hup 2>"$LOG"
+request_reload 2>"$LOG"
 [ "$reload" -eq 0 ] && [ ! -s "$SIGNALS" ] \
   && command kill -0 "$radvd_pid" 2>/dev/null \
   && grep -Fq 'reports the config file permissions insecure' "$LOG" \
@@ -320,7 +332,7 @@ sleep 20 &
 radvd_pid=$!
 shutdown=0 reload=0 sig_seen=0
 : >"$SIGNALS"
-on_hup 2>"$LOG"
+request_reload 2>"$LOG"
 [ "$reload" -eq 1 ] && signalled "$radvd_pid" \
   && ! grep -Fq 'SIGHUP reload refused' "$LOG" \
   && ok "at debug level 1 the same warning follows radvd's warn-and-continue path" \
@@ -358,12 +370,11 @@ registered=$(bash -c '
 
 # --- 8. the shutdown arm reports a refused TERM as unconfirmable ------------------
 # The arm lives inline in the supervisor loop, so it is extracted as a RANGE anchored
-# on this comment line: `if [ "$shutdown" -eq 1 ]; then` also matches on_hup's guard
-# and a sed range restarts, so that spelling emits both blocks and the subject never
-# runs. Nothing else reads signal_failed and both arms exit 0, so an inverted branch
-# changes only which line is logged; scripts/smoke.sh scenario 10 is the
-# container-level witness (hardened profile minus KILL) and these cases pin the arm
-# without a container.
+# on this comment line: `if [ "$shutdown" -eq 1 ]; then` also matches request_reload's
+# guard, and a sed range restarts, so that spelling emits both blocks and the subject
+# never runs. Both arms exit 0, so an inverted branch changes only which line is
+# logged; scripts/smoke.sh scenario 10 is the container-level witness (hardened
+# profile minus KILL), and these cases pin the arm without a container.
 ARM=$(extract_range '^      # Exit 0 either way' '^      exit 0$' "$WORK/shutdown_arm.sh") || exit 1
 WARN='msg="the TERM could not be delivered to radvd; a graceful stop cannot be confirmed"'
 INFO='msg="radvd stopped on shutdown signal (SIGTERM/SIGINT)"'
@@ -402,9 +413,9 @@ grep -Fq 'a graceful stop cannot be confirmed' "$REPO_ROOT/README.md" \
 # --- 11. a latched shutdown whose TERM was refused does not wait for the child -----
 # The skip lives inline in the loop, so it is extracted as a self-balanced RANGE. The
 # `&&` is what makes the start anchor unique: `if [ "$shutdown" -eq 1 ]` alone also
-# matches on_hup's guard and the arm below, and a sed range that restarts emits both
-# blocks. The block's own `fi` is the first at that indent, and it holds no nested `if`.
-# Its whole content is a control-flow decision, so the oracle is whether the block
+# matches request_reload's guard and the arm below, and a sed range that restarts
+# emits both blocks. The block's own `fi` is the first at that indent, and it holds
+# no nested `if`. Its whole content is a control-flow decision, so the oracle is
 # returns while a live child is still running.
 # The anchors are the entrypoint's own literal text, `$` included, so the single quotes
 # are required exactly as case 7's are.

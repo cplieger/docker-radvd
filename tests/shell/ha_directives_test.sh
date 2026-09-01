@@ -59,9 +59,6 @@ run_check
   || no "happy path silent" "rc=$_rc, log: $(cat "$LOG")"
 
 # --- 2. the whole grammar on ONE line is still recognised --------------------------
-# radvd's grammar is whitespace-insensitive and the gates promise a statement
-# boundary (start, ;, { or }) is enough. If the boundary alternation broke, this
-# valid one-liner would draw two false missing-directive warnings.
 setup
 printf 'interface eth0 { IgnoreIfMissing on; AdvSendAdvert on; AdvRASrcAddress { febf::1; }; };\n' >"$CONF"
 run_check
