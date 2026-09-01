@@ -189,22 +189,49 @@ on_hup 2>"$LOG"
 reap "$radvd_pid"
 
 # --- 5. a HUP that lands DURING a shutdown is ignored -------------------------------
-# Both handlers TERM the same child, so without the early return the late HUP sets
-# reload=1 and the supervisor loop restarts the daemon on_term is stopping — the
-# container comes back up out of a `docker stop`. Three assertions, none redundant:
-# the early return (nothing signalled), the flag order (reload untouched), and the
-# report (the operator sees why the reload did not happen).
+# The argv witness distinguishes the entry guard from the post-check re-read; both
+# emit the same report and leave reload untouched.
+ARGV_HUP="$HUPDIR/hup-argv"
+export ARGV_HUP
+: >"$ARGV_HUP"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'printf "%s\n" "radvd stub: $*" >"$ARGV_HUP"' \
+  'exit 0' >"$HUPDIR/bin/radvd"
+chmod +x "$HUPDIR/bin/radvd"
 sleep 20 &
 radvd_pid=$!
 shutdown=1 reload=0
 : >"$SIGNALS"
 on_hup 2>"$LOG"
-[ ! -s "$SIGNALS" ] && [ "$reload" -eq 0 ] \
+[ ! -s "$ARGV_HUP" ] && [ ! -s "$SIGNALS" ] && [ "$reload" -eq 0 ] \
   && grep -Fq 'msg="SIGHUP received during shutdown; reload ignored"' "$LOG" \
   && command kill -0 "$radvd_pid" 2>/dev/null \
-  && ok "a HUP during shutdown is logged and ignored: no signal, no reload flag, child untouched" \
-  || no "hup during shutdown" "reload=$reload, signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
+  && ok "a HUP during shutdown is logged and ignored: no config check, no signal, no reload flag, child untouched" \
+  || no "hup during shutdown" "reload=$reload, argv=[$(tr '\n' ' ' <"$ARGV_HUP")], signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
 reap "$radvd_pid"
+
+# --- 5b. a TERM inside configtest is re-read before reload is armed ---------------
+# The recorded argv distinguishes this guard from case 5's entry guard.
+: >"$ARGV_HUP"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'printf "%s\n" "radvd stub: $*" >"$ARGV_HUP"' \
+  'kill -TERM "$HUP_SHELL_PID"' \
+  'exit 0' >"$HUPDIR/bin/radvd"
+chmod +x "$HUPDIR/bin/radvd"
+(
+  HUP_SHELL_PID=$BASHPID
+  export HUP_SHELL_PID
+  trap on_term TERM
+  radvd_pid="" shutdown=0 reload=0 signal_failed=0 sig_seen=0
+  on_hup 2>"$LOG"
+)
+grep -Fq 'radvd stub: --configtest' "$ARGV_HUP" \
+  && grep -Fq 'msg="SIGHUP received during shutdown; reload ignored"' "$LOG" \
+  && ! grep -Fq 'msg="SIGHUP received; restarting radvd to reload config"' "$LOG" \
+  && ok "a TERM landing inside the bounded config check is re-read: the reload is refused after the check ran" \
+  || no "latch re-read after configtest" "argv=[$(tr '\n' ' ' <"$ARGV_HUP")], log: $(cat "$LOG")"
 
 # --- 6. a SIGHUP whose config check fails is REFUSED, and radvd keeps serving -----
 # The reload stops radvd before its replacement reads the config, so accepting a

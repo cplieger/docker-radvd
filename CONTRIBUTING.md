@@ -77,14 +77,18 @@ contract.
   the line-wide backslash mask makes a bare `interface a\b` report
   `iface="a@@"`. Read the block names in the file: the candidates for a
   colliding name are the blocks whose own names mask to the spelling reported.
-  What is left is
-  tokenized with `{`, `}` and `;` as tokens of their own, so a name is only a
-  directive on a statement boundary (`MyAdvSendAdvert on` is not one), a
-  directive whose value sits on the next line is still one statement (radvd's
-  lexer discards newlines), and all three `AdvRASrcAddress` spellings —
-  `AdvRASrcAddress {`, the no-space `AdvRASrcAddress{`, and a bare
-  `AdvRASrcAddress` at end-of-line with the brace on the next — need no special
-  case. The scan reads the `radvd.conf` the daemon itself is given with `--config`.
+  Each entered block emits zero, one or two warning records. If it emits two,
+  `no_sendadvert` comes before `bad_src` for the same `iface=`. A record count is
+  not a block count: of the four possible adjacent record pairs, only
+  `no_sendadvert` followed by `bad_src` can come from one block. What is left is
+  tokenized with `{`, `}` and `;` as tokens of their own. A complete unquoted
+  token directly inside the block is credited when it equals the directive name.
+  Thus `MyAdvSendAdvert on` does not satisfy the gate, while
+  `AdvRASrcAddress{fe80::1;}` needs no special case. A directive whose value sits
+  on the next line is still one statement (radvd's lexer discards newlines), and
+  all three `AdvRASrcAddress` spellings — `AdvRASrcAddress {`, the no-space
+  `AdvRASrcAddress{`, and a bare `AdvRASrcAddress` at end-of-line with the brace
+  on the next — need no special case. The scan reads the `radvd.conf` the daemon itself is given with `--config`.
   Keep those properties if you touch the walk, and check them by extraction and
   diff rather than by eye. Pull the two awk stages out the way `tests/shell/`
   already extracts functions. Run your candidate and the shipped version over

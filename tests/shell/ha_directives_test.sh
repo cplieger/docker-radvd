@@ -40,6 +40,14 @@ warn_count() {
   grep -c 'level=warn' "$LOG"
 }
 
+# Match the specific alert rule so drift on either side fails.
+UNVERIFIED_RULE=$(sed -n '/alert: RadvdAdvertisementsUnverified/,/^        for:/p' "$REPO_ROOT/README.md" \
+  | sed -n 's/^[[:space:]]*|~ `\(.*\)` \[[0-9]\+[a-z]\]$/\1/p')
+
+alert_matched() {
+  [ -n "$UNVERIFIED_RULE" ] && grep -Eq "$UNVERIFIED_RULE" "$LOG"
+}
+
 # --- 1. the happy path is SILENT --------------------------------------------------
 # Without this control, every warning assertion below could pass against a
 # validator that warns on everything.
@@ -93,9 +101,10 @@ run_check
   && ok "a CRLF config with a correct link-local source is silent" \
   || no "CRLF handling" "log: $(cat "$LOG")"
 
-# --- 5. a directive NAME must sit on a statement boundary -------------------------
-# "MyAdvSendAdvert on" contains the directive as a substring; the statement
-# boundary is what keeps it from satisfying the gate.
+# --- 5. a directive NAME must be a complete token, not a substring ----------------
+# The walk compares whole tokens at depth 1, so `MyAdvSendAdvert` is not
+# `AdvSendAdvert` and never sets `pend`. There is no statement-start state: an exact
+# directive token counts wherever it sits directly inside the block.
 setup
 printf 'interface eth0 {\n  MyAdvSendAdvert on;\n  IgnoreIfMissing on;\n  AdvRASrcAddress { fe80::1; };\n};\n' >"$CONF"
 run_check
@@ -103,11 +112,14 @@ logged 'msg="no enabled AdvSendAdvert on directive found' \
   && ok "a substring like MyAdvSendAdvert does not satisfy the AdvSendAdvert gate" \
   || no "boundary anchor" "log: $(cat "$LOG")"
 
+alert_matched \
+  && ok "the missing-AdvSendAdvert warning matches the README's RadvdAdvertisementsUnverified pattern" \
+  || no "alert contract (missing-AdvSendAdvert)" "rule='$UNVERIFIED_RULE', log: $(cat "$LOG")"
+
 # --- 6. a commented-out AdvSendAdvert does not count ------------------------------
-# The bait carries a statement boundary INSIDE the comment (`; AdvSend...`): without
-# comment stripping that `;` opens a fresh statement and the gate reads a fully
-# commented line as configured. A bare `# AdvSendAdvert on` would be rejected by
-# the statement boundary alone and prove nothing about the strip.
+# Without comment stripping, every token on the line is walked, so the bait would
+# credit the directive from a comment. The `;` is not load-bearing; it also makes the
+# case survive a strip that handles only a line starting with `#`.
 setup
 printf 'interface eth0 {\n  # retired 2024; AdvSendAdvert on;\n  IgnoreIfMissing on;\n  AdvRASrcAddress { fe80::1; };\n};\n' >"$CONF"
 run_check
@@ -122,6 +134,10 @@ run_check
 logged 'msg="AdvRASrcAddress is set to a non-link-local address' && logged 'fd00::78' \
   && ok "a ULA AdvRASrcAddress warns as non-link-local, naming the address" \
   || no "ULA source warned" "log: $(cat "$LOG")"
+
+alert_matched \
+  && ok "the non-link-local source warning matches the README's RadvdAdvertisementsUnverified pattern" \
+  || no "alert contract (non-link-local source)" "rule='$UNVERIFIED_RULE', log: $(cat "$LOG")"
 
 setup
 printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvRASrcAddress { fec0::1; };\n};\n' >"$CONF"
@@ -188,6 +204,10 @@ run_check
   && ! logged 'msg="radvd.conf is not a regular file' \
   && ok "an absent radvd.conf degrades instead of being refused as non-regular" \
   || no "absent config degraded" "rc=$_rc, log: $(cat "$LOG")"
+
+alert_matched \
+  && ok "the degraded scan warning matches the README's RadvdAdvertisementsUnverified pattern" \
+  || no "alert contract (degraded scan)" "rule='$UNVERIFIED_RULE', log: $(cat "$LOG")"
 
 # The unreadable-file arm of the same guard reaches the READ, not the -f probe —
 # but root reads a chmod-000 file, so the branch cannot be provoked as root and
@@ -279,6 +299,18 @@ run_check
   && ! grep -q 'iface="L"' "$LOG" \
   && ok "an L-prefixed quoted interface name remains one complete radvd STRING token" \
   || no "L-prefixed quoted interface name" "lines=$(wc -l <"$LOG"), log: $(cat "$LOG")"
+
+# A backslash-escaped quote is data inside radvd's STRING token. The pre-mask
+# must consume it before quote splitting so later interface blocks stay visible.
+setup
+printf '%s\n' 'interface "a\"b" {' '};' 'interface eth1 {' '};' >"$CONF"
+run_check
+[ "$_rc" -eq 0 ] \
+  && [ "$(grep -c 'no enabled AdvSendAdvert on directive found' "$LOG")" -eq 2 ] \
+  && grep -Fq 'iface="?a@@b?"' "$LOG" \
+  && grep -Fq 'iface="eth1"' "$LOG" \
+  && ok "a backslash-escaped quote keeps the quote split aligned through the sibling interface" \
+  || no "escaped quote alignment" "rc=$_rc, log: $(cat "$LOG")"
 
 # Three witnesses to one boundary: a quoted name keeps the bytes radvd's scanner
 # keeps until sanitize_log_value transforms them at the log edge. The mask sentinel

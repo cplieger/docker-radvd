@@ -52,7 +52,7 @@ on_hup() {
     return
   fi
   hup_rc=0
-  hup_ct=$(timeout 5 radvd --configtest --config="$CONF" --username=radvd 2>&1) || hup_rc=$?
+  hup_ct=$({ timeout 5 radvd --configtest --config="$CONF" --username=radvd 2>&1; } 2>/dev/null) || hup_rc=$?
   if [ "$hup_rc" -ne 0 ]; then
     # Neither timeout call site passes -k, so an elapsed budget is 124 (GNU) or
     # 143 (BusyBox, the shipped one) and 137 is unreachable at both.
@@ -74,6 +74,14 @@ on_hup() {
     && printf '%s\n' "$hup_ct" | grep -q 'Insecure file permissions'; then
     printf 'level=error msg="SIGHUP reload refused: radvd reports the config file permissions insecure and would exit at debug level 0" path="%s"\n' "$CONF" >&2
     printf '%s\n' "$hup_ct" >&2
+    return
+  fi
+  # Re-read after the bounded config check: a TERM landing inside it runs on_term at
+  # the command-substitution boundary, so arming a reload here would announce a
+  # restart of the daemon on_term is stopping, or report a delivery failure for a
+  # TERM on_term already made.
+  if [ "$shutdown" -eq 1 ]; then
+    printf 'level=info msg="SIGHUP received during shutdown; reload ignored"\n' >&2
     return
   fi
   # reload=1 promises the loop that an exit is coming, so only an observed
@@ -181,8 +189,8 @@ check_config_directives() {
       if (instr) { printf "%s@", out } else { print out }
     }
   ')
-  # Braces and `;` are padded into their own tokens, so a directive name counts only
-  # on a statement boundary and `AdvRASrcAddress{fe80::1;}` needs no special case. A
+  # Quoted runs are masked, and directive names must be complete unquoted tokens.
+  # Padding braces and `;` lets no-space forms tokenize without a special case. A
   # directive is credited to the block it sits DIRECTLY inside, which is why depth is
   # compared rather than merely non-zero.
   # NO LINE OF THIS AWK PROGRAM MAY CLOSE IN COLUMN 0: tests/shell/lib.sh's

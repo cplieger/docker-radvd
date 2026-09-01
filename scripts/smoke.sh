@@ -514,7 +514,8 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
 # --- 11. a TERM latched during preflight refuses the start and exits 0 -------
 (
   C8="radvd-smoke-startup-latch-$$"
-  slow_cat="$TMPDIR_FIXTURE/slow-cat"
+  shim_dir=$(mktemp -d)
+  slow_cat="$shim_dir/slow-cat"
   # shellcheck disable=SC2317,SC2329  # invoked indirectly via trap
   cleanup_startup_latch() {
     code=$?
@@ -523,7 +524,7 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
       docker logs "$C8" 2>&1 | tail -25 >&2 || true
     fi
     docker rm -f "$C8" >/dev/null 2>&1 || true
-    rm -f "$slow_cat"
+    rm -rf "$shim_dir"
   }
   trap cleanup_startup_latch EXIT
 
@@ -572,6 +573,53 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
   [ "$job_status_after" -eq "$job_status_before" ] \
     || fail "startup-latch TERM leaked a bare BusyBox ash job-status line into docker logs"
   printf '[smoke] PASS  startup latch: a preflight TERM refused the start, exited 0, kept structured logs in order\n'
+)
+
+# A pre-pid HUP leaves sig_seen set until the first child exits. Preserve that
+# child's exact status when the loop consumes the latch and waits again.
+(
+  C9="radvd-smoke-pre-pid-hup-$$"
+  scenario_dir=$(mktemp -d)
+  # shellcheck disable=SC2317,SC2329  # invoked indirectly via trap
+  cleanup_pre_pid_hup() {
+    code=$?
+    if [ "$code" -ne 0 ] && docker inspect "$C9" >/dev/null 2>&1; then
+      printf -- '--- %s logs (tail) ---\n' "$C9" >&2
+      docker logs "$C9" 2>&1 | tail -25 >&2 || true
+    fi
+    docker rm -f "$C9" >/dev/null 2>&1 || true
+    rm -rf "$scenario_dir"
+  }
+  trap cleanup_pre_pid_hup EXIT
+
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'if [ ! -e /tmp/pre-pid-hup-sent ]; then' \
+    '  : >/tmp/pre-pid-hup-sent' \
+    '  kill -HUP 1' \
+    'fi' \
+    'exec /bin/cat "$@"' >"$scenario_dir/cat"
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'case " $* " in' \
+    '  *" --configtest "*) exit 0 ;;' \
+    '  *) exit 3 ;;' \
+    'esac' >"$scenario_dir/radvd"
+  chmod +x "$scenario_dir/cat" "$scenario_dir/radvd"
+
+  docker create --name "$C9" --network none --cap-add NET_RAW \
+    -v "$scenario_dir/cat:/usr/local/bin/cat:ro" \
+    -v "$scenario_dir/radvd:/usr/sbin/radvd:ro" "$IMAGE" >/dev/null
+  docker cp "$TMPDIR_FIXTURE" "$C9:/etc/radvd" >/dev/null
+  docker start "$C9" >/dev/null
+  wait_for_log "$C9" 'SIGHUP reload refused: TERM delivery to radvd could not be confirmed' \
+    "the pre-pid HUP was not refused"
+  wait_for_log "$C9" 'pid=""' "the HUP did not land before radvd_pid was assigned"
+  wait_until_stopped "$C9" "the daemon stub exit was not propagated after the pre-pid HUP"
+  ec=$(docker inspect -f '{{.State.ExitCode}}' "$C9")
+  [ "$ec" = "3" ] || fail "pre-pid HUP propagated exit code $ec, want 3"
+  wait_for_log "$C9" 'status="3"' "the propagation log lost the child status after the pre-pid HUP"
+  printf '[smoke] PASS  pre-pid HUP status: the later radvd exit remained 3\n'
 )
 
 printf '[smoke] OK — all signal-contract assertions passed for %s\n' "$IMAGE"

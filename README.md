@@ -16,7 +16,7 @@ Run [radvd](https://radvd.litech.org/) (the Linux IPv6 Router Advertisement Daem
 
 This image is a minimal Alpine wrapper around upstream `radvd`, compiled from the pinned release tarball, plus a small POSIX entrypoint that:
 
-- **Validates the mounted `radvd.conf`** and warns, per interface block, about two misconfigurations: a block that enables no `AdvSendAdvert on` (radvd defaults it to off, so it runs and emits nothing), and an `AdvRASrcAddress` set to a non-link-local (global/ULA) address that RFC 4861 requires hosts to silently discard. A config radvd rejects outright, such as one defining no interface block, is left to radvd: radvd logs its own error and exits, and the entrypoint reports that exit. One shape is refused rather than warned about, at startup and on reload alike: a `radvd.conf` that is not a regular file, which radvd itself cannot consume, exits 1
+- **Validates the mounted `radvd.conf`** and warns, per interface block, about two misconfigurations: a block that enables no `AdvSendAdvert on` (radvd defaults it to off, so it runs and emits nothing), and an `AdvRASrcAddress` set to a non-link-local (global/ULA) address that RFC 4861 requires hosts to silently discard. A config radvd rejects outright, such as one defining no interface block, is left to radvd: radvd logs its own error and exits, and the entrypoint reports that exit. Two shapes are refused rather than warned about, both exiting 1: a `radvd.conf` that is not a regular file, which radvd itself cannot consume (at startup and on reload alike), and one that exists but cannot be read (at startup).
 - **Creates `/run/radvd`** (radvd refuses to start without it)
 - **Drops privileges**: radvd opens its raw socket as root, then runs as the unprivileged `radvd` user (`--username=radvd`) for the rest of its lifetime
 - **Supervises radvd**: turns `SIGHUP` into a clean config reload, refusing the reload and keeping the running daemon when the config would not start, forwards `SIGTERM` for graceful shutdown — a stop that arrives before radvd has started wins immediately, exiting 0 without starting it — and propagates an unexpected radvd exit to Docker's restart policy (see [Reloading](#reloading-configuration) for what `docker kill` does to that policy)
@@ -26,7 +26,7 @@ This image is a minimal Alpine wrapper around upstream `radvd`, compiled from th
 
 - **Generic upstream-only**: no env-var-to-config translation, no bundled prefixes; you supply your own `radvd.conf`. The one env var, `RADVD_DEBUG_LEVEL`, tunes radvd's log verbosity only (see [Configuration reference](#configuration-reference))
 - **Bind-mount only**: single read-only `:ro` mount of `/etc/radvd`
-- **Entrypoint warns on HA misconfig**: warn-only apart from a `radvd.conf` that is not a regular file, since single-node operators legitimately deploy without HA (see [High-availability with keepalived](#high-availability-with-keepalived))
+- **Entrypoint warns on HA misconfig**: warn-only apart from a `radvd.conf` that is not a regular file or cannot be read, since single-node operators legitimately deploy without HA (see [High-availability with keepalived](#high-availability-with-keepalived))
 - **Healthcheck**: `pidof radvd` (CMD form, no shell needed)
 - **Multi-arch**: `linux/amd64` and `linux/arm64`
 <!-- hub-overview END -->

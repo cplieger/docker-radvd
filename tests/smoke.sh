@@ -8,18 +8,18 @@ fail=0
 log() { printf '%s\n' "$*"; }     # progress + final verdict -> stdout
 err() { printf '%s\n' "$*" >&2; } # failures + captured output -> stderr
 
-# 1. configtest (-c) accepts a valid config. This also proves the binary runs
+# 1. configtest accepts a valid config. This also proves the binary runs
 #    and links (radvd's own version flag exits non-zero, so it is not a usable
 #    liveness check).
-if ! out=$(radvd -c -C "$d/radvd.conf" 2>&1); then
-  err "FAIL: 'radvd -c' rejected a valid config"
+if ! out=$(radvd --configtest --config="$d/radvd.conf" 2>&1); then
+  err "FAIL: 'radvd --configtest' rejected a valid config"
   err "$out"
   fail=1
 fi
 
-# 2. configtest (-c) rejects a malformed config (proves the parser is real).
-if bad_out=$(radvd -c -C "$d/radvd.bad.conf" 2>&1); then
-  err "FAIL: 'radvd -c' accepted a malformed config"
+# 2. configtest rejects a malformed config (proves the parser is real).
+if bad_out=$(radvd --configtest --config="$d/radvd.bad.conf" 2>&1); then
+  err "FAIL: 'radvd --configtest' accepted a malformed config"
   fail=1
 fi
 
@@ -200,6 +200,37 @@ if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
     elif printf '%s\n' "$runtime_out" | grep -Eq '^(Terminated|Killed)$'; then
       err "FAIL: BusyBox ash leaked an unstructured job-status line during the bounded read"
       err "$runtime_out"
+      fail=1
+    fi
+
+    printf '%s\n' '#!/bin/sh' 'exec sleep 30' >"$runtime_dir/bin/radvd"
+    chmod +x "$runtime_dir/bin/radvd"
+    hup_rc_probe=0
+    # As above: the sh -c body's $1..$2 belong to that shell.
+    # shellcheck disable=SC2016
+    hup_out=$(PATH="$runtime_dir/bin:$PATH" /bin/busybox timeout 8 sh -c '
+      set -u
+      . "$1"
+      CONF=$2
+      RADVD_DEBUG_LEVEL=0
+      radvd_pid=""
+      reload=0
+      shutdown=0
+      signal_failed=0
+      sig_seen=0
+      on_hup
+    ' _ "$runtime_dir/fn-on_hup.sh" "$runtime_dir/radvd.conf" 2>&1) || hup_rc_probe=$?
+    if [ "$hup_rc_probe" -ne 0 ]; then
+      err "FAIL: elapsed SIGHUP configtest probe did not return through its refusal (rc=$hup_rc_probe)"
+      err "$hup_out"
+      fail=1
+    elif ! printf '%s\n' "$hup_out" | grep -Fq 'SIGHUP reload refused: the config check did not finish within 5s'; then
+      err "FAIL: elapsed SIGHUP configtest emitted no structured refusal"
+      err "$hup_out"
+      fail=1
+    elif printf '%s\n' "$hup_out" | grep -Eq '^(Terminated|Killed|Aborted)$'; then
+      err "FAIL: BusyBox ash leaked an unstructured job-status line during SIGHUP configtest"
+      err "$hup_out"
       fail=1
     fi
     rm -rf "$runtime_dir"
