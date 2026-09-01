@@ -1,16 +1,6 @@
 #!/usr/bin/env bash
-# Signal-contract smoke test: proves the assembled image honors the supervising
-# entrypoint's lifecycle contract against a running container; the section headers
-# below name each scenario. Build-time config parsing is tests/smoke.sh's.
-#
-# Every container runs with --network none and a config naming an interface that
-# does not exist ("IgnoreIfMissing on" keeps radvd alive), so no Router
-# Advertisement is ever emitted. The mutable-permission scenarios receive the
-# fixture by `docker cp`, which keeps scenario 3's root-only chmod off host
-# permissions; the `--read-only` scenarios receive it by a `:ro` bind mount or not
-# at all, because the daemon refuses an extract into a read-only rootfs.
-#
-# Usage:  scripts/smoke.sh [IMAGE]   (default docker-radvd:smoke; build it first)
+# Exercises the assembled image's signal contract without emitting RAs.
+# Usage: scripts/smoke.sh [IMAGE] (default: docker-radvd:smoke)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -136,25 +126,8 @@ wait_until_stopped() {
   [ "$running" = "false" ] || fail "$what"
 }
 
-# Poll up to 10s until $2 appears in the container's logs; fails with $3 if it
-# never does.
-#
-# Required for any line written during shutdown. `docker stop` returns once the
-# container has exited, but the json-file log driver can still be behind it, so
-# a single grep reads a truncated log and reports a line the container did in
-# fact write. Measured 2026-08-15: the scenario-4 assertion failed on main while
-# the very failure dump it printed contained the line it had just missed, and
-# the same commit had passed on its PR branch seven minutes earlier. An absence
-# assertion cannot be polled, so keep those single-shot and place them AFTER a
-# wait_for_log on the same container has proven the log flushed.
-# `docker logs … | grep -q` is a SIGPIPE trap under `pipefail`, and it reads as a flake.
-# `grep -q` exits at its FIRST match and closes the pipe, so `docker logs` dies with 141 and
-# the whole pipeline fails even though the line was there. Whether it bites depends on
-# whether the writer finished before the reader left, so the same assertion passes and fails
-# on identical code. It bit this suite when the RadvdConfigError pattern grew alternatives
-# that match radvd's own startup lines near the TOP of a long log, maximising the window.
-# So capture once and match the capture, per shell.md: a pipeline's status is the last
-# command's, so capture and fan out rather than piping into a short-circuiting reader.
+# Docker logs can lag container exit; poll before making presence assertions.
+# Capture logs before grep to avoid pipefail's SIGPIPE false failure.
 log_has() { grep -q -- "$2" <<<"$(docker logs "$1" 2>&1)"; }
 log_has_re() { grep -Eq -- "$2" <<<"$(docker logs "$1" 2>&1)"; }
 
@@ -276,15 +249,8 @@ ec=$(docker inspect -f '{{.State.ExitCode}}' "$C1")
 wait_for_log "$C1" 'radvd stopped on shutdown signal' "missing graceful shutdown log after the child was reaped"
 printf '[smoke] PASS  shutdown reap: a second trapped signal did not let PID 1 outlive its child\n'
 
-# The README's RadvdConfigError rule is an exact-string contract between the
-# entrypoint's fatal lines and an operator's Loki rule, so the refusal
-# scenarios below match their output against the rule's own `|~` pattern as the
-# regex Loki will use, pulled from the README beside this script rather than from
-# the copy the test stage puts in the image. Scoped to that one rule, and an empty
-# extraction fails here instead of matching silently.
-# The sed script matches the README's literal `|~ `pattern` [10m]` line, backticks
-# included, so the single quotes are required: nothing here may expand.
-# shellcheck disable=SC2016
+# Match the README alert rule against actual refusal output.
+# shellcheck disable=SC2016 # Literal backticks in the extraction pattern.
 ALERT_RULE=$(sed -n '/alert: RadvdConfigError/,/^        for:/p' README.md \
   | sed -n 's/^[[:space:]]*|~ `\(.*\)` \[[0-9]\+[a-z]\]$/\1/p')
 [ -n "$ALERT_RULE" ] || fail "could not extract the RadvdConfigError pattern from README.md"

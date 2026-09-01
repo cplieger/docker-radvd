@@ -1,15 +1,6 @@
 #!/usr/bin/env bash
-# The RADVD_DEBUG_LEVEL gate: the inline default-and-validate block that decides
-# radvd's --debug verbosity, and a boot fatal. Inline boot code rather than a function,
-# so extract_range lifts it and each case runs in a subshell — `exit 1` must reach
-# a process boundary, not this file. sanitize_log_value comes along because the
-# refusal path delegates the echoed value to it. The cases a single container run
-# cannot enumerate are the point: every accepted level, the multi-digit rejection
-# the one-character glob implies, and the echoed value's sanitization and cap.
-#
-# Lint directives, each against a stated guarantee rather than an assumption:
-#   SC2015 - `cond && ok || no` cannot mis-fire: lib.sh's ok/no/skip return 0.
-#   SC2016 - run_level's bash -c body is single-quoted so nothing expands here.
+# The extracted gate requires its sanitizer dependency.
+# SC2015: lib.sh verdict helpers return 0. SC2016: child script stays literal.
 # shellcheck disable=SC2015,SC2016
 set -u
 
@@ -17,7 +8,6 @@ set -u
 . "$(dirname -- "$0")/lib.sh"
 new_workdir >/dev/null
 
-# The block runs from the defaulting assignment to the case that closes it.
 GATE=$(extract_range '^RADVD_DEBUG_LEVEL=' '^esac$' "$WORK/gate.sh") || exit 1
 SANITIZER=$(extract_function sanitize_log_value "$WORK/sanitize_log_value.sh") || exit 1
 
@@ -45,12 +35,7 @@ logged() {
   grep -Fq "$1" "$LOG"
 }
 
-# The README's RadvdConfigError alert rule is an exact-string contract between this
-# fatal line and an operator's Loki rule, so read BOTH sides: pull the rule's own
-# `|~` pattern out of the README and match the captured output against it as the
-# regex Loki will use. Scoped to this one rule rather than grepping the file, because
-# a file-wide match can pass against a pattern that has drifted onto another line; an
-# empty extraction fails the assertion below rather than matching silently.
+# Match the specific alert rule so drift on either side fails.
 ALERT_RULE=$(sed -n '/alert: RadvdConfigError/,/^        for:/p' "$REPO_ROOT/README.md" \
   | sed -n 's/^[[:space:]]*|~ `\(.*\)` \[[0-9]\+[a-z]\]$/\1/p')
 
@@ -62,8 +47,6 @@ run_level
   || no "unset default" "rc=$_rc, log: $(cat "$LOG")"
 
 # --- 2. every documented level is accepted verbatim -------------------------------
-# The README promises 0-5; a gate that quietly rejected one of them would be a
-# documentation lie no container test would catch.
 for lvl in 0 1 2 3 4 5; do
   run_level "$lvl"
   [ "$_rc" -eq 0 ] && logged "resolved=$lvl" && ! logged 'level=error' \
@@ -71,10 +54,6 @@ for lvl in 0 1 2 3 4 5; do
     || no "level $lvl accepted" "rc=$_rc, log: $(cat "$LOG")"
 done
 
-# --- 3. an EMPTY value defaults rather than failing -------------------------------
-# `${RADVD_DEBUG_LEVEL:-0}` substitutes on empty as well as unset, so `-e
-# RADVD_DEBUG_LEVEL=` is the quiet default and not an operator error. Pinned
-# because the opposite reading is just as plausible from the code.
 run_level ""
 [ "$_rc" -eq 0 ] && logged 'resolved=0' && ! logged 'level=error' \
   && ok "an empty RADVD_DEBUG_LEVEL defaults to 0 rather than failing" \
