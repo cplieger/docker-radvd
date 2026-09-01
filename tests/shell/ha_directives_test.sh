@@ -1,18 +1,5 @@
 #!/usr/bin/env bash
-# check_config_directives(): the validator behind the config warnings, and the bulk of
-# entrypoint.sh. Warn-only except the refusal of a node radvd itself cannot open,
-# so each case pins which line fires for which config shape and, just as
-# load-bearing, which shapes stay SILENT — a false warning against a valid config
-# is how a real one gets ignored. Its only input is the CONF global, so every case
-# builds a fresh config dir. The host's sed/grep/awk/tr stand in for the image's
-# BusyBox ones, so a case asserts an OUTCOME (which line, silence, one parseable
-# line), never a tool-specific substitution; only case 15 stubs anything, and only
-# the two process boundaries whose STATUS is the subject there.
-#
-# Lint directives, each against a stated guarantee rather than an assumption:
-#   SC2015 - `cond && ok || no` cannot mis-fire: lib.sh's ok/no/skip return 0.
-#   SC2034 - CONF is the INPUT the extracted code reads through load_function.
-#   SC2016 - run_check's bash -c body is single-quoted so nothing expands here.
+# SC2015: lib.sh verdict helpers return 0. SC2034/SC2016: extracted child inputs.
 # shellcheck disable=SC2015,SC2034,SC2016
 set -u
 
@@ -21,12 +8,8 @@ set -u
 new_workdir >/dev/null
 
 load_function check_config_directives
-# warn_scan_degraded delegates to the top-level sanitize_log_value, so the
-# extraction needs it too — without it the degraded-scan path dies with
-# "command not found" and the sanitizer assertion reports a wrong outcome rather
-# than a missing dependency.
 load_function sanitize_log_value
-# The same extractions, kept as files for run_check's bounded subshell below.
+# The bounded child sources these extracted dependencies.
 SRC=$(extract_function check_config_directives "$WORK/check_config_directives.sh") || exit 1
 SANITIZER=$(extract_function sanitize_log_value "$WORK/sanitize_log_value.sh") || exit 1
 
@@ -37,11 +20,7 @@ setup() {
   CONF="$DIR/radvd.conf"
 }
 
-# A lost non-regular-file guard would leave the validator's own 5s read bound as
-# the only thing between its cat probe and a FIFO's EOF that never comes, so every
-# run is bounded here as well: a hang becomes a non-zero status instead of a wedged
-# test run. `timeout` needs a COMMAND, not a shell function, hence the bash -c
-# re-entry sourcing the already-extracted file.
+# `timeout` needs a command, so source the extracted functions in a child.
 run_check() {
   _rc=0
   timeout 5 bash -c '
@@ -107,11 +86,6 @@ run_check
   && ok "an all-uppercase valid config is silent (gates and scanner are caseless)" \
   || no "case-insensitivity" "log: $(cat "$LOG")"
 
-# --- 4. CRLF line endings do not corrupt the address tokens -----------------------
-# The block must SPAN lines: on a one-line block the close-brace strip discards the
-# CR before tokenization, so only a multi-line block leaves a bare "\r" token for
-# the tokenizer — which the address-token trim (space/tab only) cannot remove, and
-# a correct link-local config then draws a false non-link-local warning.
 setup
 printf 'interface eth0 {\r\n  IgnoreIfMissing on;\r\n  AdvSendAdvert on;\r\n  AdvRASrcAddress {\r\n    fe80::1;\r\n  };\r\n};\r\n' >"$CONF"
 run_check
@@ -141,10 +115,7 @@ logged 'msg="no enabled AdvSendAdvert on directive found' \
   && ok "a commented-out AdvSendAdvert still warns (comments are stripped first)" \
   || no "comment stripping" "log: $(cat "$LOG")"
 
-# --- 7. THE CLASSIC HA MISTAKE: AdvRASrcAddress on a non-link-local address -------
-# RFC 4861 §6.1.2: hosts silently discard an RA sourced from a non-link-local
-# address. radvd emits, tcpdump shows traffic, nothing autoconfigures — this
-# warning is the only artifact that names the cause.
+# RFC 4861 §6.1.2 requires link-local RA sources.
 setup
 printf 'interface eth0 {\n  IgnoreIfMissing on;\n  AdvRASrcAddress { fd00::78; };\n};\n' >"$CONF"
 run_check

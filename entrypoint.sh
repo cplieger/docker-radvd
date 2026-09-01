@@ -1,15 +1,10 @@
 #!/bin/sh
-# Supervises radvd rather than exec'ing it, so SIGHUP re-reads the config as root:
-# CONTRIBUTING.md, "Design boundaries (please preserve)".
+# Supervision lets SIGHUP re-read the config as root.
 set -u
 
 CONF="/etc/radvd/radvd.conf"
 
-# Both tr stages replace 1:1 rather than delete: deletion shifts offsets and can
-# splice two fragments into one token of the bad= list. \040-\176 stands in for
-# [:print:], which BusyBox tr (v1.37.0) lacks, and LC_ALL=C makes the covered set
-# a property of the code. Every survivor is single-byte ASCII, so the cap below
-# cannot split a rune.
+# BusyBox tr lacks [:print:], so preserve positions with a portable ASCII range.
 sanitize_log_value() {
   # shellcheck disable=SC1003 # not an escape attempt: tr maps `"` and `\` to literal `?` (verified on BusyBox v1.37.0)
   _clean=$(printf '%s' "$1" | tr '"\\' '??' | LC_ALL=C tr -c '\040-\176' ' ')
@@ -51,11 +46,7 @@ on_hup() {
     printf 'level=info msg="SIGHUP received during shutdown; reload ignored"\n' >&2
     return
   fi
-  # The reload stops radvd before its replacement reads the config, so a bad or
-  # absent config here would leave the container with no daemon: refuse and keep
-  # serving the last good one. `radvd -c` rejects nothing the daemon accepts, but it
-  # runs radvd's config PARSER and stops there, so everything radvd validates after
-  # parsing passes this gate: a filter, not a guarantee.
+  # Reject bad replacement configs before stopping the last good daemon.
   if ! [ -f "$CONF" ]; then
     printf 'level=error msg="SIGHUP reload refused: radvd.conf is absent or not a regular file" path="%s"\n' "$CONF" >&2
     return

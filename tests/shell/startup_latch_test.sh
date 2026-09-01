@@ -1,23 +1,6 @@
 #!/usr/bin/env bash
-# The signal path's unit-testable pieces: start_radvd()'s shutdown gate (a stop
-# latched while no radvd existed refuses the start rather than forking a daemon
-# whose handler installation the delivery would race), the post-fork residue
-# delivery and its refusal report, both handlers' delivery skip while no child
-# is assigned, on_hup()'s refusal to reload during a shutdown, its refusal to
-# reload a config radvd would reject or cannot find, and the shutdown arm's
-# two-branch report. The traps arm before the config validation, so a TERM
-# landing in that window is latched for the gate; without the latch, `docker
-# stop` during startup waits out its timeout and SIGKILLs.
-#
-# A run may show an intermittent bash `wait_for: No record of process <pid>`
-# line on stderr. It comes from a stubbed child dying inside its pre-exec bash
-# and unwinding through lib.sh's inherited EXIT trap, not from reap()'s `wait`;
-# it is bash-only and cannot occur in the image's ash. Do not chase it.
-#
-# Lint directives, each against a stated guarantee rather than an assumption:
-#   SC2015 - `cond && ok || no` cannot mis-fire: lib.sh's ok/no/skip return 0.
-#   SC2034 - CONF/reload/shutdown/sig_seen are INPUTS the extracted functions read.
-#   SC2329 - the kill stub is invoked indirectly, by the function it shadows.
+# A pre-pid shutdown must prevent a start.
+# SC2015: lib.sh verdict helpers return 0. SC2034/SC2329: extracted child inputs.
 # shellcheck disable=SC2015,SC2034,SC2329
 set -u
 
@@ -28,31 +11,18 @@ new_workdir >/dev/null
 load_function start_radvd
 load_function on_hup
 load_function on_term
-# The trap registrations themselves, not a function: the end pattern is deliberately
-# '^trap on_term' rather than the whole line, so an edited signal list is reported by
-# case 7's assertion instead of as a harness range error naming the wrong subject.
+# Keep the trap range anchored to the registered signals.
 TRAPS=$(extract_range '^trap on_hup HUP$' '^trap on_term' "$WORK/traps.sh") || exit 1
 
-# The stub: the function body backgrounds `radvd ... &`, so exec makes the
-# subshell BE the sleeper, and $! names it. It records its argv first: the two
-# flags that carry the app's whole log contract (`--logmethod=stderr`, which routes radvd's
-# own diagnostics into `docker logs`, and `--debug` with the validated level) are
-# otherwise asserted by nothing, so either can be deleted with the corpus green.
+# Record argv before replacing the child shell with the sleeper.
 radvd() {
   printf '%s\n' "$*" >>"$ARGV"
   exec sleep 20
 }
 
 CONF=/dev/null
-# start_radvd passes RADVD_DEBUG_LEVEL to radvd's --debug. In the boot path the value
-# is assigned and validated at top level before this function is ever reached, so
-# the extraction needs it supplied here for the same reason CONF is: under set -u
-# an unbound one aborts the function before it backgrounds anything, which reads
-# as a signal-latch failure rather than as the missing variable it is.
+# Extracted start_radvd needs the top-level value under set -u.
 RADVD_DEBUG_LEVEL=0
-# Both handlers record the trap entry here so the supervisor loop can tell an
-# interrupted wait from a real radvd exit; the cases below are where that
-# placement is pinned.
 sig_seen=0
 SIGNALS="$WORK/signals"
 ARGV="$WORK/argv"
@@ -102,12 +72,6 @@ grep -Fq 'msg="starting radvd"' "$LOG" \
   || no "delivery-refusal scope" "signal_failed=$signal_failed after start_radvd"
 reap "$radvd_pid"
 
-# --- 2. a shutdown latched before the pid existed refuses the start ---------------
-# The stop arrived while no radvd existed, so there is nothing to signal and
-# nothing worth starting: forking a daemon just to TERM it races its handler
-# installation (the gate's own comment carries the measured loss rate). The
-# subshell contains the gate's exit 0; the empty ARGV proves the fork never
-# happened, the empty SIGNALS that nothing was delivered.
 shutdown=1 reload=0
 : >"$SIGNALS"
 : >"$ARGV"
@@ -120,13 +84,7 @@ rc=$?
   && ok "a shutdown latched while no child existed refuses the start: exit 0, no fork, no delivery" \
   || no "shutdown gate" "rc=$rc, argv=[$(tr '\n' ' ' <"$ARGV")], signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
 
-# --- the post-fork residue delivery and its refusal report ------------------------
-# A TERM landing between the gate's check and the pid assignment latches without
-# a kill; the block after the fork is what still delivers it. It cannot be
-# driven through start_radvd (the flip happens mid-function), so it is extracted
-# as a RANGE like the shutdown arm: the range starts after the gate's `fi`, so
-# `^  fi$` first matches this block's own closer. Real kill, no recorder: the
-# oracle for delivery is the child's wait status, 128+15 for a TERM death.
+# Extract the post-fork shutdown block by its stable source anchors.
 RESIDUE=$(extract_range '^  # A TERM landing between the gate' '^  fi$' "$WORK/residue.sh") || exit 1
 out=$(bash -c '
   set -u
@@ -142,10 +100,7 @@ out=$(bash -c '
   && ok "a shutdown latched after the gate is still delivered to the fresh pid" \
   || no "residue delivery" "out: $out, log: $(cat "$LOG")"
 
-# The refusal arm: an undeliverable TERM arms signal_failed so the supervisor
-# loop's skip (cases 11/12 below) does not wait for an exit that is not coming,
-# and reports the failure. A reaped pid is the injectable stand-in for the real
-# causes the message names.
+# A refused post-fork TERM must set signal_failed for the supervisor.
 out=$(bash -c '
   set -u
   shutdown=1

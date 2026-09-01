@@ -1,21 +1,6 @@
 #!/usr/bin/env bash
-# The startup config triage: the inline if/elif/else that decides between "run the
-# HA validation", "warn and let radvd report it", and one of the boot's fatal exits
-# (readable check failed on an existing file).
-#
-# This is inline boot code, not a function, so it comes out via extract_range and
-# runs in a subshell per case with check_config_directives stubbed to a recorder — the
-# validator itself has its own test file, and what THIS block owes is the routing:
-# which configs reach the validator, which warn, which abort.
-#
-# Lint directives, each against a stated guarantee rather than an assumption:
-#   SC2015 - the `cond && ok || no` form cannot mis-fire, because lib.sh's
-#     ok/no/skip return 0 unconditionally by design (see their comments).
-#   SC2034 - CONF is the INPUT the extracted block reads at runtime; shellcheck
-#     cannot see the read because the source happens inside run_triage.
-#   SC2016 - the extract_range start pattern and run_triage's bash -c script are
-#     single-quoted BECAUSE nothing may expand here: the pattern matches the
-#     literal `"$CONF"` in the source, and $1/$2 are the subshell's positionals.
+# Extracted triage exits in a child process.
+# SC2015: lib.sh verdict helpers return 0. SC2034/SC2016: extracted child inputs.
 # shellcheck disable=SC2015,SC2034,SC2016
 set -u
 
@@ -23,7 +8,6 @@ set -u
 . "$(dirname -- "$0")/lib.sh"
 new_workdir >/dev/null
 
-# The block is `if [ -r "$CONF" ]...fi` — the first column-0 fi closes it.
 TRIAGE=$(extract_range '^if \[ -r "\$CONF" \]; then$' '^fi$' "$WORK/triage.sh") || exit 1
 
 LOG="$WORK/log"
@@ -33,9 +17,6 @@ setup() {
   CONF="$DIR/radvd.conf"
 }
 
-# Each case runs the block in its own subshell: `exit 1` must reach a process
-# boundary here, not this file, and the check_config_directives stub records instead
-# of validating.
 run_triage() {
   _rc=0
   bash -c '
@@ -50,12 +31,7 @@ logged() {
   grep -Fq "$1" "$LOG"
 }
 
-# The README's RadvdConfigError alert rule is an exact-string contract between the
-# entrypoint's fatal lines and an operator's Loki rule, so read BOTH sides: pull the
-# rule's own `|~` pattern out of the README and match the captured output against it
-# as the regex Loki will use. Scoped to this one rule rather than grepping the file,
-# because a file-wide match can pass against a pattern that has drifted onto another
-# line; an empty extraction fails the assertions below rather than matching silently.
+# Match the specific alert rule so drift on either side fails.
 ALERT_RULE=$(sed -n '/alert: RadvdConfigError/,/^        for:/p' "$REPO_ROOT/README.md" \
   | sed -n 's/^[[:space:]]*|~ `\(.*\)` \[[0-9]\+[a-z]\]$/\1/p')
 
@@ -67,9 +43,6 @@ run_triage
   && ok "a readable config runs the HA validation and nothing else" \
   || no "readable config routing" "rc=$_rc, log: $(cat "$LOG")"
 
-# --- 2. an ABSENT config warns and skips the validation ---------------------------
-# radvd reports the missing file with its own clear error; the entrypoint's job is
-# only to say so up front. Nothing to validate.
 setup
 run_triage
 [ "$_rc" -eq 0 ] && logged 'msg="radvd.conf not found' && ! logged 'HA_CHECK_CALLED' \

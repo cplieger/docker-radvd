@@ -1,15 +1,6 @@
 #!/bin/sh
-# Build-time smoke test for docker-radvd.
-#
-# Runs in the Dockerfile `test` stage, so the centralized `ci / validate`
-# docker build-ability gate executes it on every PR and push (the final image
-# stage depends on this stage's marker). Catches a broken radvd build and
-# validates that radvd's config parser accepts a good config and rejects a
-# malformed one — the real failure modes for a thin upstream-wrapper image —
-# and that the embedded SBOM fragment ships naming radvd at the pinned
-# version.
-#
-# Run locally:  sh tests/smoke.sh   (needs the radvd binary on PATH)
+# Build-time smoke test for the pinned radvd build.
+# Usage: sh tests/smoke.sh (radvd must be on PATH)
 set -eu
 
 d=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
@@ -32,18 +23,8 @@ if bad_out=$(radvd -c -C "$d/radvd.bad.conf" 2>&1); then
   fail=1
 fi
 
-# The README's RadvdConfigError rule matches radvd's OWN fatal strings, which are
-# fixed by the pinned version and bumped by Renovate, so read both sides: pull the
-# rule's own |~ pattern out of the README and match radvd's actual reply against it
-# as the regex Loki will use. The extraction is the same expression the shell unit
-# tests use on the entrypoint's half of the same contract. One repository-relative
-# path finds the README in both places this script runs: the repo root in a
-# checkout, and /tmp in the image, where the test stage copies it one level above
-# tests/.
+# Verify the README alert regex against radvd's actual rejection text.
 RULE_SRC="$d/../README.md"
-# Forced in-image the way sections 3 and 4 are: a plain local run may skip this,
-# the Dockerfile test stage may not — silently losing the drift gate is worse than
-# a red build.
 if [ -r "$RULE_SRC" ] || [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
   # The sed script matches the README's literal `|~ `pattern` [10m]` line, backticks
   # included, so the single quotes are required: nothing here may expand.
@@ -118,15 +99,7 @@ if [ -e /usr/sbin/radvdump ] || [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
   }
 fi
 
-# 6. The pinned radvd's own default for the directive the entrypoint's config scan
-#    reasons about. A check that warns about a directive's ABSENCE is only correct
-#    while upstream's default for it is the unwanted value, and RADVD_VERSION is
-#    Renovate-bumped with the SHA recomputed in the same commit, so a default can
-#    move with nobody reading upstream's CHANGES. Read from the header the image
-#    actually built (copied out of the builder stage) rather than from a constant
-#    restated here, the way sections 3 and 4 read the version. A macro that has
-#    been renamed or retired fails here too, which is the right outcome: it means
-#    upstream moved and the check needs re-reading.
+# Pin the default consumed by the entrypoint's directive warning.
 if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
   DEFAULTS=/tmp/radvd-defaults.h
   if [ ! -s "$DEFAULTS" ]; then
