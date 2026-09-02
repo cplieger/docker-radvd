@@ -16,7 +16,7 @@ Run [radvd](https://radvd.litech.org/) (the Linux IPv6 Router Advertisement Daem
 
 This image is a minimal Alpine wrapper around upstream `radvd`, compiled from the pinned release tarball, plus a small POSIX entrypoint that:
 
-- **Validates the mounted `radvd.conf`** and warns, per interface block, about two misconfigurations: a block that enables no `AdvSendAdvert on` (radvd defaults it to off, so it runs and emits nothing), and an `AdvRASrcAddress` set to a non-link-local (global/ULA) address that RFC 4861 requires hosts to silently discard. A config radvd rejects outright, such as one defining no interface block, is left to radvd: radvd logs its own error and exits, and the entrypoint reports that exit. Two shapes are refused rather than warned about, both exiting 1: a `radvd.conf` that is not a regular file, which radvd itself cannot consume (at startup and on reload alike), and one that exists but cannot be read (at startup).
+- **Checks the mounted `radvd.conf` node**: the entrypoint refuses a path that is not a regular file at startup or reload, and it refuses an existing unreadable file at startup. It warns when its bounded node read fails, then leaves the config settings to radvd. A config radvd rejects outright, such as one defining no interface block, is left to radvd: radvd logs its own error and exits, and the entrypoint reports that exit.
 - **Creates `/run/radvd`** (radvd refuses to start without it)
 - **Drops privileges**: radvd opens its raw socket as root, then runs as the unprivileged `radvd` user (`--username=radvd`) for the rest of its lifetime
 - **Supervises radvd**: turns `SIGHUP` into a clean config reload, refusing the reload and keeping the running daemon when the config would not start, forwards `SIGTERM` for graceful shutdown — a stop that arrives before radvd has started wins immediately, exiting 0 without starting it — and propagates an unexpected radvd exit to Docker's restart policy (see [Reloading](#reloading-configuration) for what `docker kill` does to that policy)
@@ -26,7 +26,6 @@ This image is a minimal Alpine wrapper around upstream `radvd`, compiled from th
 
 - **Generic upstream-only**: no env-var-to-config translation, no bundled prefixes; you supply your own `radvd.conf`. The one env var, `RADVD_DEBUG_LEVEL`, tunes radvd's log verbosity only (see [Configuration reference](#configuration-reference))
 - **Bind-mount only**: single read-only `:ro` mount of `/etc/radvd`
-- **Entrypoint warns on HA misconfig**: warn-only apart from a `radvd.conf` that is not a regular file or cannot be read, since single-node operators legitimately deploy without HA (see [High-availability with keepalived](#high-availability-with-keepalived))
 - **Healthcheck**: `pidof radvd` (CMD form, no shell needed)
 - **Multi-arch**: `linux/amd64` and `linux/arm64`
 <!-- hub-overview END -->
@@ -97,21 +96,31 @@ interface eth0 {
 };
 ```
 
-The entrypoint warns at startup when `AdvRASrcAddress` is set to a non-link-local address (the classic mistake above), so you find out before clients do. An absent `AdvRASrcAddress` draws no warning: radvd then sources RAs from the interface's own link-local, so only an HA pair needs it. To see whether a node is actually emitting, the image ships upstream's own RA decoder: `docker exec radvd radvdump` on the peer node shows whether the BACKUP is emitting while the MASTER holds the link-local, which is the failure this pattern exists to prevent. See [docker-keepalived](https://github.com/cplieger/docker-keepalived) for the sibling container.
+Nothing in the container reports a non-link-local RA source. Verify the source with `radvdump` on the peer node or `rdisc6` from a LAN host. The image ships upstream's own RA decoder, so `docker exec radvd radvdump` on the peer node shows whether the BACKUP is emitting while the MASTER holds the link-local. See [docker-keepalived](https://github.com/cplieger/docker-keepalived) for the sibling container.
 
 Background reading: [Firstyear's blog post on HA radvd on Linux](https://fy.blackhats.net.au/blog/2018-11-01-high-available-radvd-on-linux/) explains the pattern in detail.
 
 ## Reloading configuration
 
-Reload after editing the mounted config with a `SIGHUP`:
+Reload after editing the mounted config:
 
 ```bash
-docker kill -s HUP radvd
+docker restart radvd
 ```
 
-The entrypoint restarts the daemon so it re-reads the config; `docker restart radvd` works too. On reload it also re-runs the directive checks and re-emits any warnings for the (possibly edited) config, so a misconfiguration introduced by an edit shows up in `docker logs` at reload time rather than only at the next full restart. This supervise-and-restart design (rather than `exec`-ing radvd) is what makes reload work regardless of the config file's ownership; see [CONTRIBUTING](CONTRIBUTING.md) for the rationale.
+`docker kill -s HUP radvd` reloads too and keeps the container in place, but it
+disarms the container's restart policy for the rest of the run (see the `docker
+kill` caveat below). This image's crash recovery IS that policy, so prefer `docker
+restart` unless you specifically need the container itself left alone.
 
-Most bad edits are refused before anything is stopped. The entrypoint config-tests the mounted file first, so the running radvd keeps serving its last good config. Five shapes are refused, each logging `SIGHUP reload refused`: malformed, absent or not a regular file, a check exceeding 5s, permissions radvd calls insecure, and a TERM to radvd whose delivery could not be confirmed. The malformed and insecure-permissions shapes also carry radvd's text. A refused reload does not re-run the directive checks, because those would describe a config that is not in effect.
+The entrypoint restarts the daemon so it re-reads the config. On reload it checks
+the config path again. It exits if the path is no longer a regular file, and it
+warns without stopping if it cannot read the node. A config removed after startup
+takes the warning path after radvd stops. This supervise-and-restart design (rather
+than `exec`-ing radvd) makes reload work regardless of the config file's ownership;
+see [CONTRIBUTING](CONTRIBUTING.md) for the rationale.
+
+Most bad edits are refused before anything is stopped. The entrypoint config-tests the mounted file first, so the running radvd keeps serving its last good config. Five shapes are refused, each logging `SIGHUP reload refused`: malformed, absent or not a regular file, a check exceeding 5s, permissions radvd calls insecure, and a TERM to radvd whose delivery could not be confirmed. The malformed and insecure-permissions shapes also carry radvd's text.
 
 The check is `radvd --configtest … --username=radvd`: radvd's config parser and nothing after it, so anything radvd checks later slips past unchecked: the interface's presence, every bound radvd checks only after the parse (`MinRtrAdvInterval` against 3/4 of `MaxRtrAdvInterval`, `AdvDefaultLifetime`, MTU), and a config replaced between the check and the daemon's own read. The `radvd.conf` permissions are the exception: the configtest runs under the daemon's own `--username=radvd` identity and prints the verdict, so that edit costs a reload, not the emitter. What happens next depends on `IgnoreIfMissing`: `off` exits radvd and the container with it, `on` (the upstream default) leaves radvd running and healthy while that interface emits nothing at all. Either way the evidence is radvd's own error line, such as `MinRtrAdvInterval for eth0 (200.00) must be at least 3.00 but no more than 3/4 of MaxRtrAdvInterval (180.00)`. Verify with `rdisc6` after any config change, and alert on it: the `RadvdConfigError` rule below carries these lines.
 
@@ -123,7 +132,7 @@ One Docker behaviour to plan for: `docker kill` cancels the container's restart 
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `RADVD_DEBUG_LEVEL` | `0` | radvd's `--debug` level, `0`–`5`. At `0` radvd still logs its startup banner and every warning and error; `1` adds a config `syntax ok` confirmation plus a per-wakeup `polling for ...` line that is noisy under `docker logs`; `2` adds radvd's own `AdvSendAdvert is off for <iface>` line, qualified under [Alerting](#alerting); higher levels are progressively chattier. An invalid value fails startup with a clear error rather than running at an unintended verbosity. |
+| `RADVD_DEBUG_LEVEL` | `0` | radvd's `--debug` level, `0`–`5`. At `0` radvd still logs its startup banner and every warning and error; `1` adds a config `syntax ok` confirmation plus a per-wakeup `polling for ...` line that is noisy under `docker logs`; `2` adds radvd's own `AdvSendAdvert is off for <iface>` line, but only for an interface radvd has brought up, so an HA backup never logs it at any level; higher levels are progressively chattier. An invalid value fails startup with a clear error rather than running at an unintended verbosity. |
 
 Everything else about the daemon comes from the mounted `radvd.conf`; this variable
 only controls how much radvd logs.
@@ -262,31 +271,20 @@ groups:
         expr: |
           sum by (hostname) (count_over_time(
             {container="radvd"}
-            |~ `no enabled AdvSendAdvert on directive found|AdvRASrcAddress is set to a non-link-local address|unable to scan mounted radvd config` [10m]
+            |~ `radvd.conf could not be read` [10m]
           )) > 0
         for: 0m
         labels:
           severity: warning
         annotations:
-          summary: "the entrypoint's directive checks reported a state in which Router Advertisements may not be usable"
+          summary: "the entrypoint could not read the mounted radvd.conf, so RA output is unverified"
           description: >
-            The entrypoint validated the mounted radvd.conf and reported one of
-            three states. radvd runs and reports `healthy` in them,
-            which is why this rule exists. An interface block with no
-            `AdvSendAdvert on` is a definite zero: radvd defaults that
-            directive to off, so it runs and emits nothing. radvd prints its own
-            `AdvSendAdvert is off for <iface>` line, but at debug 2 and only for
-            an interface it has brought up, so it is absent at the shipped
-            `RADVD_DEBUG_LEVEL=0` and on an HA backup at any level.
-            A non-link-local
-            `AdvRASrcAddress` is a zero only when that address is the one radvd
-            selects, so a list that also holds a present link-local may still
-            emit usable RAs. An unscannable config means the checks did not
-            run, so nothing was verified either way. Each line is emitted once
-            per container start and once per accepted reload, so the alert
-            fires when a bad config is deployed and resolves after the window
-            while the misconfiguration persists. Read the config, then confirm
-            what reaches the LAN with `rdisc6`.
+            PID 1 could not read the mounted config within its 5s bound, or the
+            read failed outright. radvd runs and `pidof radvd` reports healthy,
+            but radvd's own open of the same node is unbounded. The warning
+            predicts that radvd may block or fail on the node while nothing
+            verifies that RAs are emitted. Confirm what reaches the LAN with
+            `rdisc6`.
 ```
 
 Every pattern above is a string radvd 2.21 or the entrypoint actually emits,

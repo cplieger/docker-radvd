@@ -35,7 +35,6 @@ RUN url="https://github.com/radvd-project/radvd/releases/download/${RADVD_VERSIO
     && strip radvd radvdump \
     && install -D -m 755 radvd /out/usr/sbin/radvd \
     && install -D -m 755 radvdump /out/usr/sbin/radvdump \
-    && install -D -m 644 defaults.h /out/radvd-src/defaults.h \
     # Syft inventories the final image from Alpine's APK database only, so this
     # source-built payload is invisible to the signed release SBOM without it.
     && cat > /out/radvd.cdx.json <<EOF
@@ -81,9 +80,6 @@ COPY tests/shell /tmp/tests/shell
 # $REPO_ROOT/CONTRIBUTING.md; without this COPY the suite exits 1 and no marker
 # is written.
 COPY CONTRIBUTING.md /tmp/CONTRIBUTING.md
-# The AdvSendAdvert check is only correct while upstream defaults the directive to
-# off, so the build reads that default out of the header it compiled against.
-COPY --from=builder /out/radvd-src/defaults.h /tmp/radvd-defaults.h
 # The suite's userland is the point: run.sh needs bash (installed here and discarded
 # with this stage) while awk, sed, grep and tr are the image's BusyBox applets — a
 # host-only run can be green while BusyBox fails.

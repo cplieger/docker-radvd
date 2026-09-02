@@ -22,7 +22,7 @@ run_triage() {
   bash -c '
     set -u
     CONF=$1
-    check_config_directives() { printf "HA_CHECK_CALLED\n" >&2; }
+    check_config_node() { printf "NODE_CHECK_CALLED\n" >&2; }
     . "$2"
   ' _ "$CONF" "$TRIAGE" 2>"$LOG" || _rc=$?
 }
@@ -35,18 +35,18 @@ logged() {
 ALERT_RULE=$(sed -n '/alert: RadvdConfigError/,/^        for:/p' "$REPO_ROOT/README.md" \
   | sed -n 's/^[[:space:]]*|~ `\(.*\)` \[[0-9]\+[a-z]\]$/\1/p')
 
-# --- 1. a readable, non-empty config routes to the HA validation ------------------
+# --- 1. a readable, non-empty config routes to the node check ------------------
 setup
 printf 'interface eth0 { IgnoreIfMissing on; };\n' >"$CONF"
 run_triage
-[ "$_rc" -eq 0 ] && logged 'HA_CHECK_CALLED' && ! logged 'level=warn' \
-  && ok "a readable config runs the HA validation and nothing else" \
+[ "$_rc" -eq 0 ] && logged 'NODE_CHECK_CALLED' && ! logged 'level=warn' \
+  && ok "a readable config runs the node check and nothing else" \
   || no "readable config routing" "rc=$_rc, log: $(cat "$LOG")"
 
 setup
 run_triage
-[ "$_rc" -eq 0 ] && logged 'msg="radvd.conf not found' && ! logged 'HA_CHECK_CALLED' \
-  && ok "an absent config warns and does not attempt validation" \
+[ "$_rc" -eq 0 ] && logged 'msg="radvd.conf not found' && ! logged 'NODE_CHECK_CALLED' \
+  && ok "an absent config warns and does not attempt the node check" \
   || no "absent config warn" "rc=$_rc, log: $(cat "$LOG")"
 
 # --- 3. the triage's fatal: the config exists but cannot be read ---------------
@@ -59,7 +59,7 @@ if [ "$(id -u)" -eq 0 ]; then
 else
   chmod 000 "$CONF"
   run_triage
-  [ "$_rc" -eq 1 ] && logged 'msg="radvd.conf exists but is not readable' && ! logged 'HA_CHECK_CALLED' \
+  [ "$_rc" -eq 1 ] && logged 'msg="radvd.conf exists but is not readable' && ! logged 'NODE_CHECK_CALLED' \
     && ok "an existing but unreadable config aborts boot with exit 1 and the error names it" \
     || no "unreadable config fatal" "rc=$_rc, log: $(cat "$LOG")"
   [ -n "$ALERT_RULE" ] && grep -Eq "$ALERT_RULE" "$LOG" \

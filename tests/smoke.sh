@@ -99,26 +99,6 @@ if [ -e /usr/sbin/radvdump ] || [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
   }
 fi
 
-# Pin the default consumed by the entrypoint's directive warning.
-if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
-  DEFAULTS=/tmp/radvd-defaults.h
-  if [ ! -s "$DEFAULTS" ]; then
-    err "FAIL: the pinned radvd's defaults header did not ship into the test stage: $DEFAULTS"
-    fail=1
-  else
-    macro=DFLT_AdvSendAdv
-    want=0
-    got=$(sed -n "s/^#define ${macro}[[:space:]]\{1,\}\([0-9]\{1,\}\).*/\1/p" "$DEFAULTS")
-    if [ -z "$got" ]; then
-      err "FAIL: $macro is not defined in the pinned radvd's defaults header; upstream renamed or retired it, so the entrypoint's check for that directive must be re-read against the new default"
-      fail=1
-    elif [ "$got" != "$want" ]; then
-      err "FAIL: the pinned radvd defaults $macro to $got, not $want; the entrypoint's check for that directive was written against $want and must be re-read"
-      fail=1
-    fi
-  fi
-fi
-
 # Pin the upstream behavior consumed by request_reload's permission gate.
 if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
   insecure_conf=$(mktemp)
@@ -187,8 +167,8 @@ if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
       . "$1"
       . "$2"
       CONF=$3
-      check_config_directives
-    ' _ "$runtime_dir/fn-sanitize_log_value.sh" "$runtime_dir/fn-check_config_directives.sh" "$runtime_dir/radvd.conf" 2>&1) || runtime_rc=$?
+      check_config_node
+    ' _ "$runtime_dir/fn-sanitize_log_value.sh" "$runtime_dir/fn-check_config_node.sh" "$runtime_dir/radvd.conf" 2>&1) || runtime_rc=$?
     if [ "$runtime_rc" -ne 0 ]; then
       err "FAIL: elapsed config-read probe did not return through the degraded warning (rc=$runtime_rc)"
       err "$runtime_out"
@@ -268,14 +248,14 @@ if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
         . "$1"
         . "$2"
         CONF=$3
-        check_config_directives
-      ' _ "$reread_dir/fn-sanitize_log_value.sh" "$reread_dir/fn-check_config_directives.sh" "$reread_dir/radvd.conf" 2>&1) || reread_rc=$?
+        check_config_node
+      ' _ "$reread_dir/fn-sanitize_log_value.sh" "$reread_dir/fn-check_config_node.sh" "$reread_dir/radvd.conf" 2>&1) || reread_rc=$?
     if [ "$reread_rc" -ne 0 ]; then
       err "FAIL: diagnostic config reread exceeded its production bound (rc=$reread_rc)"
       err "$reread_out"
       fail=1
-    elif ! printf '%s\n' "$reread_out" | grep -Fq 'unable to scan mounted radvd config'; then
-      err "FAIL: bounded diagnostic reread emitted no degraded-scan warning"
+    elif ! printf '%s\n' "$reread_out" | grep -Fq 'radvd.conf could not be read'; then
+      err "FAIL: bounded diagnostic reread emitted no unreadable-node warning"
       err "$reread_out"
       fail=1
     fi

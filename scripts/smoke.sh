@@ -147,9 +147,6 @@ printf '[smoke] starting %s (network none, fixture config)\n' "$C1"
 start_container "$C1" --cap-add NET_RAW
 logs=$(docker logs "$C1" 2>&1)
 grep -q 'msg="starting radvd"' <<<"$logs" || fail "missing startup log line"
-# tests/radvd.conf enables IgnoreIfMissing and carries no AdvSendAdvert on, so startup
-# validation must emit exactly this warning (proves the preflight ran).
-grep -q 'no enabled AdvSendAdvert on directive found' <<<"$logs" || fail "startup directive validation warning not emitted"
 # Read Docker's own verdict instead of re-running the predicate: the shipped probe is
 # exec form, so a shell-form `docker exec ... pidof radvd` would verify neither the
 # probe nor its wiring, and start_container already required the predicate itself.
@@ -170,7 +167,7 @@ grep -qx 'radvd' <<<"$owners" || fail "no radvd-owned radvd process; observed ow
 # --with-pidfile writes into; nothing else reads that Dockerfile coupling.
 docker exec "$C1" test -f /run/radvd/radvd.pid \
   || fail "radvd did not write its pid file to /run/radvd (Dockerfile --with-pidfile vs the entrypoint's mkdir)"
-printf '[smoke] PASS  startup: radvd up, preflight warned, healthcheck healthy, privileges dropped\n'
+printf '[smoke] PASS  startup: radvd up, healthcheck healthy, privileges dropped\n'
 
 # --- 2. HUP reload (world-readable config) -----------------------------------
 pid_before=$(docker exec "$C1" pidof radvd) || fail "cannot read radvd pid"
@@ -179,12 +176,10 @@ docker kill -s HUP "$C1" >/dev/null
 pid_after=$(wait_for_reload "$C1" 1 "$pid_before")
 [ -n "$pid_after" ] || fail "HUP did not reload radvd (no reload log, or PID unchanged)"
 [ "$(docker inspect -f '{{.State.Running}}' "$C1")" = "true" ] || fail "container not running after HUP reload"
-[ "$(docker logs "$C1" 2>&1 | grep -c 'no enabled AdvSendAdvert on directive found')" -ge 2 ] \
-  || fail "reload did not re-run the directive validation"
 job_status_after=$(docker logs "$C1" 2>&1 | grep -Ec '^(Terminated|Killed|Aborted)$' || true)
 [ "$job_status_after" -eq "$job_status_before" ] \
   || fail "HUP reload leaked a bare BusyBox ash job-status line into docker logs"
-printf '[smoke] PASS  HUP reload: radvd restarted (pid %s -> %s), validation re-ran, container Up\n' "$pid_before" "$pid_after"
+printf '[smoke] PASS  HUP reload: radvd restarted (pid %s -> %s), container Up\n' "$pid_before" "$pid_after"
 
 # --- 3. HUP reload with a root-only config (the 8e7a792 field failure) -------
 docker exec "$C1" sh -c 'chown -R root:root /etc/radvd && chmod -R 0700 /etc/radvd'
@@ -393,7 +388,7 @@ printf '[smoke] PASS  validation: invalid RADVD_DEBUG_LEVEL fails closed (exit 1
 # DIRECTORY, whose refusal is deterministic in an assembled image; the
 # FIFO-with-no-writer variant — where radvd's open blocks while `pidof radvd`
 # keeps the healthcheck green — belongs to the bounded shell test
-# (tests/shell/ha_directives_test.sh case 11).
+# (tests/shell/config_node_test.sh).
 printf '[smoke] starting %s (a directory where radvd.conf belongs)\n' "$C4"
 docker create --name "$C4" --network none --cap-add NET_RAW "$IMAGE" >/dev/null
 docker cp "$TMPDIR_NONFILE" "$C4:/etc/radvd" >/dev/null
@@ -694,7 +689,7 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
     'case " $* " in' \
     '  *" --configtest "*)' \
     '    : >/tmp/slow-configtest-started' \
-    '    sleep 8' \
+    '    sleep 3' \
     '    ;;' \
     'esac' \
     'exec /usr/sbin/radvd "$@"' >"$scenario_dir/radvd"

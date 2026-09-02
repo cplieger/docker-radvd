@@ -33,13 +33,29 @@ term_pending=0
 on_hup() {
   sig_seen=1
   hup_pending=1
+  # The arrival is logged HERE because a HUP consumed between the drain and `wait`
+  # is never serviced, and without this line that case is indistinguishable from a
+  # signal that never reached PID 1. Every disposition below prints its own line.
+  printf 'level=info msg="SIGHUP received; queued for reload"\n' >&2
 }
 
+# The delivery happens here rather than at a drain point a signal arriving just
+# before `wait` would miss: radvd's own exit is then what makes `wait` return.
+# Only the kill moves -- a FORKING command inside a handler reports 128+signo of a
+# nested trapped signal, so the reload's bounded check stays in the drained loop.
 on_term() {
   sig_seen=1
+  if [ "$shutdown" -eq 1 ]; then
+    return
+  fi
   shutdown=1
-  term_pending=1
   printf 'level=info msg="shutdown signal received; stopping radvd"\n' >&2
+  if [ -z "$radvd_pid" ]; then
+    term_pending=1
+  elif ! kill -TERM "$radvd_pid" 2>/dev/null; then
+    signal_failed=1
+    printf 'level=error msg="failed to deliver TERM to radvd; the container may lack CAP_KILL, or the child was already reaped" pid="%s"\n' "$radvd_pid" >&2
+  fi
 }
 
 request_reload() {
@@ -54,8 +70,10 @@ request_reload() {
   fi
   hup_rc=0
   hup_ct=$({ timeout 5 radvd --configtest --config="$CONF" --username=radvd 2>&1; } 2>/dev/null) || hup_rc=$?
-  # Re-read before classifying the check: a nested shutdown must win even when a
-  # trapped signal changes the check status under BusyBox ash.
+  # A TERM latched during the bounded check wins over the reload it interrupted,
+  # whatever the check returned. The check itself stays out of the trap handlers: a
+  # forking command inside one reports 128+signo of a nested trapped signal (ash/dash),
+  # which is why only the shutdown kill lives in on_term.
   if [ "$shutdown" -eq 1 ]; then
     printf 'level=info msg="SIGHUP received during shutdown; reload ignored"\n' >&2
     return
@@ -110,7 +128,9 @@ drain_signals() {
       hup_pending=0
       if [ "$shutdown" -eq 1 ]; then
         printf 'level=info msg="SIGHUP received during shutdown; reload ignored"\n' >&2
-      elif [ "$reload" -eq 0 ]; then
+      elif [ "$reload" -eq 1 ]; then
+        printf 'level=info msg="SIGHUP received while a reload is already in flight; the pending restart re-reads the config"\n' >&2
+      else
         request_reload
       fi
     fi
@@ -133,195 +153,40 @@ case "$RADVD_DEBUG_LEVEL" in
 esac
 
 # Warn-only except the non-regular-node refusal below, which exits 1 from both call
-# sites: no warning here is worth refusing the container over, and a single-node
-# operator legitimately deploys without HA. Why HA needs its directives:
-# CONTRIBUTING.md, "Design boundaries (please preserve)".
-check_config_directives() {
-  # A FIFO with no writer blocks in open/read and a device node may return EOF
-  # immediately (/dev/null does), so neither gives the bounded regular-file
-  # snapshot this scan needs. No POSIX-sh operation can type-check and open a node
-  # atomically, so the bounded read below is the backstop; one read serves every gate.
-  warn_scan_degraded() {
-    scan_err=$(sanitize_log_value "$1" 200)
-    printf 'level=warn msg="unable to scan mounted radvd config; directive validation is incomplete" err="%s" path="%s"\n' "$scan_err" "$CONF" >&2
+# sites: radvd cannot consume a FIFO or a directory as its config file.
+check_config_node() {
+  # No POSIX-sh operation can type-check and open a node atomically, so the bounded
+  # read is the backstop for the probe below: a FIFO with no writer blocks in
+  # open/read, radvd's own open of the same node is unbounded, and a radvd blocked
+  # there leaves a container the healthcheck calls healthy while it emits nothing.
+  warn_unreadable_node() {
+    node_err=$(sanitize_log_value "$1" 200)
+    printf 'level=warn msg="radvd.conf could not be read; radvd may block or fail on the same node" err="%s" path="%s"\n' "$node_err" "$CONF" >&2
   }
   if [ -e "$CONF" ] && ! [ -f "$CONF" ]; then
     printf 'level=error msg="radvd.conf is not a regular file" path="%s"\n' "$CONF" >&2
     exit 1
   fi
   # 5s: above any legitimate read of this config, below `docker stop`'s 10s grace.
-  conf_snapshot=$({ timeout 5 cat "$CONF"; } 2>/dev/null)
+  { timeout 5 cat "$CONF" >/dev/null; } 2>/dev/null
   read_rc=$?
-  if [ "$read_rc" -ne 0 ]; then
-    if [ "$read_rc" -eq 124 ] || [ "$read_rc" -eq 143 ]; then
-      warn_scan_degraded "read of the config exceeded 5s; the node may be a FIFO or a stalled mount"
-    else
-      # Content and cause must not share a stream: cat writes its output before
-      # its error, so a merged read puts config bytes in the field naming the
-      # cause. Bounded because this arm also runs on the reload path, where an
-      # unbounded read wedges PID 1. The brace groups catch ash's job-status word.
-      scan_cause=$({ timeout 5 cat "$CONF" 2>&1 >/dev/null; } 2>/dev/null)
-      warn_scan_degraded "${scan_cause:-the re-read reported no diagnostic either}"
-    fi
+  if [ "$read_rc" -eq 0 ]; then
     return 0
   fi
-  # radvd's scanner (v2.21 scanner.l:39) makes a double-quoted string ONE token and
-  # the quotes are part of the value: its name for `interface "eth0"` is the 6-byte
-  # `"eth0"`, and `"AdvRASrcAddress"` is a STRING, never the directive. So a naive
-  # strip from the first `#` erases the `;` after `AdvCaptivePortalAPI "…/#/login"`.
-  # This stage re-emits the quotes around the run and masks every byte meaningful to
-  # the walk below (`{`, `}`, `;`, whitespace, the record separator) with `@`
-  # inside it, so a quoted value decides nothing and reaches iface= masked.
-  # Split on the quote, not byte by byte: a char loop is seconds on a large config.
-  conf_scan=$(printf '%s\n' "$conf_snapshot" | awk '
-    {
-      # radvd scanner.l:39 makes a string backslash-escape aware, so an ODD
-      # number of \" inside a value would invert a naive quote split. It runs
-      # before the split, so its `@@` also reaches iface=: widening it widens
-      # what the operator is told the interface is called (CONTRIBUTING).
-      gsub(/\\./, "@@")
-      n = split($0, seg, "\"")
-      out = ""
-      for (i = 1; i <= n; i++) {
-        s = seg[i]
-        if (instr) {
-          gsub(/[{}; \t]/, "@", s)
-          out = out s
-        } else {
-          # Only outside a quoted run: scanner.l:39 counts a CR inside a STRING
-          # as part of the value, so deleting it there misspells the name.
-          gsub(/\r/, "", s)
-          # The bare string class at scanner.l:39 includes `#`, so the comment
-          # rule at scanner.l:42 wins the longest match only at a token
-          # boundary: `eth0#x` is one STRING token, not a name plus a comment.
-          if (match(s, /(^|[{}; \t])#/)) {
-            out = out substr(s, 1, RSTART + RLENGTH - 2)
-            break
-          }
-          out = out s
-        }
-        if (i < n) {
-          # Re-emit the delimiter, padded so the quoted run is its own token: the
-          # quotes ARE part of the STRING value radvd reads, and a token carrying
-          # them can never equal a directive keyword. scanner.l:39 puts an optional
-          # `L` INSIDE that same token (`L?\"…\"`, either case because scanner.l:16
-          # sets `caseless`), so no boundary may go there; the boundary class is what
-          # still pads `ethL"0"`, which radvd itself lexes as two tokens.
-          if (instr) { out = out "\" " } else { out = out (s ~ /(^|[{}; \t])[Ll]$/ ? "\"" : " \"") }
-          instr = !instr
-        }
-      }
-      # scanner.l:39 negates only the quote, so the string spans newlines too: while
-      # it is open the record separator is one more byte of it, not a token boundary.
-      if (instr) { printf "%s@", out } else { print out }
-    }
-  ')
-  # Quoted runs are masked, and directive names must be complete unquoted tokens.
-  # Padding braces and `;` lets no-space forms tokenize without a special case. A
-  # directive is credited to the block it sits DIRECTLY inside, which is why depth is
-  # compared rather than merely non-zero.
-  # NO LINE OF THIS AWK PROGRAM MAY CLOSE IN COLUMN 0: tests/shell/lib.sh's
-  # extract_function ends on /^[)}][[:space:]]*$/ and tests/smoke.sh's sed range
-  # on /^}$/, so a column-0 closer silently truncates this function's extraction.
-  printf '%s\n' "$conf_scan" | awk '
-    function reset() {
-      iface = ""
-      entered = 0
-      want_name = 0
-      f_send = 0
-      srcdepth = 0
-      pend = ""
-      bad = ""
-    }
-    function flush() {
-      if (entered) {
-        if (!f_send) { print "no_sendadvert " iface }
-        if (bad != "") { print "bad_src " iface " " bad }
-      }
-      reset()
-    }
-    {
-      line = $0
-      gsub(/[{]/, " { ", line)
-      gsub(/[}]/, " } ", line)
-      gsub(/[;]/, " ; ", line)
-      n = split(line, tok, /[ \t]+/)
-      for (i = 1; i <= n; i++) {
-        t = tok[i]
-        if (t == "") { continue }
-        lt = tolower(t)
-        if (t == "{") {
-          depth++
-          if (pend == "advrasrcaddress" && depth == 2) { srcdepth = depth }
-          if (iface != "" && depth == 1) { entered = 1 }
-          want_name = 0
-          pend = ""
-          continue
-        }
-        if (t == "}") {
-          if (srcdepth != 0 && depth == srcdepth) { srcdepth = 0 }
-          depth--
-          want_name = 0
-          pend = ""
-          if (depth <= 0) {
-            depth = 0
-            flush()
-          }
-          continue
-        }
-        if (t == ";") {
-          pend = ""
-          continue
-        }
-        if (srcdepth != 0) {
-          if (lt !~ /^fe[89ab][0-9a-f]:/) { bad = bad (bad ? ", " : "") lt }
-          continue
-        }
-        if (want_name) {
-          iface = t
-          want_name = 0
-          continue
-        }
-        if (depth == 0) {
-          if (lt == "interface") { want_name = 1 }
-          pend = ""
-          continue
-        }
-        if (depth != 1) {
-          pend = ""
-          continue
-        }
-        if (pend == "advsendadvert") {
-          f_send = (lt == "on")
-          pend = ""
-          continue
-        }
-        if (lt == "advsendadvert" || lt == "advrasrcaddress") {
-          pend = lt
-          continue
-        }
-        pend = ""
-      }
-    }
-    END {
-      flush()
-    }
-  ' | while read -r kind iface_name bad_addrs; do
-    # iface= carries operator-supplied config text (upstream's scanner accepts
-    # quoted, backslash-escaped STRING tokens), so it crosses bad='s trust boundary.
-    case "$kind" in
-      no_sendadvert)
-        printf 'level=warn msg="no enabled AdvSendAdvert on directive found; radvd defaults it to off, so it will run and emit no router advertisements" iface="%s" path="%s"\n' "$(sanitize_log_value "$iface_name" 200)" "$CONF" >&2
-        ;;
-      bad_src)
-        printf 'level=warn msg="AdvRASrcAddress is set to a non-link-local address; RFC 4861 requires an RA source to be link-local (fe80::/10), so hosts will silently discard these RAs" bad="%s" iface="%s" path="%s"\n' "$(sanitize_log_value "$bad_addrs" 200)" "$(sanitize_log_value "$iface_name" 200)" "$CONF" >&2
-        ;;
-    esac
-  done
+  if [ "$read_rc" -eq 124 ] || [ "$read_rc" -eq 143 ]; then
+    warn_unreadable_node "read of the config exceeded 5s; the node may be a FIFO or a stalled mount"
+  else
+    # Cause only, never content: cat writes its output before its error, so a merged
+    # read would put config bytes in the field naming the cause. Bounded because this
+    # arm also runs on the reload path, where an unbounded read wedges PID 1. The brace
+    # groups catch ash's job-status word.
+    read_cause=$({ timeout 5 cat "$CONF" 2>&1 >/dev/null; } 2>/dev/null)
+    warn_unreadable_node "${read_cause:-the re-read reported no diagnostic either}"
+  fi
 }
 
 if [ -r "$CONF" ]; then
-  check_config_directives
+  check_config_node
 elif [ -e "$CONF" ]; then
   printf 'level=error msg="radvd.conf exists but is not readable" path="%s"\n' "$CONF" >&2
   exit 1
@@ -388,9 +253,19 @@ while :; do
       fi
       exit 0
     fi
-    # No flag armed means the trap refused its own delivery, so the child is still
-    # serving: keep supervising it rather than reading the interruption as an exit.
-    continue
+    # Only a wait that REAPED the child saved radvd's own exit; a wait a trap interrupted
+    # saved 128+signo instead. So keep supervising while radvd is still running, and once
+    # it is gone, ask the shell once for a status it has not handed over yet: 127 means
+    # the earlier wait already took it and request_reload's configtest substitution has
+    # since evicted the job, so the status saved above stands.
+    if kill -0 "$radvd_pid" 2>/dev/null; then
+      continue
+    fi
+    wait "$radvd_pid" 2>/dev/null
+    reap_status=$?
+    if [ "$reap_status" -ne 127 ]; then
+      status="$reap_status"
+    fi
   fi
   # Cleared before the next start: left set, request_shutdown can target a reaped child.
   # start_radvd's gate resolves a reload-gap TERM; exit has nothing to stop.
@@ -399,7 +274,7 @@ while :; do
   if [ "$reload" -eq 1 ]; then
     reload=0
     printf 'level=info msg="reloading radvd (config re-read via restart)"\n' >&2
-    check_config_directives
+    check_config_node
     start_radvd
     continue
   fi

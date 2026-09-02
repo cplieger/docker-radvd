@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # A pre-pid shutdown must prevent a start.
 # SC2015: lib.sh verdict helpers return 0. SC2034/SC2329: extracted child inputs.
-# shellcheck disable=SC2015,SC2034,SC2329
+# SC2016: the single-quoted stub bodies are SOURCE for a child shell, not strings to
+# expand here.
+# shellcheck disable=SC2015,SC2016,SC2034,SC2329
 set -u
 
 # shellcheck source-path=SCRIPTDIR
@@ -157,6 +159,38 @@ on_term 2>"$LOG"
   && ok "TERM with no assigned child latches shutdown without reporting a delivery failure" \
   || no "empty-pid TERM" "shutdown=$shutdown, signal_failed=$signal_failed, sig_seen=$sig_seen, signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
 
+# Bash cannot reproduce ash/dash's nested-signal corruption; this pins only the
+# decision to deliver immediately when a child is assigned. scripts/smoke.sh owns
+# the real-container contract.
+load_function on_term
+TERM_WITNESS="$WORK/term-witness"
+TERM_READY="$WORK/term-ready"
+bash -c 'trap '\''touch "$1"; exit 0'\'' TERM; : >"$2"; while :; do :; done' _ "$TERM_WITNESS" "$TERM_READY" &
+radvd_pid=$!
+while [ ! -e "$TERM_READY" ]; do :; done
+shutdown=0 signal_failed=0 term_pending=0 sig_seen=0
+: >"$SIGNALS"
+on_term 2>"$LOG"
+wait "$radvd_pid"
+[ -e "$TERM_WITNESS" ] && [ "$signal_failed" -eq 0 ] && [ "$term_pending" -eq 0 ] \
+  && ok "TERM with an assigned child is delivered immediately without arming the latch" \
+  || no "assigned-pid TERM" "signal_failed=$signal_failed, term_pending=$term_pending, witness=$([ -e "$TERM_WITNESS" ] && printf yes || printf no), log: $(cat "$LOG")"
+
+# Bash cannot reproduce ash/dash's nested-signal corruption; this pins only the
+# decision to report a refused immediate delivery. scripts/smoke.sh owns the
+# real-container contract.
+load_function on_term
+sleep 0.1 &
+radvd_pid=$!
+wait "$radvd_pid"
+shutdown=0 signal_failed=0 term_pending=0 sig_seen=0
+: >"$SIGNALS"
+on_term 2>"$LOG"
+[ "$signal_failed" -eq 1 ] \
+  && grep -Fq 'msg="failed to deliver TERM to radvd' "$LOG" \
+  && ok "TERM delivery refusal arms signal_failed and reports it" \
+  || no "assigned-pid TERM refusal" "signal_failed=$signal_failed, log: $(cat "$LOG")"
+
 # A HUP with no assigned child is latched without claiming a delivery failure.
 radvd_pid=""
 shutdown=0 reload=0 signal_failed=0 sig_seen=0 hup_pending=0
@@ -164,6 +198,7 @@ shutdown=0 reload=0 signal_failed=0 sig_seen=0 hup_pending=0
 on_hup 2>"$LOG"
 [ "$reload" -eq 0 ] && [ "$signal_failed" -eq 0 ] && [ "$sig_seen" -eq 1 ] \
   && [ "$hup_pending" -eq 1 ] && [ ! -s "$SIGNALS" ] \
+  && grep -Fq 'msg="SIGHUP received; queued for reload"' "$LOG" \
   && ! grep -Fq 'SIGHUP reload refused' "$LOG" \
   && ok "HUP with no assigned child latches the reload request without signalling or refusing it" \
   || no "empty-pid HUP latch" "reload=$reload, signal_failed=$signal_failed, sig_seen=$sig_seen, hup_pending=$hup_pending, signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"

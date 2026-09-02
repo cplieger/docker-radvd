@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # The required Smoke check must run scripts/smoke.sh against its built image, and the Dockerfile must preserve its test-stage and package-refresh edges.
-# SC2015: lib.sh verdict helpers return 0.
-# shellcheck disable=SC2015
+# SC2015: lib.sh verdict helpers return 0. SC2016: the literal ${...} and backticked
+# strings ARE the assertion subjects -- they are patterns read out of the tree, not
+# expressions to expand.
+# shellcheck disable=SC2015,SC2016
 set -u
 
 # shellcheck source-path=SCRIPTDIR
@@ -88,5 +90,36 @@ printf '%s\n' "$base_stage" | grep -q '^ARG PKG_REFRESH=' \
   && printf '%s\n' "$upgrade_run" | grep -Fq '${PKG_REFRESH}' \
   && ok "the base-stage apk upgrade RUN consumes PKG_REFRESH for its cache key" \
   || no "package refresh cache key" 'base-stage ARG or same-RUN ${PKG_REFRESH} expansion is missing'
+
+COMPOSE="$REPO_ROOT/compose.yaml"
+README="$REPO_ROOT/README.md"
+compose_restart=$(awk '
+  /^  [[:alnum:]_-]+:[[:space:]]*$/ { in_radvd = ($1 == "radvd:") }
+  in_radvd && $1 == "restart:" { print $2; exit }
+' "$COMPOSE" 2>/dev/null)
+reload_section=$(sed -n '/^## Reloading configuration$/,/^## /p' "$README")
+reload_command=$(printf '%s\n' "$reload_section" \
+  | grep -E '^docker (kill -s HUP|restart) radvd$' | head -n 1)
+
+# Asserted for every README shape: the caveat is the published consequence of a
+# Docker behaviour that holds whichever command the section leads with.
+printf '%s\n' "$reload_section" | grep -Fq 'prefer `docker restart` where it matters' \
+  && printf '%s\n' "$reload_section" \
+  | grep -Fq '`unless-stopped` is disarmed by the kill regardless' \
+  && ok "the reload section keeps both published docker-kill restart-policy caveats" \
+  || no "restart-policy caveat" "a published caveat phrase is missing from the Reloading section"
+
+# compose.yaml is not copied into the image test stage, so this assertion states its
+# own input instead of resting on the workflow guard at :15-19 exiting first. The two
+# phrase checks above need no guard: README.md IS copied.
+if [ ! -f "$COMPOSE" ]; then
+  skip "the published reload procedure leads with the command that preserves restart-policy recovery" "compose.yaml is absent (the image build does not copy it)"
+elif [ "$reload_command" = "docker restart radvd" ]; then
+  ok "the published reload procedure leads with the command that preserves restart-policy recovery"
+elif [ "$reload_command" = "docker kill -s HUP radvd" ] && [ "$compose_restart" = "unless-stopped" ]; then
+  ok "the published reload procedure leads with the HUP form, whose consequence the caveat states"
+else
+  no "reload/restart-policy contract" "compose restart='$compose_restart', published reload='$reload_command'"
+fi
 
 report
