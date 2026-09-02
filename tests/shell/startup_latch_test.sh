@@ -419,7 +419,7 @@ registered=$(bash -c '
 # never runs. Both arms exit 0, so an inverted branch changes only which line is
 # logged; scripts/smoke.sh scenario 10 is the container-level witness (hardened
 # profile minus KILL), and these cases pin the arm without a container.
-ARM=$(extract_range '^      # Exit 0 either way' '^      exit 0$' "$WORK/shutdown_arm.sh") || exit 1
+ARM=$(extract_range '^    # Exit 0 either way' '^    exit 0$' "$WORK/shutdown_arm.sh") || exit 1
 WARN='msg="the TERM could not be delivered to radvd; a graceful stop cannot be confirmed"'
 INFO='msg="radvd stopped on shutdown signal (SIGTERM/SIGINT)"'
 

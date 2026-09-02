@@ -502,6 +502,16 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
   [ "$(docker exec "$C7" pidof radvd)" = "$pid_before" ] \
     || fail "no-KILL HUP replaced radvd (pids moved from $pid_before)"
   printf '[smoke] PASS  no-KILL HUP: reload refused, radvd still serving (pids %s), container up\n' "$pid_before"
+  refusals_before=$(docker logs "$C7" 2>&1 | grep -c 'SIGHUP reload refused: TERM delivery' || true)
+  docker kill -s HUP "$C7" >/dev/null
+  for _ in $(seq 1 10); do
+    [ "$(docker logs "$C7" 2>&1 | grep -c 'SIGHUP reload refused: TERM delivery' || true)" -gt "$refusals_before" ] && break
+    sleep 1
+  done
+  [ "$(docker inspect -f '{{.State.Running}}' "$C7")" = "true" ] \
+    && [ "$(docker exec "$C7" pidof radvd)" = "$pid_before" ] \
+    || fail "no-KILL second HUP exited PID 1 while radvd was still serving (pids $pid_before)"
+  printf '[smoke] PASS  no-KILL second HUP: refused again, PID 1 still supervising radvd\n'
   docker stop -t 5 "$C7" >/dev/null
   ec=$(docker inspect -f '{{.State.ExitCode}}' "$C7")
   [ "$ec" = "0" ] || fail "no-KILL docker stop exit code $ec, want 0"
@@ -725,6 +735,46 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
   grep -q 'SIGHUP reload refused' <<<"$logs" \
     && fail "double-HUP produced a reload refusal"
   printf '[smoke] PASS  double HUP: one reload completed without a refusal (pid %s -> %s)\n' "$pid_before" "$pid_after"
+)
+
+# Repeated reloads must return PID 1 to its zombie-free steady-state process tree.
+(
+  C13="radvd-smoke-reaping-$$"
+  # shellcheck disable=SC2317,SC2329  # invoked indirectly via trap
+  cleanup_reaping() {
+    code=$?
+    if [ "$code" -ne 0 ] && docker inspect "$C13" >/dev/null 2>&1; then
+      printf -- '--- %s logs (tail) ---\n' "$C13" >&2
+      docker logs "$C13" 2>&1 | tail -25 >&2 || true
+    fi
+    docker rm -f "$C13" >/dev/null 2>&1 || true
+  }
+  trap cleanup_reaping EXIT
+
+  start_container "$C13" --cap-add NET_RAW
+  sleep 6
+  baseline=$(docker exec "$C13" ps -o pid \
+    | awk 'NR > 1 { n++ } END { print n + 0 }')
+  pid_before=$(docker exec "$C13" pidof radvd) \
+    || fail "reaping: cannot read the initial radvd pids"
+  for reload_count in $(seq 1 10); do
+    docker kill -s HUP "$C13" >/dev/null
+    pid_after=$(wait_for_reload "$C13" "$reload_count" "$pid_before")
+    [ -n "$pid_after" ] \
+      || fail "reaping: reload $reload_count did not complete"
+    pid_before=$pid_after
+  done
+
+  sleep 6
+  zombies=$(docker exec "$C13" ps -o stat \
+    | awk 'NR > 1 && $1 ~ /^Z/ { n++ } END { print n + 0 }')
+  steady=$(docker exec "$C13" ps -o pid \
+    | awk 'NR > 1 { n++ } END { print n + 0 }')
+  [ "$zombies" -eq 0 ] \
+    || fail "reaping: $zombies zombie processes remained after reloads"
+  [ "$steady" -eq "$baseline" ] \
+    || fail "reaping: process count grew from $baseline to $steady"
+  printf '[smoke] PASS  reaping: ten reloads returned to the zombie-free process baseline (%s processes)\n' "$baseline"
 )
 
 printf '[smoke] OK — all signal-contract assertions passed for %s\n' "$IMAGE"

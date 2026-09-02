@@ -43,32 +43,7 @@ run_triage
   && ok "a readable config runs the node check and nothing else" \
   || no "readable config routing" "rc=$_rc, log: $(cat "$LOG")"
 
-setup
-run_triage
-[ "$_rc" -eq 0 ] && logged 'msg="radvd.conf not found' && ! logged 'NODE_CHECK_CALLED' \
-  && ok "an absent config warns and does not attempt the node check" \
-  || no "absent config warn" "rc=$_rc, log: $(cat "$LOG")"
-
-# --- 3. the triage's fatal: the config exists but cannot be read ---------------
-# Root reads through any file mode, so the branch is unreachable as root — a hard
-# assertion here would fail for a root maintainer while passing in CI.
-setup
-printf 'interface eth0 { IgnoreIfMissing on; };\n' >"$CONF"
-if [ "$(id -u)" -eq 0 ]; then
-  skip "an existing but unreadable config aborts boot (exit 1) and matches the README's alert rule" "root reads a chmod-000 file, so the refusal is unreachable"
-else
-  chmod 000 "$CONF"
-  run_triage
-  [ "$_rc" -eq 1 ] && logged 'msg="radvd.conf exists but is not readable' && ! logged 'NODE_CHECK_CALLED' \
-    && ok "an existing but unreadable config aborts boot with exit 1 and the error names it" \
-    || no "unreadable config fatal" "rc=$_rc, log: $(cat "$LOG")"
-  [ -n "$ALERT_RULE" ] && grep -Eq "$ALERT_RULE" "$LOG" \
-    && ok "the unreadable-config fatal line matches the README's RadvdConfigError alert pattern" \
-    || no "alert contract (unreadable config)" "rule='$ALERT_RULE', log: $(cat "$LOG")"
-  chmod 644 "$CONF"
-fi
-
-# --- 4. the PID-directory fatal's phrase is asserted at the SOURCE -----------------
+# --- 2. the PID-directory fatal's phrase is asserted at the SOURCE -----------------
 # `failed to create radvd PID directory` is the one alternative in the README's alert
 # rule that no UNIT path drives (the mkdir only fails on a read-only /run);
 # scripts/smoke.sh scenario 8 drives it at runtime, so this source-side check is the

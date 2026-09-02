@@ -16,10 +16,10 @@ Run [radvd](https://radvd.litech.org/) (the Linux IPv6 Router Advertisement Daem
 
 This image is a minimal Alpine wrapper around upstream `radvd`, compiled from the pinned release tarball, plus a small POSIX entrypoint that:
 
-- **Checks the mounted `radvd.conf` node**: the entrypoint refuses a path that is not a regular file at startup or reload, and it refuses an existing unreadable file at startup. It warns when its bounded node read fails, then leaves the config settings to radvd. A config radvd rejects outright, such as one defining no interface block, is left to radvd: radvd logs its own error and exits, and the entrypoint reports that exit.
+- **Checks the mounted `radvd.conf` node**: the entrypoint refuses a path that is not a regular file at startup or reload. It warns when its bounded node read fails, then leaves the config settings to radvd. A config radvd rejects outright, such as one defining no interface block, is left to radvd: radvd logs its own error and exits, and the entrypoint reports that exit.
 - **Creates `/run/radvd`** (radvd refuses to start without it)
 - **Drops privileges**: radvd opens its raw socket as root, then runs as the unprivileged `radvd` user (`--username=radvd`) for the rest of its lifetime
-- **Supervises radvd**: turns `SIGHUP` into a clean config reload, refusing the reload and keeping the running daemon when the config would not start, forwards `SIGTERM` for graceful shutdown — a stop that arrives before radvd has started wins immediately, exiting 0 without starting it — and propagates an unexpected radvd exit to Docker's restart policy (see [Reloading](#reloading-configuration) for what `docker kill` does to that policy)
+- **Supervises radvd**: turns `SIGHUP` into a config reload, refusing the reload and keeping the running daemon when the config would not start; forwards `SIGTERM` for graceful shutdown. A stop that arrives before radvd has started wins immediately and exits 0 without starting it. The entrypoint forwards `SIGUSR1` so radvd resets decremented prefix lifetimes (`DecrementLifetimes`) to their initial values. With no `stop_signal` configured, `docker kill -s USR1` also disarms the container's restart policy for the rest of the run. An unexpected radvd exit propagates to Docker's restart policy. See [Reloading](#reloading-configuration) for the `docker kill` caveat.
 - **Logs to stderr** with structured key=value lines, captured by `docker logs`
 
 ### Why this design
@@ -119,6 +119,21 @@ warns without stopping if it cannot read the node. A config removed after startu
 takes the warning path after radvd stops. This supervise-and-restart design (rather
 than `exec`-ing radvd) makes reload work regardless of the config file's ownership;
 see [CONTRIBUTING](CONTRIBUTING.md) for the rationale.
+
+Because the reload restarts the daemon, the outgoing radvd sends a final
+advertisement with Router Lifetime 0 on its way out (`sending stop adverts` in the
+log) -- upstream's default `RemoveAdvOnExit`, and something its own in-process
+reload does not do. So every accepted reload, and every `docker restart`, briefly
+withdraws this node as an IPv6 default router until the replacement's first
+advertisement. Where another box is the real gateway and `AdvDefaultLifetime 0` is
+set, that is inert. Where this radvd IS the default router, every config reload
+drops the default route on SLAAC hosts for that interval.
+
+A successful reload also logs two upstream ERROR-level lines as the old daemon
+exits, `Exiting, privsep_read_loop had readn return 0 bytes` and `Exiting,
+privsep_read_loop is complete.`. They come from radvd's privileged privsep helper
+noticing its worker is gone, they appear on every reload and every graceful stop,
+and they are normal.
 
 Most bad edits are refused before anything is stopped. The entrypoint config-tests the mounted file first, so the running radvd keeps serving its last good config. Five shapes are refused, each logging `SIGHUP reload refused`: malformed, absent or not a regular file, a check exceeding 5s, permissions radvd calls insecure, and a TERM to radvd whose delivery could not be confirmed. The malformed and insecure-permissions shapes also carry radvd's text.
 
@@ -231,7 +246,7 @@ groups:
         expr: |
           sum by (hostname) (count_over_time(
             {container="radvd"}
-            |~ `SIGHUP reload refused|exiting, failed to read config file|exiting, permissions on conf_file invalid|not found:|does not exist or is not set up properly \(setup_iface=|unable to drop root privileges|invalid RADVD_DEBUG_LEVEL|radvd.conf exists but is not readable|radvd.conf is not a regular file|failed to create radvd PID directory|must be at least|must be between|must be zero or between|must not be greater than|must be set with|must be greater than or equal to AdvPreferredLifetime|invalid prefix length|invalid route prefix length` [10m]
+            |~ `SIGHUP reload refused|exiting, failed to read config file|exiting, permissions on conf_file invalid|not found:|does not exist or is not set up properly \(setup_iface=|unable to drop root privileges|invalid RADVD_DEBUG_LEVEL|radvd.conf is not a regular file|failed to create radvd PID directory|must be at least|must be between|must be zero or between|must not be greater than|must be set with|must be greater than or equal to AdvPreferredLifetime|invalid prefix length|invalid route prefix length` [10m]
           )) > 0
         for: 0m
         labels:
@@ -253,9 +268,9 @@ groups:
             state it was in, and the `KILL` bullet under
             [Capabilities](#capabilities) covers the capability case. The
             pattern also matches the entrypoint's own fatal startup errors (an
-            invalid RADVD_DEBUG_LEVEL, an unreadable radvd.conf, a radvd.conf
-            that is not a regular file, a failed /run/radvd creation), which
-            crash-loop the container before radvd ever starts, and radvd's
+            invalid RADVD_DEBUG_LEVEL, a radvd.conf that is not a regular file,
+            a failed /run/radvd creation), which crash-loop the container before
+            radvd ever starts, and radvd's
             `unable to drop root privileges`, which is not a config fault at
             all: the container was started without the SETUID and SETGID
             capabilities, so `--username=radvd` cannot take effect (see the hardened
