@@ -77,13 +77,19 @@ mkdir "$TMPDIR_NONFILE/radvd.conf"
 # fixture itself (`:/etc/radvd:`, the only delivery a `--read-only` rootfs accepts)
 # is not also sent a `docker cp` copy.
 start_container() {
-  local name=$1 ready
+  local name=$1 ready shim
   shift
   docker create --name "$name" --network none "$@" "$IMAGE" >/dev/null
   case "$*" in
     *":/etc/radvd:"*) ;;
     *) docker cp "$TMPDIR_FIXTURE" "$name:/etc/radvd" >/dev/null ;;
   esac
+  # Executable shims are DELIVERED, never bind-mounted: a bind mount inherits the
+  # source filesystem's noexec, and execvp then SKIPS the unexecutable shim and falls
+  # through to the next PATH entry -- the real binary -- so the scenario runs unshimmed.
+  for shim in ${SHIMS[@]+"${SHIMS[@]}"}; do
+    docker cp "${shim%%:*}" "$name:${shim#*:}" >/dev/null
+  done
   docker start "$name" >/dev/null
   ready=""
   for _ in $(seq 1 15); do
@@ -527,8 +533,8 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
   # lands in the preflight window by construction rather than by beating a sleep.
   printf '%s\n' '#!/bin/sh' 'kill -TERM 1' 'exec /bin/cat "$@"' >"$slow_cat"
   chmod +x "$slow_cat"
-  docker create --name "$C8" --network none --cap-add NET_RAW \
-    -v "$slow_cat:/usr/local/bin/cat:ro" "$IMAGE" >/dev/null
+  docker create --name "$C8" --network none --cap-add NET_RAW "$IMAGE" >/dev/null
+  docker cp "$slow_cat" "$C8:/usr/local/bin/cat" >/dev/null
   docker cp "$TMPDIR_FIXTURE" "$C8:/etc/radvd" >/dev/null
   job_status_before=$(docker logs "$C8" 2>&1 | grep -Ec '^(Terminated|Killed|Aborted)$' || true)
   docker start "$C8" >/dev/null
@@ -602,9 +608,9 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
     'esac' >"$scenario_dir/radvd"
   chmod +x "$scenario_dir/cat" "$scenario_dir/radvd"
 
-  docker create --name "$C9" --network none --cap-add NET_RAW \
-    -v "$scenario_dir/cat:/usr/local/bin/cat:ro" \
-    -v "$scenario_dir/radvd:/usr/sbin/radvd:ro" "$IMAGE" >/dev/null
+  docker create --name "$C9" --network none --cap-add NET_RAW "$IMAGE" >/dev/null
+  docker cp "$scenario_dir/cat" "$C9:/usr/local/bin/cat" >/dev/null
+  docker cp "$scenario_dir/radvd" "$C9:/usr/sbin/radvd" >/dev/null
   docker cp "$TMPDIR_FIXTURE" "$C9:/etc/radvd" >/dev/null
   docker start "$C9" >/dev/null
   wait_for_log "$C9" 'SIGHUP received before radvd started' \
@@ -644,8 +650,8 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
     'exec /usr/sbin/radvd "$@"' >"$scenario_dir/radvd"
   chmod +x "$scenario_dir/radvd"
 
-  start_container "$C10" --cap-add NET_RAW \
-    -v "$scenario_dir/radvd:/usr/local/bin/radvd:ro"
+  SHIMS=("$scenario_dir/radvd:/usr/local/bin/radvd")
+  start_container "$C10" --cap-add NET_RAW
   docker kill -s HUP "$C10" >/dev/null
   check_started=""
   for _ in $(seq 1 20); do
@@ -695,8 +701,8 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
     'exec /usr/sbin/radvd "$@"' >"$scenario_dir/radvd"
   chmod +x "$scenario_dir/radvd"
 
-  start_container "$C11" --cap-add NET_RAW \
-    -v "$scenario_dir/radvd:/usr/local/bin/radvd:ro"
+  SHIMS=("$scenario_dir/radvd:/usr/local/bin/radvd")
+  start_container "$C11" --cap-add NET_RAW
   pid_before=$(docker exec "$C11" pidof radvd) || fail "double-HUP: cannot read radvd pid"
   docker kill -s HUP "$C11" >/dev/null
   check_started=""
