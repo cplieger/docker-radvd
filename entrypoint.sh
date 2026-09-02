@@ -53,8 +53,9 @@ on_term() {
   if [ -z "$radvd_pid" ]; then
     term_pending=1
   elif ! kill -TERM "$radvd_pid" 2>/dev/null; then
-    signal_failed=1
     printf 'level=error msg="failed to deliver TERM to radvd; the container may lack CAP_KILL, or the child was already reaped" pid="%s"\n' "$radvd_pid" >&2
+    printf 'level=warn msg="the TERM could not be delivered to radvd; a graceful stop cannot be confirmed"\n' >&2
+    exit 0
   fi
 }
 
@@ -168,8 +169,8 @@ check_config_node() {
     exit 1
   fi
   # 5s: above any legitimate read of this config, below `docker stop`'s 10s grace.
-  { timeout 5 cat "$CONF" >/dev/null; } 2>/dev/null
-  read_rc=$?
+  read_rc=0
+  _conf_probe=$({ timeout 5 cat "$CONF"; } 2>/dev/null) || read_rc=$?
   if [ "$read_rc" -eq 0 ]; then
     return 0
   fi

@@ -177,19 +177,28 @@ wait "$radvd_pid"
   || no "assigned-pid TERM" "signal_failed=$signal_failed, term_pending=$term_pending, witness=$([ -e "$TERM_WITNESS" ] && printf yes || printf no), log: $(cat "$LOG")"
 
 # Bash cannot reproduce ash/dash's nested-signal corruption; this pins only the
-# decision to report a refused immediate delivery. scripts/smoke.sh owns the
+# terminal refusal when immediate delivery fails. scripts/smoke.sh owns the
 # real-container contract.
 load_function on_term
 sleep 0.1 &
 radvd_pid=$!
 wait "$radvd_pid"
-shutdown=0 signal_failed=0 term_pending=0 sig_seen=0
 : >"$SIGNALS"
-on_term 2>"$LOG"
-[ "$signal_failed" -eq 1 ] \
-  && grep -Fq 'msg="failed to deliver TERM to radvd' "$LOG" \
-  && ok "TERM delivery refusal arms signal_failed and reports it" \
-  || no "assigned-pid TERM refusal" "signal_failed=$signal_failed, log: $(cat "$LOG")"
+timeout 3 bash -c '
+  set -u
+  . "$1"
+  radvd_pid=$2
+  shutdown=0
+  term_pending=0
+  sig_seen=0
+  on_term
+' _ "$WORK/on_term.sh" "$radvd_pid" 2>"$LOG"
+rc=$?
+[ "$rc" -eq 0 ] \
+  && grep -Fq 'msg="failed to deliver TERM to radvd; the container may lack CAP_KILL, or the child was already reaped"' "$LOG" \
+  && grep -Fq 'msg="the TERM could not be delivered to radvd; a graceful stop cannot be confirmed"' "$LOG" \
+  && ok "TERM delivery refusal reports both dispositions and exits 0" \
+  || no "assigned-pid TERM refusal" "rc=$rc, log: $(cat "$LOG")"
 
 # A HUP with no assigned child is latched without claiming a delivery failure.
 radvd_pid=""
