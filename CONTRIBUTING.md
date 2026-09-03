@@ -26,8 +26,7 @@ The files with real logic are:
   it turns `SIGHUP`
   into a config reload (refusing it, and keeping the running daemon, when the
   mounted config would not start), forwards `SIGTERM`/`SIGINT` for graceful
-  shutdown, forwards `SIGUSR1` to radvd's own lifetime-reset handler, and
-  propagates an unexpected radvd exit to Docker's restart policy.
+  shutdown, and propagates an unexpected radvd exit to Docker's restart policy.
 
 `compose.yaml` is the reference deployment. There is no build system and no
 application source beyond these files. Two smoke tests cover the two failure
@@ -84,9 +83,8 @@ contract.
   sets one. An operator who does set `stop_signal` — even one that only restates
   SIGTERM — keeps crash-recreate armed under `always` or `on-failure`, so how bad
   a reload death is depends on that setting. The supervisor loop turns `SIGHUP`
-  into a radvd restart (re-reads as root), forwards `SIGTERM`/`SIGINT`, forwards
-  `SIGUSR1`, and propagates an unexpected radvd exit. A stop that lands while no
-  radvd exists
+  into a radvd restart (re-reads as root), forwards `SIGTERM`/`SIGINT`, and
+  propagates an unexpected radvd exit. A stop that lands while no radvd exists
   (during preflight, or the reload gap between generations) wins without radvd
   starting: `start_radvd`'s gate exits 0 rather than forking a daemon whose own
   handler installation the forwarded TERM would race — a lost race swallows the

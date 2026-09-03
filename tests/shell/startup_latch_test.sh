@@ -105,16 +105,19 @@ rc=$?
   && ok "a shutdown request is delivered to the assigned child" \
   || no "shutdown delivery" "signal_failed=$signal_failed, wait_rc=$rc, signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
 
-# A refused TERM must set signal_failed for the supervisor.
+# A TERM to a child the reaping `wait` already took is a stop that is COMPLETE, not a
+# refused delivery: the /proc probe is the discriminator, so removing it makes this case
+# log the missing-capability line and arm signal_failed. The live-but-unsignalable half
+# needs a container without CAP_KILL and belongs to scripts/smoke.sh scenario 10.
 signal_failed=0
 sleep 0.1 &
 radvd_pid=$!
 wait "$radvd_pid"
 request_shutdown 2>"$LOG"
-[ "$signal_failed" -eq 1 ] \
-  && grep -Fq 'msg="failed to deliver TERM to radvd; the container may lack CAP_KILL, or the child was already reaped"' "$LOG" \
-  && ok "a refused shutdown request arms signal_failed and reports it" \
-  || no "shutdown refusal" "signal_failed=$signal_failed, log: $(cat "$LOG")"
+[ "$signal_failed" -eq 0 ] \
+  && ! grep -Fq 'failed to deliver TERM' "$LOG" \
+  && ok "a TERM to an already-reaped child is not reported as a delivery failure" \
+  || no "reaped-child shutdown" "signal_failed=$signal_failed, log: $(cat "$LOG")"
 
 # --- 3. a latched reload is NOT an operand of the shutdown gate -------------------
 # `reload` is armed only after a confirmed TERM to an assigned pid, so it cannot
@@ -177,8 +180,8 @@ wait "$radvd_pid"
   || no "assigned-pid TERM" "signal_failed=$signal_failed, term_pending=$term_pending, witness=$([ -e "$TERM_WITNESS" ] && printf yes || printf no), log: $(cat "$LOG")"
 
 # Bash cannot reproduce ash/dash's nested-signal corruption; this pins only the
-# terminal refusal when immediate delivery fails. scripts/smoke.sh owns the
-# real-container contract.
+# classification when the child is already gone. scripts/smoke.sh owns the
+# real-container contract for a live child PID 1 may not signal.
 load_function on_term
 sleep 0.1 &
 radvd_pid=$!
@@ -195,10 +198,11 @@ timeout 3 bash -c '
 ' _ "$WORK/on_term.sh" "$radvd_pid" 2>"$LOG"
 rc=$?
 [ "$rc" -eq 0 ] \
-  && grep -Fq 'msg="failed to deliver TERM to radvd; the container may lack CAP_KILL, or the child was already reaped"' "$LOG" \
-  && grep -Fq 'msg="the TERM could not be delivered to radvd; a graceful stop cannot be confirmed"' "$LOG" \
-  && ok "TERM delivery refusal reports both dispositions and exits 0" \
-  || no "assigned-pid TERM refusal" "rc=$rc, log: $(cat "$LOG")"
+  && grep -Fq 'msg="shutdown signal received; stopping radvd"' "$LOG" \
+  && ! grep -Fq 'failed to deliver TERM' "$LOG" \
+  && ! grep -Fq 'a graceful stop cannot be confirmed' "$LOG" \
+  && ok "on_term keeps the arrival record for an already-reaped child and claims no failed delivery" \
+  || no "reaped-child on_term" "rc=$rc, log: $(cat "$LOG")"
 
 # A HUP with no assigned child is latched without claiming a delivery failure.
 radvd_pid=""

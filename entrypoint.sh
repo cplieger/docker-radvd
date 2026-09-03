@@ -25,8 +25,8 @@ shutdown=0
 # graceful stop it never observed. Scoped to one child: start_radvd clears it.
 signal_failed=0
 # Set by every trap handler so the loop can tell a trap-interrupted wait from a real
-# radvd exit. A status above 128 cannot: a SIGKILLed radvd exits 137 too, and a USR1
-# radvd handles itself returns 138 from the interrupted wait with the child alive.
+# radvd exit. A status above 128 cannot: a HUP or TERM interrupting the wait returns
+# 129 or 143 with the child alive, and a SIGKILLed radvd exits 137.
 sig_seen=0
 hup_pending=0
 term_pending=0
@@ -55,16 +55,14 @@ on_term() {
   if [ -z "$radvd_pid" ]; then
     term_pending=1
   elif ! kill -TERM "$radvd_pid" 2>/dev/null; then
-    printf 'level=error msg="failed to deliver TERM to radvd; the container may lack CAP_KILL, or the child was already reaped" pid="%s"\n' "$radvd_pid" >&2
-    printf 'level=warn msg="the TERM could not be delivered to radvd; a graceful stop cannot be confirmed"\n' >&2
-    exit 0
-  fi
-}
-
-on_usr1() {
-  sig_seen=1
-  if [ -z "$radvd_pid" ] || ! kill -USR1 "$radvd_pid" 2>/dev/null; then
-    printf 'level=error msg="SIGUSR1 could not be delivered to radvd; it may not be running yet, the child may already have been reaped, or the container may lack CAP_KILL" pid="%s"\n' "$radvd_pid" >&2
+    # A reaped child has no /proc entry; a live child PID 1 may not signal does. Only the
+    # second is a delivery failure -- the first is a stop that is already complete, and the
+    # loop's disposition arm reports it.
+    if [ -e "/proc/$radvd_pid" ]; then
+      printf 'level=error msg="failed to deliver TERM to radvd; the container may lack CAP_KILL" pid="%s"\n' "$radvd_pid" >&2
+      printf 'level=warn msg="the TERM could not be delivered to radvd; a graceful stop cannot be confirmed"\n' >&2
+      exit 0
+    fi
   fi
 }
 
@@ -124,9 +122,9 @@ request_reload() {
 }
 
 request_shutdown() {
-  if [ -n "$radvd_pid" ] && ! kill -TERM "$radvd_pid" 2>/dev/null; then
+  if [ -n "$radvd_pid" ] && ! kill -TERM "$radvd_pid" 2>/dev/null && [ -e "/proc/$radvd_pid" ]; then
     signal_failed=1
-    printf 'level=error msg="failed to deliver TERM to radvd; the container may lack CAP_KILL, or the child was already reaped" pid="%s"\n' "$radvd_pid" >&2
+    printf 'level=error msg="failed to deliver TERM to radvd; the container may lack CAP_KILL" pid="%s"\n' "$radvd_pid" >&2
   fi
 }
 
@@ -151,7 +149,6 @@ drain_signals() {
 
 trap on_hup HUP
 trap on_term TERM INT
-trap on_usr1 USR1
 
 # Resolve and validate before the supervisor loop can call request_reload or
 # start_radvd; neither trap handler reads this value.
