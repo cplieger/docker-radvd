@@ -47,7 +47,7 @@ contract.
   read may still be readable by radvd. Do not turn this warning into a hard
   failure. The non-regular-node arm exits 1 from both call sites because radvd
   cannot consume a FIFO or directory, and its own open of one is unbounded.
-- **The wrapper does not read the config's contents; radvd reports its own
+- **The wrapper does not interpret the config's contents; radvd reports its own
   diagnostics.** A state radvd announces unconditionally through
   `flog(LOG_ERR, …)` is left to radvd's own line and to the supervisor's exit
   report: a config it rejects outright (`radvd.c:330`, `:812`), and an interface
@@ -165,7 +165,7 @@ opening a PR:
 ```sh
 shellcheck entrypoint.sh
 hadolint --ignore DL3018 --ignore DL3066 Dockerfile
-bash tests/shell/run.sh   # entrypoint unit tests; two cases are uid-gated and skip as root
+bash tests/shell/run.sh   # entrypoint unit tests; one case is uid-gated and skips as root
 docker build -t docker-radvd:dev .   # runs tests/smoke.sh in the test stage
 ```
 
