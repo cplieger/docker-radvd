@@ -22,7 +22,8 @@ radvd_pid=""
 reload=0
 shutdown=0
 # Set when a TERM to the child was refused, so the shutdown arm cannot claim a
-# graceful stop it never observed. Scoped to one child: start_radvd clears it.
+# graceful stop it never observed. Scoped to one child by construction: a refused
+# delivery implies a latched shutdown, which never starts another child.
 signal_failed=0
 # Set by every trap handler so the loop can tell a trap-interrupted wait from a real
 # radvd exit. A status above 128 cannot: a HUP or TERM interrupting the wait returns
@@ -181,19 +182,17 @@ check_config_node() {
   # The substitution's subshell keeps 2>/dev/null off PID 1's own stderr; a bare
   # brace group would discard on_term's arrival record.
   read_rc=0
-  _conf_probe=$({ timeout 5 cat "$CONF" >/dev/null; } 2>/dev/null) || read_rc=$?
+  # Cause only, never content: cat writes its output before its error, so a merged
+  # read would put config bytes in the field naming the cause. The brace group
+  # inside the substitution catches ash's job-status word.
+  read_cause=$({ timeout 5 cat "$CONF" 2>&1 >/dev/null; } 2>/dev/null) || read_rc=$?
   if [ "$read_rc" -eq 0 ]; then
     return 0
   fi
   if [ "$read_rc" -eq 124 ] || [ "$read_rc" -eq 143 ]; then
     warn_unreadable_node "read of the config exceeded 5s; the node may be a FIFO or a stalled mount"
   else
-    # Cause only, never content: cat writes its output before its error, so a merged
-    # read would put config bytes in the field naming the cause. Bounded because this
-    # arm also runs on the reload path, where an unbounded read wedges PID 1. The brace
-    # groups catch ash's job-status word.
-    read_cause=$({ timeout 5 cat "$CONF" 2>&1 >/dev/null; } 2>/dev/null)
-    warn_unreadable_node "${read_cause:-the re-read reported no diagnostic either}"
+    warn_unreadable_node "${read_cause:-the read reported no diagnostic}"
   fi
 }
 
@@ -208,7 +207,6 @@ if ! mkdir -p /run/radvd; then
 fi
 
 start_radvd() {
-  signal_failed=0
   # A shutdown latched while no radvd existed (preflight, or the reload gap
   # between reaping one generation and starting the next) is a stop that arrived
   # first. Starting radvd just to signal it races its own handler installation:
@@ -233,10 +231,8 @@ start_radvd
 while :; do
   drain_signals
   # A shutdown latched before this loop whose TERM was refused has no exit still
-  # coming: there is nothing to wait for, so fall through to the disposition below.
-  if [ "$shutdown" -eq 1 ] && [ "$signal_failed" -eq 1 ]; then
-    status=0
-  else
+  # coming: there is nothing to wait for, so skip to the disposition below.
+  if ! { [ "$shutdown" -eq 1 ] && [ "$signal_failed" -eq 1 ]; }; then
     # ash writes a bare job-status word to fd2 for a child killed BY a signal (reachable
     # through the pre-pid latch); a per-command redirect never reaches the traps' own fd2.
     wait "$radvd_pid" 2>/dev/null

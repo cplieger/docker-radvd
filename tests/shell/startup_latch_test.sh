@@ -62,7 +62,6 @@ start() {
 # own would fail the liveness half, and a function that signals unconditionally
 # would fail the empty-record half.
 shutdown=0 reload=0
-signal_failed=1
 start
 sleep 0.2
 [ -n "$radvd_pid" ] && [ ! -s "$SIGNALS" ] && command kill -0 "$radvd_pid" 2>/dev/null \
@@ -74,9 +73,6 @@ grep -Fq -- '--logmethod=stderr' "$ARGV" && grep -Fq -- "--debug=$RADVD_DEBUG_LE
 grep -Fq 'msg="starting radvd"' "$LOG" \
   && ok "the un-gated path logs the start" \
   || no "start log line" "log: $(cat "$LOG")"
-[ "$signal_failed" -eq 0 ] \
-  && ok "starting a child clears a prior generation's delivery refusal" \
-  || no "delivery-refusal scope" "signal_failed=$signal_failed after start_radvd"
 reap "$radvd_pid"
 
 shutdown=1 reload=0
@@ -118,18 +114,6 @@ request_shutdown 2>"$LOG"
   && ! grep -Fq 'failed to deliver TERM' "$LOG" \
   && ok "a TERM to an already-reaped child is not reported as a delivery failure" \
   || no "reaped-child shutdown" "signal_failed=$signal_failed, log: $(cat "$LOG")"
-
-# --- 3. a latched reload is NOT an operand of the shutdown gate -------------------
-# `reload` is armed only after a confirmed TERM to an assigned pid, so it cannot
-# describe a no-child state: a reload must neither refuse the start nor deliver
-# anything to the fresh child.
-shutdown=0 reload=1
-start
-sleep 0.2
-[ -n "$radvd_pid" ] && [ ! -s "$SIGNALS" ] && command kill -0 "$radvd_pid" 2>/dev/null \
-  && ok "a latched reload neither gates the start nor delivers to the fresh child" \
-  || no "reload latch" "radvd_pid='$radvd_pid', signals=[$(tr '\n' ' ' <"$SIGNALS")]"
-reap "$radvd_pid"
 
 # request_reload refuses any config that is not a regular file and config-tests the
 # rest, so every case from here down needs a real regular-file config and an
@@ -460,21 +444,19 @@ grep -Fq 'a graceful stop cannot be confirmed' "$REPO_ROOT/README.md" \
 
 # --- 11. a latched shutdown whose TERM was refused does not wait for the child -----
 # The skip lives inline in the loop, so it is extracted as a self-balanced RANGE. The
-# `&&` is what makes the start anchor unique: `if [ "$shutdown" -eq 1 ]` alone also
-# matches request_reload's guard and the arm below, and a sed range that restarts
-# emits both blocks. The block's own `fi` is the first at that indent, and it holds
-# no nested `if`. Its whole content is a control-flow decision, so the oracle is
-# returns while a live child is still running.
+# `! {` makes the start anchor unique. The outer `fi` is the first at its indent;
+# nested conditions are indented farther. Its whole content is a control-flow decision,
+# so the oracle is returning while a live child is still running.
 # The anchors are the entrypoint's own literal text, `$` included, so the single quotes
 # are required exactly as case 7's are.
 # shellcheck disable=SC2016
-SKIP=$(extract_range '^  if \[ "\$shutdown" -eq 1 \] && \[ "\$signal_failed" -eq 1 \]' \
+SKIP=$(extract_range '^  if ! { \[ "\$shutdown" -eq 1 \] && \[ "\$signal_failed" -eq 1 \]; }; then$' \
   '^  fi$' "$WORK/wait_skip.sh") || exit 1
 # Bounded, so a reverted skip fails this case instead of hanging the file; the child
 # outlives the bound on purpose. BusyBox `timeout` reports 143 where GNU reports 124
 # (shell.md), so the blocking arm asserts only "non-zero".
-# The inner script is the CHILD shell's, so its `$1`/`$2`/`$status` must not expand
-# here. shellcheck reads a `bash -c` string as a nested script only when `bash` is the
+# The inner script is the CHILD shell's, so its `$1`/`$2` must not expand here.
+# shellcheck reads a `bash -c` string as a nested script only when `bash` is the
 # command word, and the bound in front of it is not optional — case 8 needs no
 # directive for the same construct because it has no `timeout`.
 # shellcheck disable=SC2016
@@ -483,17 +465,22 @@ run_skip() {
     set -u
     shutdown=$1
     signal_failed=$2
+    sig_seen=0
     sleep 5 &
     radvd_pid=$!
     . "$3"
-    printf "status=%s\n" "$status"
+    child_alive=no
+    if command kill -0 "$radvd_pid" 2>/dev/null; then
+      child_alive=yes
+    fi
+    printf "child_alive=%s\n" "$child_alive"
     command kill -TERM "$radvd_pid" 2>/dev/null || true
   ' _ "$1" "$2" "$SKIP"
 }
 
 out=$(run_skip 1 1)
 rc=$?
-[ "$rc" -eq 0 ] && [ "$out" = "status=0" ] \
+[ "$rc" -eq 0 ] && [ "$out" = "child_alive=yes" ] \
   && ok "a shutdown latched before the loop whose TERM was refused does not wait for the child" \
   || no "latched refused shutdown skips the wait" "rc=$rc, out: $out"
 

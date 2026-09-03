@@ -41,6 +41,29 @@ if [ -r "$RULE_SRC" ] || [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
   fi
 fi
 
+# Bind the forwarding alert to both warning forms in the shipped binary.
+if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
+  # shellcheck disable=SC2016
+  forwarding_rule=$(sed -n '/alert: RadvdForwardingDisabled/,/^        for:/p' "$RULE_SRC" \
+    | sed -n 's/^[[:space:]]*|~ `\(.*\)` \[[0-9]\+[a-z]\]$/\1/p')
+  if [ -z "$forwarding_rule" ]; then
+    err "FAIL: could not extract the RadvdForwardingDisabled pattern from $RULE_SRC"
+    fail=1
+  else
+    for forwarding_warning in \
+      'IPv6 forwarding seems to be disabled, but continuing anyway' \
+      'IPv6 forwarding on interface seems to be disabled, but continuing anyway'; do
+      if ! grep -aFq "$forwarding_warning" /usr/sbin/radvd; then
+        err "FAIL: shipped radvd binary does not contain forwarding warning: $forwarding_warning"
+        fail=1
+      elif ! printf '%s\n' "$forwarding_warning" | grep -Eq "$forwarding_rule"; then
+        err "FAIL: README RadvdForwardingDisabled pattern does not match: $forwarding_warning"
+        fail=1
+      fi
+    done
+  fi
+fi
+
 # 3. Version assertion: the built binary reports exactly the pinned upstream
 #    version (RADVD_EXPECTED_VERSION, passed by the Dockerfile test stage from
 #    ARG RADVD_VERSION; a leading "v" is stripped here). A plain local run
@@ -217,49 +240,78 @@ if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
   fi
 fi
 
-# A prompt first-read failure enters the diagnostic reread. Make that reread
-# block and require the production bound to return through one warning.
+# Preserve a reaped child's status when ash evicts the job-table entry.
 if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
-  reread_dir=$(mktemp -d)
-  if ! extract_entrypoint_functions "$reread_dir"; then
+  sentinel_dir=$(mktemp -d)
+  sentinel="$sentinel_dir/wait-status-sentinel.sh"
+  sed -n '/^    # 127 means an earlier wait already took radvd.*status/,/^    fi$/p' \
+    /usr/local/bin/entrypoint.sh >"$sentinel"
+  if [ ! -s "$sentinel" ]; then
+    err "FAIL: could not extract the wait-status sentinel from the entrypoint"
     fail=1
   else
-    printf '%s\n' '#!/bin/sh' 'exec sleep 30' >"$reread_dir/bin/cat"
-    # The lines below are the shim's SOURCE, so $TIMEOUT_COUNT, $n and $@ must
-    # expand when the shim runs rather than while it is being written.
-    # shellcheck disable=SC2016
+    sentinel_rc=0
+    sentinel_out=$(/bin/busybox sh -c '
+      set -u
+      /bin/busybox sh -c "exit 3" &
+      child=$!
+      wait "$child"
+      status=$?
+      evicted=$(/bin/busybox true)
+      wait "$child" 2>/dev/null
+      wait_status=$?
+      . "$1"
+      printf "wait_status=%s status=%s\n" "$wait_status" "$status"
+    ' _ "$sentinel") || sentinel_rc=$?
+    if [ "$sentinel_rc" -ne 0 ] \
+      || [ "$sentinel_out" != "wait_status=127 status=3" ]; then
+      err "FAIL: wait-status sentinel did not preserve the reaped child status"
+      err "${sentinel_out:-no output}"
+      fail=1
+    fi
+  fi
+  rm -rf "$sentinel_dir"
+fi
+
+# A failed read returns through the degraded warning inside the bound.
+if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
+  failed_read_dir=$(mktemp -d)
+  if ! extract_entrypoint_functions "$failed_read_dir"; then
+    fail=1
+  else
+    # The lines below are the shim's source, so its diagnostic is written when
+    # the shim runs rather than while it is being created.
     printf '%s\n' \
       '#!/bin/sh' \
-      ': "${TIMEOUT_COUNT:?}"' \
-      'n=0' \
-      '[ ! -r "$TIMEOUT_COUNT" ] || n=$(/bin/busybox cat "$TIMEOUT_COUNT")' \
-      'n=$((n + 1))' \
-      'printf "%s\\n" "$n" >"$TIMEOUT_COUNT"' \
-      '[ "$n" -ne 1 ] || exit 2' \
-      'exec /bin/busybox timeout "$@"' >"$reread_dir/bin/timeout"
-    chmod +x "$reread_dir/bin/cat" "$reread_dir/bin/timeout"
-    printf 'interface eth0 { IgnoreIfMissing on; AdvRASrcAddress { fe80::1; }; };\n' >"$reread_dir/radvd.conf"
-    reread_rc=0
+      'printf "%s\n" "shimmed timeout failure" >&2' \
+      'exit 2' >"$failed_read_dir/bin/timeout"
+    chmod +x "$failed_read_dir/bin/timeout"
+    printf 'interface eth0 { IgnoreIfMissing on; AdvRASrcAddress { fe80::1; }; };\n' >"$failed_read_dir/radvd.conf"
+    failed_read_rc=0
     # As above: the sh -c body's $1..$3 belong to that shell.
     # shellcheck disable=SC2016
-    reread_out=$(TIMEOUT_COUNT="$reread_dir/timeout-count" PATH="$reread_dir/bin:$PATH" \
+    failed_read_out=$(PATH="$failed_read_dir/bin:$PATH" \
       /bin/busybox timeout 8 sh -c '
         set -u
         . "$1"
         . "$2"
         CONF=$3
         check_config_node
-      ' _ "$reread_dir/fn-sanitize_log_value.sh" "$reread_dir/fn-check_config_node.sh" "$reread_dir/radvd.conf" 2>&1) || reread_rc=$?
-    if [ "$reread_rc" -ne 0 ]; then
-      err "FAIL: diagnostic config reread exceeded its production bound (rc=$reread_rc)"
-      err "$reread_out"
+      ' _ "$failed_read_dir/fn-sanitize_log_value.sh" "$failed_read_dir/fn-check_config_node.sh" "$failed_read_dir/radvd.conf" 2>&1) || failed_read_rc=$?
+    if [ "$failed_read_rc" -ne 0 ]; then
+      err "FAIL: failed config read did not return through its degraded warning (rc=$failed_read_rc)"
+      err "$failed_read_out"
       fail=1
-    elif ! printf '%s\n' "$reread_out" | grep -Fq 'radvd.conf could not be read'; then
-      err "FAIL: bounded diagnostic reread emitted no unreadable-node warning"
-      err "$reread_out"
+    elif ! printf '%s\n' "$failed_read_out" | grep -Fq 'radvd.conf could not be read'; then
+      err "FAIL: failed config read emitted no unreadable-node warning"
+      err "$failed_read_out"
+      fail=1
+    elif ! printf '%s\n' "$failed_read_out" | grep -Fq 'err="shimmed timeout failure"'; then
+      err "FAIL: failed config read did not capture the read diagnostic"
+      err "$failed_read_out"
       fail=1
     fi
-    rm -rf "$reread_dir"
+    rm -rf "$failed_read_dir"
   fi
 fi
 

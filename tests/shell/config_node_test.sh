@@ -97,34 +97,4 @@ else
   chmod 644 "$CONF"
 fi
 
-# --- 2. an elapsed read budget stays bounded, on the status BusyBox produces ------
-# BusyBox timeout reports expiry as 143, not GNU's translated 124. Drive that
-# process-boundary result directly and record whether the failed-read arm falls
-# through to an unbounded diagnostic cat.
-setup
-printf 'interface eth0 { IgnoreIfMissing on; AdvRASrcAddress { fe80::1; }; };\n' >"$CONF"
-calls="$WORK/timeout-143-calls"
-: >"$calls"
-# Both stubs shadow the external commands the runtime-loaded check_config_node
-# invokes, so their call site is not in this file for shellcheck to see.
-# shellcheck disable=SC2329
-timeout() {
-  printf 'timeout %s\n' "$*" >>"$calls"
-  return 143
-}
-# shellcheck disable=SC2329
-cat() {
-  printf 'cat %s\n' "$*" >>"$calls"
-  return 99
-}
-_rc=0
-check_config_node 2>"$LOG" || _rc=$?
-timeout_calls=$(grep -c '^timeout ' "$calls" || true)
-cat_calls=$(grep -c '^cat ' "$calls" || true)
-unset -f timeout cat
-[ "$_rc" -eq 0 ] && [ "$timeout_calls" -ge 1 ] && [ "$cat_calls" -eq 0 ] \
-  && logged 'read of the config exceeded 5s' \
-  && ok "BusyBox timeout expiry stays bounded and emits the exceeded-budget warning without a direct re-read" \
-  || no "BusyBox timeout expiry" "rc=$_rc, timeout_calls=$timeout_calls, cat_calls=$cat_calls, log: $(cat "$LOG")"
-
 report

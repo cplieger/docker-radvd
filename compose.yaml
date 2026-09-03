@@ -6,6 +6,8 @@ services:
     restart: unless-stopped
 
     # RAs are ICMPv6 on a real LAN interface, so radvd needs host networking (or a macvlan).
+    # With host networking, the host's net.ipv6.conf.all.forwarding applies and must
+    # be 1 or 2. radvd advertises this node as a router either way. See the README.
     network_mode: host
     cap_add:
       - NET_RAW  # required: raw ICMPv6 socket to emit RAs

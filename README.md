@@ -111,7 +111,10 @@ docker restart radvd
 `docker kill -s HUP radvd` reloads too and keeps the container in place, but it
 disarms the container's restart policy for the rest of the run (see the `docker
 kill` caveat below). This image's crash recovery IS that policy, so prefer `docker
-restart` unless you specifically need the container itself left alone.
+restart` unless you specifically need the container itself left alone. In that
+case, run `docker exec radvd kill -HUP 1`. This sends the same reload signal from
+inside the container and keeps the restart policy armed because the Docker API
+kill call, not the signal, disarms it.
 
 The entrypoint restarts the daemon so it re-reads the config. On reload it checks
 the config path again. It exits if the path is no longer a regular file, and it
@@ -201,8 +204,8 @@ what makes listing them necessary. None of the four can be dropped further:
   into a crash loop.
 - `KILL` lets the root supervisor signal its own non-root child. Without it both
   documented signal paths fail, and the entrypoint can only report the refusal:
-  `docker stop` leaves radvd running while PID 1 exits 0 (with a
-  `a graceful stop cannot be confirmed` warning), so the final zero-lifetime
+  `docker stop` leaves radvd running while PID 1 exits 0 (logging
+  `a graceful stop cannot be confirmed`), so the final zero-lifetime
   Router Advertisement is never sent and LAN hosts keep this node as their
   default router until the advertised lifetime expires; and
   `docker kill -s HUP` logs `SIGHUP reload refused: TERM delivery to radvd
@@ -216,12 +219,13 @@ what makes listing them necessary. None of the four can be dropped further:
 | Setting | Value | Reason |
 | --- | --- | --- |
 | `network_mode` | `host` (or `macvlan`) | RAs are emitted via ICMPv6 on a real LAN interface; container networking would isolate them |
+| `net.ipv6.conf.all.forwarding` | `1` (or `2`) on the host | With `network_mode: host`, this is the host's sysctl and cannot be set from compose. radvd advertises this node as a default router regardless of it. If forwarding is off, hosts install a default route through a node that drops their off-segment traffic. radvd logs `IPv6 forwarding seems to be disabled, but continuing anyway` once at startup, with a per-interface variant beside it. |
 
 ## Healthcheck
 
 The built-in healthcheck runs `pidof radvd` every 30s (5s timeout, 3 retries, 15s start period), so a container whose daemon is up reports `healthy`. It is a liveness probe only, and it is not what reacts to a crash: when radvd dies the supervising entrypoint propagates the exit and the container stops within a second, so a crash is handled by your `restart` policy rather than by the container ageing into `unhealthy` — with the `docker kill` caveat in [Reloading](#reloading-configuration).
 
-Neither the probe nor that exit propagation covers "RAs aren't being emitted because the source address is missing" (that's the HA case where radvd intentionally stays running but silent). The image ships upstream's own RA decoder, `radvdump`, so `docker exec radvd radvdump` is a first look at what is on the wire — run it on the peer node to confirm the BACKUP is staying silent; whether it sees this container's own RAs depends on multicast loopback. For end-to-end verification, run an off-host probe that listens for RAs on the LAN segment:
+Neither the probe nor that exit propagation covers "RAs aren't being emitted because the source address is missing" (that's the HA case where radvd intentionally stays running but silent). With IPv6 forwarding off on the host, radvd also runs and reports `healthy`, and every advertisement still names this node as a default router while the kernel forwards nothing; `rdisc6` shows the RA, but only the host's sysctl shows whether the advertised route works. The image ships upstream's own RA decoder, `radvdump`, so `docker exec radvd radvdump` is a first look at what is on the wire — run it on the peer node to confirm the BACKUP is staying silent; whether it sees this container's own RAs depends on multicast loopback. For end-to-end verification, run an off-host probe that listens for RAs on the LAN segment:
 
 ```bash
 # On any IPv6 host on the LAN:
@@ -300,6 +304,31 @@ groups:
             predicts that radvd may block or fail on the node while nothing
             verifies that RAs are emitted. Confirm what reaches the LAN with
             `rdisc6`.
+      - alert: RadvdForwardingDisabled
+        expr: |
+          sum by (hostname) (count_over_time(
+            {container="radvd"}
+            |~ `seems to be disabled` [10m]
+          )) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "radvd is advertising a default route the host does not forward"
+          description: >
+            radvd read /proc/sys/net/ipv6/conf/all/forwarding and found a value
+            that is neither 1 nor 2, or read a per-interface forwarding value
+            below 1. It keeps advertising this node with its configured
+            AdvDefaultLifetime, so LAN hosts can install a default route through
+            a kernel that will not forward their traffic while `pidof radvd`
+            reports healthy. Fix the sysctl on the host; `network_mode: host`
+            means compose cannot set it. The global warning is emitted once per
+            radvd process, so this alert clears after the window even if the
+            state persists. The per-interface warning can reappear when radvd
+            checks an interface. A node that deliberately sets
+            AdvDefaultLifetime 0 to advertise prefixes only also matches this
+            rule legitimately. Use `rdisc6` and the host sysctl to confirm the
+            state is gone.
 ```
 
 Every pattern above is a string radvd 2.21 or the entrypoint actually emits,
