@@ -47,17 +47,20 @@ contract.
   read may still be readable by radvd. Do not turn this warning into a hard
   failure. The non-regular-node arm exits 1 from both call sites because radvd
   cannot consume a FIFO or directory, and its own open of one is unbounded.
-- **The wrapper reports what the config composes; radvd reports its own
+- **The wrapper does not read the config's contents; radvd reports its own
   diagnostics.** A state radvd announces unconditionally through
   `flog(LOG_ERR, …)` is left to radvd's own line and to the supervisor's exit
   report: a config it rejects outright (`radvd.c:330`, `:812`), and an interface
   it cannot set up under `IgnoreIfMissing off` (`radvd.c:780-786`, then
-  `exit(1)`). The wrapper does not read the config's directive composition. An
-  interface block with no enabled `AdvSendAdvert on` and an `AdvRASrcAddress`
-  pinned to a global VIP both run silently. radvd reports the first only at
-  debug 2 and only for an interface it has brought up, and it never reports the
-  second. Use `rdisc6` from a LAN host or `radvdump` on the peer to check these
-  states. So before adding a warning, state three things: the
+  `exit(1)`). An interface block with no enabled `AdvSendAdvert on` and an
+  `AdvRASrcAddress` pinned to a global VIP both run silently. radvd reports the
+  first only at debug 2 and only for an interface it has brought up. The SENDING
+  node never diagnoses the second at all -- it does not test whether the source
+  address it selected is link-local -- but a node on the segment that RECEIVES
+  such an RA does warn about it, at the shipped debug level, and names the sender.
+  So read the peer's `docker logs` first, then `rdisc6` from a LAN host or
+  `radvdump` on the peer for what reaches the wire. So before adding a warning,
+  state three things: the
   upstream line, its level, and whether radvd reaches it in the HA topology the
   README mandates. A worked example
   of a warning that FAILS the test, so both sides of the rule are visible: a

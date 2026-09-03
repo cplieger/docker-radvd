@@ -96,7 +96,12 @@ interface eth0 {
 };
 ```
 
-Nothing in the container reports a non-link-local RA source. Verify the source with `radvdump` on the peer node or `rdisc6` from a LAN host. The image ships upstream's own RA decoder, so `docker exec radvd radvdump` on the peer node shows whether the BACKUP is emitting while the MASTER holds the link-local. See [docker-keepalived](https://github.com/cplieger/docker-keepalived) for the sibling container.
+The container making this mistake reports nothing: radvd matches `AdvRASrcAddress`
+against the interface's addresses without testing whether the match is link-local.
+Any node on the segment that receives the RA logs `received icmpv6 RA packet with
+non-linklocal source address` and names the sender, so the peer's own `docker logs`
+is the first place to look; `radvdump` on the peer node or `rdisc6` from a LAN host
+confirms what reaches the wire. The image ships upstream's own RA decoder, so `docker exec radvd radvdump` on the peer node shows whether the BACKUP is emitting while the MASTER holds the link-local. See [docker-keepalived](https://github.com/cplieger/docker-keepalived) for the sibling container.
 
 Background reading: [Firstyear's blog post on HA radvd on Linux](https://fy.blackhats.net.au/blog/2018-11-01-high-available-radvd-on-linux/) explains the pattern in detail.
 
@@ -219,13 +224,13 @@ what makes listing them necessary. None of the four can be dropped further:
 | Setting | Value | Reason |
 | --- | --- | --- |
 | `network_mode` | `host` (or `macvlan`) | RAs are emitted via ICMPv6 on a real LAN interface; container networking would isolate them |
-| `net.ipv6.conf.all.forwarding` | `1` (or `2`) on the host | With `network_mode: host`, this is the host's sysctl and cannot be set from compose. radvd advertises this node as a default router regardless of it. If forwarding is off, hosts install a default route through a node that drops their off-segment traffic. radvd logs `IPv6 forwarding seems to be disabled, but continuing anyway` once at startup, with a per-interface variant beside it. |
+| `net.ipv6.conf.all.forwarding` | `1` (or `2`) on the host, when this node advertises a default route | With `network_mode: host`, this is the host's sysctl and cannot be set from compose. With a non-zero `AdvDefaultLifetime`, radvd advertises this node as a default router regardless of the sysctl, so with forwarding off hosts install a default route through a node that drops their off-segment traffic. A prefix-only config (`AdvDefaultLifetime 0`) advertises no default route and needs no forwarding here. radvd logs `IPv6 forwarding seems to be disabled, but continuing anyway` once at startup either way, with a per-interface variant beside it. |
 
 ## Healthcheck
 
 The built-in healthcheck runs `pidof radvd` every 30s (5s timeout, 3 retries, 15s start period), so a container whose daemon is up reports `healthy`. It is a liveness probe only, and it is not what reacts to a crash: when radvd dies the supervising entrypoint propagates the exit and the container stops within a second, so a crash is handled by your `restart` policy rather than by the container ageing into `unhealthy` — with the `docker kill` caveat in [Reloading](#reloading-configuration).
 
-Neither the probe nor that exit propagation covers "RAs aren't being emitted because the source address is missing" (that's the HA case where radvd intentionally stays running but silent). With IPv6 forwarding off on the host, radvd also runs and reports `healthy`, and every advertisement still names this node as a default router while the kernel forwards nothing; `rdisc6` shows the RA, but only the host's sysctl shows whether the advertised route works. The image ships upstream's own RA decoder, `radvdump`, so `docker exec radvd radvdump` is a first look at what is on the wire — run it on the peer node to confirm the BACKUP is staying silent; whether it sees this container's own RAs depends on multicast loopback. For end-to-end verification, run an off-host probe that listens for RAs on the LAN segment:
+Neither the probe nor that exit propagation covers "RAs aren't being emitted because the source address is missing" (that's the HA case where radvd intentionally stays running but silent). radvd does report the state passively: whenever an RS or RA arrives on an interface it never finished bringing up, it logs `<iface> received RS or RA on <iface> but <iface> is not ready and setup_iface failed` at the default `RADVD_DEBUG_LEVEL=0` -- the expected steady state on an HA backup, where the MASTER's own RAs trigger it, and lost emission on a single node, where LAN router solicitations raise it if this node advertises a default route and the host therefore forwards -- with nothing in the line separating those cases, which is why no rule below matches it; add `RADVD_DEBUG_LEVEL=5` for the cause (`no configured AdvRASrcAddress present, skipping send`). With IPv6 forwarding off on the host, radvd also runs and reports `healthy`, and an advertisement carrying a non-zero `AdvDefaultLifetime` still names this node as a default router while the kernel forwards nothing; `rdisc6` shows the RA, but only the host's sysctl shows whether the advertised route works. The image ships upstream's own RA decoder, `radvdump`, so `docker exec radvd radvdump` is a first look at what is on the wire — run it on the peer node to confirm the BACKUP is staying silent; whether it sees this container's own RAs depends on multicast loopback. For end-to-end verification, run an off-host probe that listens for RAs on the LAN segment:
 
 ```bash
 # On any IPv6 host on the LAN:
@@ -250,13 +255,13 @@ groups:
         expr: |
           sum by (hostname) (count_over_time(
             {container="radvd"}
-            |~ `SIGHUP reload refused|exiting, failed to read config file|exiting, permissions on conf_file invalid|not found:|does not exist or is not set up properly \(setup_iface=|unable to drop root privileges|invalid RADVD_DEBUG_LEVEL|radvd.conf is not a regular file|failed to create radvd PID directory|must be at least|must be between|must be zero or between|must not be greater than|must be set with|must be greater than or equal to AdvPreferredLifetime|invalid prefix length|invalid route prefix length` [10m]
+            |~ `SIGHUP reload refused|exiting, failed to read config file|exiting, permissions on conf_file invalid|not found:|does not exist or is not set up properly \(setup_iface=|unable to drop root privileges|received icmpv6 RA packet with non-linklocal source address|invalid RADVD_DEBUG_LEVEL|radvd.conf is not a regular file|failed to create radvd PID directory|must be at least|must be between|must be zero or between|must not be greater than|must be set with|must be greater than or equal to AdvPreferredLifetime|invalid prefix length|invalid route prefix length` [10m]
           )) > 0
         for: 0m
         labels:
           severity: warning
         annotations:
-          summary: "radvd rejected its config"
+          summary: "radvd rejected its config, or a peer is advertising from an invalid source address"
           description: >
             radvd logged a config parse or activation failure. Check your
             radvd.conf. Present at startup, radvd exits, the supervising
@@ -278,7 +283,11 @@ groups:
             `unable to drop root privileges`, which is not a config fault at
             all: the container was started without the SETUID and SETGID
             capabilities, so `--username=radvd` cannot take effect (see the hardened
-            profile above).
+            profile above). The pattern also matches a peer on this segment
+            sourcing an RA from a non-link-local address, which every host
+            silently discards: radvd names the sender and keeps running, so this
+            is the sending node's `AdvRASrcAddress` to fix, not this one's
+            config.
             Two groups pass the reload config test, so for them the
             rejected-edit reading does not hold: the interface's presence, and
             every bound radvd checks only after the parse (interval bounds,

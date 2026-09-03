@@ -43,7 +43,14 @@ run_triage
   && ok "a readable config runs the node check and nothing else" \
   || no "readable config routing" "rc=$_rc, log: $(cat "$LOG")"
 
-# --- 2. the PID-directory fatal's phrase is asserted at the SOURCE -----------------
+# --- 2. an absent config skips the node check without logging -------------------
+setup
+run_triage
+[ "$_rc" -eq 0 ] && [ ! -s "$LOG" ] \
+  && ok "an absent startup config skips the node check without logging" \
+  || no "absent config routing" "rc=$_rc, log: $(cat "$LOG")"
+
+# --- 3. the PID-directory fatal's phrase is asserted at the SOURCE -----------------
 # `failed to create radvd PID directory` is the one alternative in the README's alert
 # rule that no UNIT path drives (the mkdir only fails on a read-only /run);
 # scripts/smoke.sh scenario 8 drives it at runtime, so this source-side check is the

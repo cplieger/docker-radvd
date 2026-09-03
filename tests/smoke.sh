@@ -64,6 +64,28 @@ if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
   fi
 fi
 
+# Bind the peer-observation alternative of RadvdConfigError to the shipped binary.
+# radvd emits this on RA receipt, so `radvd --configtest` cannot reach it and the
+# rodata anchor is the only mechanism that does.
+if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
+  # shellcheck disable=SC2016
+  config_rule=$(sed -n '/alert: RadvdConfigError/,/^        for:/p' "$RULE_SRC" \
+    | sed -n 's/^[[:space:]]*|~ `\(.*\)` \[[0-9]\+[a-z]\]$/\1/p')
+  if [ -z "$config_rule" ]; then
+    err "FAIL: could not extract the RadvdConfigError pattern from $RULE_SRC"
+    fail=1
+  else
+    peer_warning='received icmpv6 RA packet with non-linklocal source address'
+    if ! grep -aFq "$peer_warning" /usr/sbin/radvd; then
+      err "FAIL: shipped radvd binary does not contain peer warning: $peer_warning"
+      fail=1
+    elif ! printf '%s\n' "$peer_warning" | grep -Eq "$config_rule"; then
+      err "FAIL: README RadvdConfigError pattern does not match: $peer_warning"
+      fail=1
+    fi
+  fi
+fi
+
 # 3. Version assertion: the built binary reports exactly the pinned upstream
 #    version (RADVD_EXPECTED_VERSION, passed by the Dockerfile test stage from
 #    ARG RADVD_VERSION; a leading "v" is stripped here). A plain local run
@@ -244,7 +266,7 @@ fi
 if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
   sentinel_dir=$(mktemp -d)
   sentinel="$sentinel_dir/wait-status-sentinel.sh"
-  sed -n '/^    # 127 means an earlier wait already took radvd.*status/,/^    fi$/p' \
+  sed -n '/^    if \[ "\$wait_status" -ne 127 \]; then$/,/^    fi$/p' \
     /usr/local/bin/entrypoint.sh >"$sentinel"
   if [ ! -s "$sentinel" ]; then
     err "FAIL: could not extract the wait-status sentinel from the entrypoint"

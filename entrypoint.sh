@@ -19,6 +19,9 @@ sanitize_log_value() {
 # Armed before the debug-level gate and preflight, so PID 1 can latch a stop
 # before start_radvd decides whether a child may start.
 radvd_pid=""
+# Before the first wait, 127 is the child's own failed exec; the eviction
+# sentinel below skips the assignment, so this initial value is what propagates.
+status=127
 reload=0
 shutdown=0
 # Set when a TERM to the child was refused, so the shutdown arm cannot claim a
@@ -233,12 +236,13 @@ while :; do
   # A shutdown latched before this loop whose TERM was refused has no exit still
   # coming: there is nothing to wait for, so skip to the disposition below.
   if ! { [ "$shutdown" -eq 1 ] && [ "$signal_failed" -eq 1 ]; }; then
-    # ash writes a bare job-status word to fd2 for a child killed BY a signal (reachable
-    # through the pre-pid latch); a per-command redirect never reaches the traps' own fd2.
+    # ash writes a bare job-status word to fd2 for a child killed BY a signal, which every
+    # accepted reload produces; a per-command redirect never reaches the traps' own fd2.
     wait "$radvd_pid" 2>/dev/null
     wait_status=$?
-    # 127 means an earlier wait already took radvd's status and request_reload's configtest
-    # substitution has since evicted the job, so the status saved above stands.
+    # 127 after an earlier wait took radvd's status means request_reload's configtest
+    # substitution has since evicted the job, so the status saved above stands. Before
+    # any wait it is the child's own exec failure, which the initial value carries.
     if [ "$wait_status" -ne 127 ]; then
       status="$wait_status"
     fi

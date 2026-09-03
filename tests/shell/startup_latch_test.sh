@@ -493,4 +493,22 @@ rc=$?
   && ok "with the TERM delivered the loop still waits for the child's own exit" \
   || no "delivered shutdown still waits" "rc=$rc, out: $out"
 
+# --- 13. reload re-checks the node before starting its replacement -------------
+RELOAD_ARM=$(extract_range '^  if \[ "\$reload" -eq 1 \]; then$' '^  fi$' "$WORK/reload_arm.sh") || exit 1
+RELOAD_ORDER="$WORK/reload-order"
+reload_arm_rc=0
+bash -c '
+  set -u
+  reload=1
+  check_config_node() { printf "NODE_CHECK_CALLED\n"; exit 1; }
+  start_radvd() { printf "START_RADVD_CALLED\n"; }
+  while :; do
+    . "$1"
+    break
+  done
+' _ "$RELOAD_ARM" >"$RELOAD_ORDER" 2>"$LOG" || reload_arm_rc=$?
+[ "$reload_arm_rc" -eq 1 ] && [ "$(cat "$RELOAD_ORDER")" = "NODE_CHECK_CALLED" ] \
+  && ok "the reload arm checks the config node before starting its replacement" \
+  || no "reload node-check order" "rc=$reload_arm_rc, calls=[$(tr '\n' ' ' <"$RELOAD_ORDER")], log: $(cat "$LOG")"
+
 report
