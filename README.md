@@ -335,12 +335,10 @@ groups:
             radvd process, so this alert clears after the window even if the
             state persists. The per-interface warning is emitted each time radvd
             sets an interface up: at startup, on reload, and on a netlink change
-            event. Neither arm is a firing guarantee, so confirm the state with
-            `rdisc6` and the host sysctl rather than from the alert alone.
-            A node that deliberately sets
-            AdvDefaultLifetime 0 to advertise prefixes only also matches this
-            rule legitimately. Use `rdisc6` and the host sysctl to confirm the
-            state is gone.
+            event. So neither arm is a firing guarantee, and a node that
+            deliberately sets AdvDefaultLifetime 0 to advertise prefixes only
+            matches this rule legitimately: confirm with `rdisc6` and the host
+            sysctl rather than from the alert alone.
       - alert: RadvdSupervisorFault
         expr: |
           sum by (hostname) (count_over_time(
