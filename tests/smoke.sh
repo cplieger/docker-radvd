@@ -221,6 +221,9 @@ fi
 if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
   sentinel_dir=$(mktemp -d)
   sentinel="$sentinel_dir/wait-status-sentinel.sh"
+  # The sed script matches the entrypoint's own source text, so `$wait_status`
+  # must not expand while this file is being read.
+  # shellcheck disable=SC2016
   sed -n '/^    if \[ "\$wait_status" -ne 127 \]; then$/,/^    fi$/p' \
     /usr/local/bin/entrypoint.sh >"$sentinel"
   if [ ! -s "$sentinel" ]; then
@@ -228,6 +231,9 @@ if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
     fail=1
   else
     sentinel_rc=0
+    # The sh -c body is the CHILD shell's, so its `$!` and `$?` must not expand
+    # while this file is being read.
+    # shellcheck disable=SC2016
     sentinel_out=$(/bin/busybox sh -c '
       set -u
       /bin/busybox sh -c "exit 3" &

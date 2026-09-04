@@ -456,9 +456,9 @@ SKIP=$(extract_range '^  if ! { \[ "\$shutdown" -eq 1 \] && \[ "\$signal_failed"
 # outlives the bound on purpose. BusyBox `timeout` reports 143 where GNU reports 124
 # (shell.md), so the blocking arm asserts only "non-zero".
 # The inner script is the CHILD shell's, so its `$1`/`$2` must not expand here.
-# shellcheck reads a `bash -c` string as a nested script only when `bash` is the
-# command word, and the bound in front of it is not optional — case 8 needs no
-# directive for the same construct because it has no `timeout`.
+# Note that shellcheck reads a `bash -c` string as a nested script only when
+# `bash` is the command word, and the bound in front of it is not optional —
+# case 8 needs no directive for the same construct because it has no `timeout`.
 # shellcheck disable=SC2016
 run_skip() {
   timeout 3 bash -c '
