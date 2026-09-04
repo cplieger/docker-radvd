@@ -77,13 +77,19 @@ mkdir "$TMPDIR_NONFILE/radvd.conf"
 # fixture itself (`:/etc/radvd:`, the only delivery a `--read-only` rootfs accepts)
 # is not also sent a `docker cp` copy.
 start_container() {
-  local name=$1 ready
+  local name=$1 ready shim
   shift
   docker create --name "$name" --network none "$@" "$IMAGE" >/dev/null
   case "$*" in
     *":/etc/radvd:"*) ;;
     *) docker cp "$TMPDIR_FIXTURE" "$name:/etc/radvd" >/dev/null ;;
   esac
+  # Executable shims are DELIVERED, never bind-mounted: a bind mount inherits the
+  # source filesystem's noexec, and execvp then SKIPS the unexecutable shim and falls
+  # through to the next PATH entry -- the real binary -- so the scenario runs unshimmed.
+  for shim in ${SHIMS[@]+"${SHIMS[@]}"}; do
+    docker cp "${shim%%:*}" "$name:${shim#*:}" >/dev/null
+  done
   docker start "$name" >/dev/null
   ready=""
   for _ in $(seq 1 15); do
@@ -147,9 +153,6 @@ printf '[smoke] starting %s (network none, fixture config)\n' "$C1"
 start_container "$C1" --cap-add NET_RAW
 logs=$(docker logs "$C1" 2>&1)
 grep -q 'msg="starting radvd"' <<<"$logs" || fail "missing startup log line"
-# tests/radvd.conf enables IgnoreIfMissing and carries no AdvSendAdvert on, so startup
-# validation must emit exactly this warning (proves the preflight ran).
-grep -q 'no enabled AdvSendAdvert on directive found' <<<"$logs" || fail "startup directive validation warning not emitted"
 # Read Docker's own verdict instead of re-running the predicate: the shipped probe is
 # exec form, so a shell-form `docker exec ... pidof radvd` would verify neither the
 # probe nor its wiring, and start_container already required the predicate itself.
@@ -170,7 +173,7 @@ grep -qx 'radvd' <<<"$owners" || fail "no radvd-owned radvd process; observed ow
 # --with-pidfile writes into; nothing else reads that Dockerfile coupling.
 docker exec "$C1" test -f /run/radvd/radvd.pid \
   || fail "radvd did not write its pid file to /run/radvd (Dockerfile --with-pidfile vs the entrypoint's mkdir)"
-printf '[smoke] PASS  startup: radvd up, preflight warned, healthcheck healthy, privileges dropped\n'
+printf '[smoke] PASS  startup: radvd up, healthcheck healthy, privileges dropped\n'
 
 # --- 2. HUP reload (world-readable config) -----------------------------------
 pid_before=$(docker exec "$C1" pidof radvd) || fail "cannot read radvd pid"
@@ -179,12 +182,10 @@ docker kill -s HUP "$C1" >/dev/null
 pid_after=$(wait_for_reload "$C1" 1 "$pid_before")
 [ -n "$pid_after" ] || fail "HUP did not reload radvd (no reload log, or PID unchanged)"
 [ "$(docker inspect -f '{{.State.Running}}' "$C1")" = "true" ] || fail "container not running after HUP reload"
-[ "$(docker logs "$C1" 2>&1 | grep -c 'no enabled AdvSendAdvert on directive found')" -ge 2 ] \
-  || fail "reload did not re-run the directive validation"
 job_status_after=$(docker logs "$C1" 2>&1 | grep -Ec '^(Terminated|Killed|Aborted)$' || true)
 [ "$job_status_after" -eq "$job_status_before" ] \
   || fail "HUP reload leaked a bare BusyBox ash job-status line into docker logs"
-printf '[smoke] PASS  HUP reload: radvd restarted (pid %s -> %s), validation re-ran, container Up\n' "$pid_before" "$pid_after"
+printf '[smoke] PASS  HUP reload: radvd restarted (pid %s -> %s), container Up\n' "$pid_before" "$pid_after"
 
 # --- 3. HUP reload with a root-only config (the 8e7a792 field failure) -------
 docker exec "$C1" sh -c 'chown -R root:root /etc/radvd && chmod -R 0700 /etc/radvd'
@@ -257,7 +258,7 @@ ALERT_RULE=$(sed -n '/alert: RadvdConfigError/,/^        for:/p' README.md \
 
 # --- a malformed replacement config on HUP is refused, and radvd keeps serving --
 # The reload stops radvd before its replacement reads the config, so accepting a
-# bad edit costs the segment its RA emitter. The configtest in on_hup refuses
+# bad edit costs the segment its RA emitter. request_reload's configtest refuses
 # instead, and radvd's own rejection text still reaches the log for the operator's
 # alert rule.
 printf '[smoke] restarting %s (malformed HUP replacement scenario)\n' "$C1"
@@ -280,8 +281,13 @@ wait_for_log "$C1" 'SIGHUP reload refused' "the malformed HUP replacement was no
   || fail "the container died on a refused HUP reload instead of keeping its last good config"
 [ "$(docker exec "$C1" pidof radvd)" = "$pid_before" ] \
   || fail "a refused reload replaced the running radvd (pids moved from $pid_before)"
-log_has_re "$C1" "$ALERT_RULE" \
-  || fail "the refused reload's radvd output does not match the README's RadvdConfigError pattern"
+wait_for_log "$C1" 'exiting, failed to read config file' \
+  "the refused reload did not carry radvd's own rejection text into the log"
+radvd_refusal=$(docker logs "$C1" 2>&1 | grep -F 'exiting, failed to read config file' | tail -n 1 || true)
+[ -n "$radvd_refusal" ] \
+  || fail "the refused reload did not carry radvd's own rejection text into the log"
+grep -Eq -- "$ALERT_RULE" <<<"$radvd_refusal" \
+  || fail "radvd's own rejection line does not match the README's RadvdConfigError pattern"
 # Absence assertion: single-shot on purpose, and safe here only because the
 # wait_for_log above already proved this container's log is flushed.
 [ "$(docker logs "$C1" 2>&1 | grep -c 'msg="reloading radvd (config re-read via restart)"' || true)" -eq "$reload_before" ] \
@@ -393,7 +399,7 @@ printf '[smoke] PASS  validation: invalid RADVD_DEBUG_LEVEL fails closed (exit 1
 # DIRECTORY, whose refusal is deterministic in an assembled image; the
 # FIFO-with-no-writer variant — where radvd's open blocks while `pidof radvd`
 # keeps the healthcheck green — belongs to the bounded shell test
-# (tests/shell/ha_directives_test.sh case 11).
+# (tests/shell/config_node_test.sh).
 printf '[smoke] starting %s (a directory where radvd.conf belongs)\n' "$C4"
 docker create --name "$C4" --network none --cap-add NET_RAW "$IMAGE" >/dev/null
 docker cp "$TMPDIR_NONFILE" "$C4:/etc/radvd" >/dev/null
@@ -501,6 +507,16 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
   [ "$(docker exec "$C7" pidof radvd)" = "$pid_before" ] \
     || fail "no-KILL HUP replaced radvd (pids moved from $pid_before)"
   printf '[smoke] PASS  no-KILL HUP: reload refused, radvd still serving (pids %s), container up\n' "$pid_before"
+  refusals_before=$(docker logs "$C7" 2>&1 | grep -c 'SIGHUP reload refused: TERM delivery' || true)
+  docker kill -s HUP "$C7" >/dev/null
+  for _ in $(seq 1 10); do
+    [ "$(docker logs "$C7" 2>&1 | grep -c 'SIGHUP reload refused: TERM delivery' || true)" -gt "$refusals_before" ] && break
+    sleep 1
+  done
+  [ "$(docker inspect -f '{{.State.Running}}' "$C7")" = "true" ] \
+    && [ "$(docker exec "$C7" pidof radvd)" = "$pid_before" ] \
+    || fail "no-KILL second HUP exited PID 1 while radvd was still serving (pids $pid_before)"
+  printf '[smoke] PASS  no-KILL second HUP: refused again, PID 1 still supervising radvd\n'
   docker stop -t 5 "$C7" >/dev/null
   ec=$(docker inspect -f '{{.State.ExitCode}}' "$C7")
   [ "$ec" = "0" ] || fail "no-KILL docker stop exit code $ec, want 0"
@@ -514,7 +530,8 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
 # --- 11. a TERM latched during preflight refuses the start and exits 0 -------
 (
   C8="radvd-smoke-startup-latch-$$"
-  slow_cat="$TMPDIR_FIXTURE/slow-cat"
+  shim_dir=$(mktemp -d)
+  slow_cat="$shim_dir/slow-cat"
   # shellcheck disable=SC2317,SC2329  # invoked indirectly via trap
   cleanup_startup_latch() {
     code=$?
@@ -523,7 +540,7 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
       docker logs "$C8" 2>&1 | tail -25 >&2 || true
     fi
     docker rm -f "$C8" >/dev/null 2>&1 || true
-    rm -f "$slow_cat"
+    rm -rf "$shim_dir"
   }
   trap cleanup_startup_latch EXIT
 
@@ -531,8 +548,8 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
   # lands in the preflight window by construction rather than by beating a sleep.
   printf '%s\n' '#!/bin/sh' 'kill -TERM 1' 'exec /bin/cat "$@"' >"$slow_cat"
   chmod +x "$slow_cat"
-  docker create --name "$C8" --network none --cap-add NET_RAW \
-    -v "$slow_cat:/usr/local/bin/cat:ro" "$IMAGE" >/dev/null
+  docker create --name "$C8" --network none --cap-add NET_RAW "$IMAGE" >/dev/null
+  docker cp "$slow_cat" "$C8:/usr/local/bin/cat" >/dev/null
   docker cp "$TMPDIR_FIXTURE" "$C8:/etc/radvd" >/dev/null
   job_status_before=$(docker logs "$C8" 2>&1 | grep -Ec '^(Terminated|Killed|Aborted)$' || true)
   docker start "$C8" >/dev/null
@@ -572,6 +589,197 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
   [ "$job_status_after" -eq "$job_status_before" ] \
     || fail "startup-latch TERM leaked a bare BusyBox ash job-status line into docker logs"
   printf '[smoke] PASS  startup latch: a preflight TERM refused the start, exited 0, kept structured logs in order\n'
+)
+
+# A pre-pid HUP leaves sig_seen set until the first child exits. Preserve that
+# child's exact status when the loop consumes the latch and waits again.
+(
+  C9="radvd-smoke-pre-pid-hup-$$"
+  scenario_dir=$(mktemp -d)
+  # shellcheck disable=SC2317,SC2329  # invoked indirectly via trap
+  cleanup_pre_pid_hup() {
+    code=$?
+    if [ "$code" -ne 0 ] && docker inspect "$C9" >/dev/null 2>&1; then
+      printf -- '--- %s logs (tail) ---\n' "$C9" >&2
+      docker logs "$C9" 2>&1 | tail -25 >&2 || true
+    fi
+    docker rm -f "$C9" >/dev/null 2>&1 || true
+    rm -rf "$scenario_dir"
+  }
+  trap cleanup_pre_pid_hup EXIT
+
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'if [ ! -e /tmp/pre-pid-hup-sent ]; then' \
+    '  : >/tmp/pre-pid-hup-sent' \
+    '  kill -HUP 1' \
+    'fi' \
+    'exec /bin/cat "$@"' >"$scenario_dir/cat"
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'case " $* " in' \
+    '  *" --configtest "*) exit 0 ;;' \
+    '  *) exit 3 ;;' \
+    'esac' >"$scenario_dir/radvd"
+  chmod +x "$scenario_dir/cat" "$scenario_dir/radvd"
+
+  docker create --name "$C9" --network none --cap-add NET_RAW "$IMAGE" >/dev/null
+  docker cp "$scenario_dir/cat" "$C9:/usr/local/bin/cat" >/dev/null
+  docker cp "$scenario_dir/radvd" "$C9:/usr/sbin/radvd" >/dev/null
+  docker cp "$TMPDIR_FIXTURE" "$C9:/etc/radvd" >/dev/null
+  docker start "$C9" >/dev/null
+  wait_for_log "$C9" 'SIGHUP received before radvd started' \
+    "the pre-pid HUP was not consumed before radvd started"
+  wait_until_stopped "$C9" "the daemon stub exit was not propagated after the pre-pid HUP"
+  ec=$(docker inspect -f '{{.State.ExitCode}}' "$C9")
+  [ "$ec" = "3" ] || fail "pre-pid HUP propagated exit code $ec, want 3"
+  wait_for_log "$C9" 'status="3"' "the propagation log lost the child status after the pre-pid HUP"
+  printf '[smoke] PASS  pre-pid HUP status: the later radvd exit remained 3\n'
+)
+
+# A TERM that lands during the reload configtest must stop the child without
+# misclassifying the interrupted check as a config refusal.
+(
+  C10="radvd-smoke-hup-term-check-$$"
+  scenario_dir=$(mktemp -d)
+  # shellcheck disable=SC2317,SC2329  # invoked indirectly via trap
+  cleanup_hup_term_check() {
+    code=$?
+    if [ "$code" -ne 0 ] && docker inspect "$C10" >/dev/null 2>&1; then
+      printf -- '--- %s logs (tail) ---\n' "$C10" >&2
+      docker logs "$C10" 2>&1 | tail -25 >&2 || true
+    fi
+    docker rm -f "$C10" >/dev/null 2>&1 || true
+    rm -rf "$scenario_dir"
+  }
+  trap cleanup_hup_term_check EXIT
+
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'case " $* " in' \
+    '  *" --configtest "*)' \
+    '    : >/tmp/slow-configtest-started' \
+    '    sleep 8' \
+    '    ;;' \
+    'esac' \
+    'exec /usr/sbin/radvd "$@"' >"$scenario_dir/radvd"
+  chmod +x "$scenario_dir/radvd"
+
+  SHIMS=("$scenario_dir/radvd:/usr/local/bin/radvd")
+  start_container "$C10" --cap-add NET_RAW
+  docker kill -s HUP "$C10" >/dev/null
+  check_started=""
+  for _ in $(seq 1 20); do
+    if docker exec "$C10" test -e /tmp/slow-configtest-started; then
+      check_started=1
+      break
+    fi
+    sleep 0.1
+  done
+  [ -n "$check_started" ] || fail "HUP+TERM: the slow configtest did not start"
+  sleep 2
+  docker kill -s TERM "$C10" >/dev/null
+  wait_for_log "$C10" 'SIGHUP received during shutdown; reload ignored' \
+    "HUP+TERM: shutdown did not replace the in-flight reload"
+  wait_until_stopped "$C10" "HUP+TERM: container did not stop after the configtest returned"
+  ec=$(docker inspect -f '{{.State.ExitCode}}' "$C10")
+  [ "$ec" = "0" ] || fail "HUP+TERM exit code $ec, want 0"
+  log_has "$C10" 'SIGHUP reload refused' \
+    && fail "HUP+TERM misclassified the interrupted configtest as a reload refusal"
+  printf '[smoke] PASS  HUP+TERM configtest: shutdown won without a false reload refusal\n'
+)
+
+# A second HUP during configtest coalesces into the restart already being prepared.
+(
+  C11="radvd-smoke-double-hup-$$"
+  scenario_dir=$(mktemp -d)
+  # shellcheck disable=SC2317,SC2329  # invoked indirectly via trap
+  cleanup_double_hup() {
+    code=$?
+    if [ "$code" -ne 0 ] && docker inspect "$C11" >/dev/null 2>&1; then
+      printf -- '--- %s logs (tail) ---\n' "$C11" >&2
+      docker logs "$C11" 2>&1 | tail -25 >&2 || true
+    fi
+    docker rm -f "$C11" >/dev/null 2>&1 || true
+    rm -rf "$scenario_dir"
+  }
+  trap cleanup_double_hup EXIT
+
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'case " $* " in' \
+    '  *" --configtest "*)' \
+    '    : >/tmp/slow-configtest-started' \
+    '    sleep 3' \
+    '    ;;' \
+    'esac' \
+    'exec /usr/sbin/radvd "$@"' >"$scenario_dir/radvd"
+  chmod +x "$scenario_dir/radvd"
+
+  SHIMS=("$scenario_dir/radvd:/usr/local/bin/radvd")
+  start_container "$C11" --cap-add NET_RAW
+  pid_before=$(docker exec "$C11" pidof radvd) || fail "double-HUP: cannot read radvd pid"
+  docker kill -s HUP "$C11" >/dev/null
+  check_started=""
+  for _ in $(seq 1 20); do
+    if docker exec "$C11" test -e /tmp/slow-configtest-started; then
+      check_started=1
+      break
+    fi
+    sleep 0.1
+  done
+  [ -n "$check_started" ] || fail "double-HUP: the slow configtest did not start"
+  docker kill -s HUP "$C11" >/dev/null
+  pid_after=$(wait_for_reload "$C11" 1 "$pid_before")
+  [ -n "$pid_after" ] || fail "double-HUP: the coalesced reload did not complete"
+  logs=$(docker logs "$C11" 2>&1)
+  [ "$(grep -c 'msg="SIGHUP received; restarting radvd to reload config"' <<<"$logs")" -eq 1 ] \
+    || fail "double-HUP produced more than one accepted reload"
+  [ "$(grep -c 'msg="reloading radvd (config re-read via restart)"' <<<"$logs")" -eq 1 ] \
+    || fail "double-HUP produced more than one daemon restart"
+  grep -q 'SIGHUP reload refused' <<<"$logs" \
+    && fail "double-HUP produced a reload refusal"
+  printf '[smoke] PASS  double HUP: one reload completed without a refusal (pid %s -> %s)\n' "$pid_before" "$pid_after"
+)
+
+# Repeated reloads must return PID 1 to its zombie-free steady-state process tree.
+(
+  C13="radvd-smoke-reaping-$$"
+  # shellcheck disable=SC2317,SC2329  # invoked indirectly via trap
+  cleanup_reaping() {
+    code=$?
+    if [ "$code" -ne 0 ] && docker inspect "$C13" >/dev/null 2>&1; then
+      printf -- '--- %s logs (tail) ---\n' "$C13" >&2
+      docker logs "$C13" 2>&1 | tail -25 >&2 || true
+    fi
+    docker rm -f "$C13" >/dev/null 2>&1 || true
+  }
+  trap cleanup_reaping EXIT
+
+  start_container "$C13" --cap-add NET_RAW
+  sleep 6
+  baseline=$(docker exec "$C13" ps -o pid \
+    | awk 'NR > 1 { n++ } END { print n + 0 }')
+  pid_before=$(docker exec "$C13" pidof radvd) \
+    || fail "reaping: cannot read the initial radvd pids"
+  for reload_count in $(seq 1 10); do
+    docker kill -s HUP "$C13" >/dev/null
+    pid_after=$(wait_for_reload "$C13" "$reload_count" "$pid_before")
+    [ -n "$pid_after" ] \
+      || fail "reaping: reload $reload_count did not complete"
+    pid_before=$pid_after
+  done
+
+  sleep 6
+  zombies=$(docker exec "$C13" ps -o stat \
+    | awk 'NR > 1 && $1 ~ /^Z/ { n++ } END { print n + 0 }')
+  steady=$(docker exec "$C13" ps -o pid \
+    | awk 'NR > 1 { n++ } END { print n + 0 }')
+  [ "$zombies" -eq 0 ] \
+    || fail "reaping: $zombies zombie processes remained after reloads"
+  [ "$steady" -eq "$baseline" ] \
+    || fail "reaping: process count grew from $baseline to $steady"
+  printf '[smoke] PASS  reaping: ten reloads returned to the zombie-free process baseline (%s processes)\n' "$baseline"
 )
 
 printf '[smoke] OK — all signal-contract assertions passed for %s\n' "$IMAGE"

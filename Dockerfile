@@ -10,7 +10,7 @@ FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6ee
 
 SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
 
-RUN apk add --no-cache bison build-base flex linux-headers pkgconf
+RUN apk add --no-cache bison build-base curl flex linux-headers pkgconf
 
 ARG RADVD_VERSION
 ARG RADVD_SHA256
@@ -23,7 +23,7 @@ WORKDIR /build/radvd
 # a coupling neither file can state in code. `make gram.h` first works around a parallel-build race.
 RUN url="https://github.com/radvd-project/radvd/releases/download/${RADVD_VERSION}/radvd-${RADVD_VERSION#v}.tar.gz" \
     && tarball="${url##*/}" \
-    && wget -q --timeout=30 "$url" \
+    && curl -fsSL --connect-timeout 10 --max-time 120 --retry 7 --retry-max-time 150 --retry-all-errors -o "$tarball" "$url" \
     && echo "${RADVD_SHA256}  ${tarball}" | sha256sum -c - \
     && tar xzf "$tarball" --strip-components=1 --no-same-owner \
     && rm "$tarball" \
@@ -35,7 +35,6 @@ RUN url="https://github.com/radvd-project/radvd/releases/download/${RADVD_VERSIO
     && strip radvd radvdump \
     && install -D -m 755 radvd /out/usr/sbin/radvd \
     && install -D -m 755 radvdump /out/usr/sbin/radvdump \
-    && install -D -m 644 defaults.h /out/radvd-src/defaults.h \
     # Syft inventories the final image from Alpine's APK database only, so this
     # source-built payload is invisible to the signed release SBOM without it.
     && cat > /out/radvd.cdx.json <<EOF
@@ -81,9 +80,6 @@ COPY tests/shell /tmp/tests/shell
 # $REPO_ROOT/CONTRIBUTING.md; without this COPY the suite exits 1 and no marker
 # is written.
 COPY CONTRIBUTING.md /tmp/CONTRIBUTING.md
-# The AdvSendAdvert check is only correct while upstream defaults the directive to
-# off, so the build reads that default out of the header it compiled against.
-COPY --from=builder /out/radvd-src/defaults.h /tmp/radvd-defaults.h
 # The suite's userland is the point: run.sh needs bash (installed here and discarded
 # with this stage) while awk, sed, grep and tr are the image's BusyBox applets — a
 # host-only run can be green while BusyBox fails.
