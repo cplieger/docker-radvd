@@ -281,8 +281,13 @@ wait_for_log "$C1" 'SIGHUP reload refused' "the malformed HUP replacement was no
   || fail "the container died on a refused HUP reload instead of keeping its last good config"
 [ "$(docker exec "$C1" pidof radvd)" = "$pid_before" ] \
   || fail "a refused reload replaced the running radvd (pids moved from $pid_before)"
-log_has_re "$C1" "$ALERT_RULE" \
-  || fail "the refused reload's radvd output does not match the README's RadvdConfigError pattern"
+wait_for_log "$C1" 'exiting, failed to read config file' \
+  "the refused reload did not carry radvd's own rejection text into the log"
+radvd_refusal=$(docker logs "$C1" 2>&1 | grep -F 'exiting, failed to read config file' | tail -n 1 || true)
+[ -n "$radvd_refusal" ] \
+  || fail "the refused reload did not carry radvd's own rejection text into the log"
+grep -Eq -- "$ALERT_RULE" <<<"$radvd_refusal" \
+  || fail "radvd's own rejection line does not match the README's RadvdConfigError pattern"
 # Absence assertion: single-shot on purpose, and safe here only because the
 # wait_for_log above already proved this container's log is flushed.
 [ "$(docker logs "$C1" 2>&1 | grep -c 'msg="reloading radvd (config re-read via restart)"' || true)" -eq "$reload_before" ] \

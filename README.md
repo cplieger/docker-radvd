@@ -143,7 +143,7 @@ privsep_read_loop is complete.`. They come from radvd's privileged privsep helpe
 noticing its worker is gone, they appear on every reload and every graceful stop,
 and they are normal.
 
-Most bad edits are refused before anything is stopped. The entrypoint config-tests the mounted file first, so the running radvd keeps serving its last good config. Five shapes are refused, each logging `SIGHUP reload refused`: malformed, absent or not a regular file, a check exceeding 5s, permissions radvd calls insecure, and a TERM to radvd whose delivery could not be confirmed. The malformed and insecure-permissions shapes also carry radvd's text.
+On the `SIGHUP` route, most bad edits are refused before anything is stopped: the entrypoint config-tests the mounted file first, so the running radvd keeps serving its last good config. Five shapes are refused, each logging `SIGHUP reload refused`: malformed, absent or not a regular file, a check exceeding 5s, permissions radvd calls insecure, and a TERM to radvd whose delivery could not be confirmed. The malformed and insecure-permissions shapes also carry radvd's text. `docker restart` takes none of that gate -- it re-enters startup, so a bad edit exits radvd and crash-loops the container until the config is fixed.
 
 The check is `radvd --configtest … --username=radvd`: radvd's config parser and nothing after it, so anything radvd checks later slips past unchecked: the interface's presence, every bound radvd checks only after the parse (`MinRtrAdvInterval` against 3/4 of `MaxRtrAdvInterval`, `AdvDefaultLifetime`, MTU), and a config replaced between the check and the daemon's own read. The `radvd.conf` permissions are the exception: the configtest runs under the daemon's own `--username=radvd` identity and prints the verdict, so that edit costs a reload, not the emitter. What happens next depends on `IgnoreIfMissing`: `off` exits radvd and the container with it, `on` (the upstream default) leaves radvd running and healthy while that interface emits nothing at all. Either way the evidence is radvd's own error line, such as `MinRtrAdvInterval for eth0 (200.00) must be at least 3.00 but no more than 3/4 of MaxRtrAdvInterval (180.00)`. Verify with `rdisc6` after any config change, and alert on it: the `RadvdConfigError` rule below carries these lines.
 
@@ -333,11 +333,40 @@ groups:
             reports healthy. Fix the sysctl on the host; `network_mode: host`
             means compose cannot set it. The global warning is emitted once per
             radvd process, so this alert clears after the window even if the
-            state persists. The per-interface warning can reappear when radvd
-            checks an interface. A node that deliberately sets
+            state persists. The per-interface warning is emitted each time radvd
+            sets an interface up: at startup, on reload, and on a netlink change
+            event. Neither arm is a firing guarantee, so confirm the state with
+            `rdisc6` and the host sysctl rather than from the alert alone.
+            A node that deliberately sets
             AdvDefaultLifetime 0 to advertise prefixes only also matches this
             rule legitimately. Use `rdisc6` and the host sysctl to confirm the
             state is gone.
+      - alert: RadvdSupervisorFault
+        expr: |
+          sum by (hostname) (count_over_time(
+            {container="radvd"}
+            |~ `failed to deliver TERM to radvd|the TERM could not be delivered to radvd|radvd exited; propagating exit for restart policy` [10m]
+          )) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "the radvd supervisor could not stop radvd, or radvd exited"
+          description: >
+            PID 1 reported a fault of its own rather than a config fault, in one of
+            two arms. A refused TERM means the container lacks the KILL capability,
+            so `docker stop` leaves radvd running while PID 1 exits 0: the final
+            zero-lifetime Router Advertisement is never sent and LAN hosts keep
+            this node as their default router until the advertised lifetime
+            expires. Grant `KILL` (see the bullet under Capabilities); the
+            container's own exit status is 0, so no restart policy reports this.
+            An exit propagation means radvd is gone and RA emission has stopped;
+            the `status` field carries radvd's own exit status and your `restart`
+            policy decides whether the container returns, so a repeating record is
+            a crash loop. For a config fault radvd's own line matches
+            RadvdConfigError too and that is the one to read first; this rule is
+            what covers an exit whose cause radvd words differently, such as an
+            out-of-memory kill reported as `status="137"`.
 ```
 
 Every pattern above is a string radvd 2.21 or the entrypoint actually emits,

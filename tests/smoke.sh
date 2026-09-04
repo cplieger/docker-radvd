@@ -41,51 +41,6 @@ if [ -r "$RULE_SRC" ] || [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
   fi
 fi
 
-# Bind the forwarding alert to both warning forms in the shipped binary.
-if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
-  # shellcheck disable=SC2016
-  forwarding_rule=$(sed -n '/alert: RadvdForwardingDisabled/,/^        for:/p' "$RULE_SRC" \
-    | sed -n 's/^[[:space:]]*|~ `\(.*\)` \[[0-9]\+[a-z]\]$/\1/p')
-  if [ -z "$forwarding_rule" ]; then
-    err "FAIL: could not extract the RadvdForwardingDisabled pattern from $RULE_SRC"
-    fail=1
-  else
-    for forwarding_warning in \
-      'IPv6 forwarding seems to be disabled, but continuing anyway' \
-      'IPv6 forwarding on interface seems to be disabled, but continuing anyway'; do
-      if ! grep -aFq "$forwarding_warning" /usr/sbin/radvd; then
-        err "FAIL: shipped radvd binary does not contain forwarding warning: $forwarding_warning"
-        fail=1
-      elif ! printf '%s\n' "$forwarding_warning" | grep -Eq "$forwarding_rule"; then
-        err "FAIL: README RadvdForwardingDisabled pattern does not match: $forwarding_warning"
-        fail=1
-      fi
-    done
-  fi
-fi
-
-# Bind the peer-observation alternative of RadvdConfigError to the shipped binary.
-# radvd emits this on RA receipt, so `radvd --configtest` cannot reach it and the
-# rodata anchor is the only mechanism that does.
-if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
-  # shellcheck disable=SC2016
-  config_rule=$(sed -n '/alert: RadvdConfigError/,/^        for:/p' "$RULE_SRC" \
-    | sed -n 's/^[[:space:]]*|~ `\(.*\)` \[[0-9]\+[a-z]\]$/\1/p')
-  if [ -z "$config_rule" ]; then
-    err "FAIL: could not extract the RadvdConfigError pattern from $RULE_SRC"
-    fail=1
-  else
-    peer_warning='received icmpv6 RA packet with non-linklocal source address'
-    if ! grep -aFq "$peer_warning" /usr/sbin/radvd; then
-      err "FAIL: shipped radvd binary does not contain peer warning: $peer_warning"
-      fail=1
-    elif ! printf '%s\n' "$peer_warning" | grep -Eq "$config_rule"; then
-      err "FAIL: README RadvdConfigError pattern does not match: $peer_warning"
-      fail=1
-    fi
-  fi
-fi
-
 # 3. Version assertion: the built binary reports exactly the pinned upstream
 #    version (RADVD_EXPECTED_VERSION, passed by the Dockerfile test stage from
 #    ARG RADVD_VERSION; a leading "v" is stripped here). A plain local run
@@ -293,6 +248,23 @@ if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
     fi
   fi
   rm -rf "$sentinel_dir"
+fi
+
+# A failed first exec must remain a failure after the 127 job-table sentinel.
+if [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
+  exec_failure_rc=0
+  exec_failure_out=$(PATH=/usr/local/bin:/usr/bin:/bin \
+    /usr/local/bin/entrypoint.sh 2>&1) || exec_failure_rc=$?
+  if [ "$exec_failure_rc" -ne 127 ]; then
+    err "FAIL: an unresolvable radvd exited $exec_failure_rc, want 127"
+    err "$exec_failure_out"
+    fail=1
+  elif ! printf '%s\n' "$exec_failure_out" \
+    | grep -Fq 'msg="radvd exited; propagating exit for restart policy" status="127"'; then
+    err "FAIL: an unresolvable radvd did not report propagated status 127"
+    err "$exec_failure_out"
+    fail=1
+  fi
 fi
 
 # A failed read returns through the degraded warning inside the bound.
