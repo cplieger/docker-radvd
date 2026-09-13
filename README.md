@@ -17,7 +17,7 @@ Run [radvd](https://radvd.litech.org/) (the Linux IPv6 Router Advertisement Daem
 This image is a minimal Alpine wrapper around upstream `radvd`, compiled from the pinned release tarball, plus a small POSIX entrypoint that:
 
 - **Checks the mounted `radvd.conf` node**: the entrypoint refuses a path that is not a regular file at startup or reload. It warns when its bounded node read fails, then leaves the config settings to radvd. A config radvd rejects outright, such as one defining no interface block, is left to radvd: radvd logs its own error and exits, and the entrypoint reports that exit.
-- **Drops privileges**: radvd opens its raw socket as root, then runs as the unprivileged `radvd` user (`--username=radvd`) for the rest of its lifetime
+- **Drops privileges**: radvd opens its raw socket as root, then runs its worker as the unprivileged `radvd` user (`--username=radvd`); a small root privsep helper stays beside it, so `ps` inside the container shows one radvd-owned process and one root-owned one
 - **Supervises radvd**: turns `SIGHUP` into a config reload, refusing the reload and keeping the running daemon when the config would not start; forwards `SIGTERM` for graceful shutdown. A stop that arrives before radvd has started wins immediately and exits 0 without starting it. An unexpected radvd exit propagates to Docker's restart policy. See [Reloading](#reloading-configuration) for the `docker kill` caveat.
 - **Logs to stderr** with structured key=value lines, captured by `docker logs`
 
@@ -391,7 +391,7 @@ labels your Alertmanager uses.
 
 ## Security
 
-radvd opens its raw ICMPv6 socket as root, then drops to the unprivileged `radvd` user for the rest of its lifetime; the config mount is read-only. CI lints the entrypoint with [shellcheck](https://www.shellcheck.net/) and the Dockerfile with [hadolint](https://github.com/hadolint/hadolint), scans for leaked secrets with [gitleaks](https://github.com/gitleaks/gitleaks), and scans the image with [trivy](https://trivy.dev/); current scan results live in the repository's Security tab.
+radvd opens its raw ICMPv6 socket as root, then drops its worker to the unprivileged `radvd` user, leaving only a small root privsep helper; the config mount is read-only. CI lints the entrypoint with [shellcheck](https://www.shellcheck.net/) and the Dockerfile with [hadolint](https://github.com/hadolint/hadolint), scans for leaked secrets with [gitleaks](https://github.com/gitleaks/gitleaks), and scans the image with [trivy](https://trivy.dev/); current scan results live in the repository's Security tab.
 
 The image is published with [cosign](https://github.com/sigstore/cosign) signatures and SBOM attestations. Verify a pull:
 
