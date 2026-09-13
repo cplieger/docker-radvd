@@ -65,6 +65,13 @@ run_check
   && ok "a FIFO at radvd.conf is refused with exit 1 on one line, without hanging or misdiagnosing" \
   || no "FIFO refused" "rc=$_rc, log: $(cat "$LOG")"
 
+setup
+printf 'interface eth0 { IgnoreIfMissing on; AdvRASrcAddress { fe80::1; }; };\n' >"$CONF"
+run_check
+[ "$_rc" -eq 0 ] && [ ! -s "$LOG" ] \
+  && ok "a readable regular radvd.conf is accepted with no record at all" \
+  || no "healthy config silent" "rc=$_rc, log: $(cat "$LOG")"
+
 # An ABSENT config is not a refusal: the reload call site has no readability gate,
 # so the `-e` half of the probe is what keeps a config removed since startup on
 # the unreadable-node path instead of exiting 1 after radvd has already been stopped.

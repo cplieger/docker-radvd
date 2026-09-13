@@ -164,7 +164,7 @@ for _ in $(seq 1 12); do
   sleep 5
 done
 [ "$health" = "healthy" ] || fail "shipped HEALTHCHECK never reported healthy (last status: $health)"
-# The daemon runs as two processes (a root parent plus the dropped --username=radvd worker),
+# The daemon runs as two processes (the dropped --username=radvd worker plus its root privsep child),
 # so the drop is evidenced by the PRESENCE of a radvd-owned one, never by the absence
 # of a root-owned one. Dropping `--username=radvd` from the entrypoint fails this by name.
 owners=$(docker exec "$C1" ps -o user,comm | awk '$2 ~ /radvd/ { print $1 }' | sort -u)
@@ -364,7 +364,7 @@ wait_for_log "$C2" 'SIGHUP reload refused' "the C2 malformed HUP replacement was
   || fail "C2 stopped after the refused reload"
 [ "$(docker exec "$C2" pidof radvd)" = "$pid_before" ] \
   || fail "C2 replaced radvd during the refused reload"
-# pidof returns both radvd pids (root parent + dropped -u worker); word
+# pidof returns both radvd pids (dropped -u worker + its root privsep child); word
 # splitting inside the container shell is deliberate so kill gets each pid.
 docker exec "$C2" sh -c 'kill -KILL $(pidof radvd)'
 wait_until_stopped "$C2" "C2 still running after radvd was SIGKILLed following a refused reload"
@@ -431,8 +431,8 @@ wait_until_stopped "$C5" "container still running with a read-only /run"
 ec=$(docker inspect -f '{{.State.ExitCode}}' "$C5")
 [ "$ec" = "255" ] || fail "read-only /run exit code $ec, want 255"
 wait_for_log "$C5" 'unable to open pid file, /run/radvd.pid: Read-only file system' "missing pid-file fatal line"
-log_has "$C5" 'propagating exit for restart policy" status="255"' \
-  || fail "the supervisor did not propagate radvd's pid-file exit status"
+wait_for_log "$C5" 'propagating exit for restart policy" status="255"' \
+  "the supervisor did not propagate radvd's pid-file exit status"
 printf '[smoke] PASS  hardening: read_only without a /run tmpfs fails closed (exit 255)\n'
 
 # --- 9. the README's hardened profile boots AND keeps the signal contract ------
