@@ -17,7 +17,6 @@ Run [radvd](https://radvd.litech.org/) (the Linux IPv6 Router Advertisement Daem
 This image is a minimal Alpine wrapper around upstream `radvd`, compiled from the pinned release tarball, plus a small POSIX entrypoint that:
 
 - **Checks the mounted `radvd.conf` node**: the entrypoint refuses a path that is not a regular file at startup or reload. It warns when its bounded node read fails, then leaves the config settings to radvd. A config radvd rejects outright, such as one defining no interface block, is left to radvd: radvd logs its own error and exits, and the entrypoint reports that exit.
-- **Creates `/run/radvd`** (radvd refuses to start without it)
 - **Drops privileges**: radvd opens its raw socket as root, then runs as the unprivileged `radvd` user (`--username=radvd`) for the rest of its lifetime
 - **Supervises radvd**: turns `SIGHUP` into a config reload, refusing the reload and keeping the running daemon when the config would not start; forwards `SIGTERM` for graceful shutdown. A stop that arrives before radvd has started wins immediately and exits 0 without starting it. An unexpected radvd exit propagates to Docker's restart policy. See [Reloading](#reloading-configuration) for the `docker kill` caveat.
 - **Logs to stderr** with structured key=value lines, captured by `docker logs`
@@ -179,10 +178,11 @@ only controls how much radvd logs.
 #### Hardened profile
 
 Under `read_only: true`, `/run` must be a writable `tmpfs`: radvd writes its PID
-file to the compiled-in `/run/radvd/radvd.pid`, and the entrypoint creates that
-directory at startup, so without it the container exits 1 with
-`failed to create radvd PID directory` before radvd ever starts. Add to the
-service in the [Quick start](#quick-start) example:
+file to the compiled-in `/run/radvd.pid`. Without a writable `/run` radvd starts
+and then exits with `unable to open pid file, /run/radvd.pid: Read-only file
+system`, which the entrypoint propagates as `status="255"`; the
+`RadvdSupervisorFault` rule under [Alerting](#alerting) is the one that reports
+it. Add to the service in the [Quick start](#quick-start) example:
 
 ```yaml
     read_only: true
@@ -258,7 +258,7 @@ groups:
         expr: |
           sum by (hostname) (count_over_time(
             {container="radvd"}
-            |~ `SIGHUP reload refused|exiting, failed to read config file|exiting, permissions on conf_file invalid|not found:|does not exist or is not set up properly \(setup_iface=|unable to drop root privileges|received icmpv6 RA packet with non-linklocal source address|invalid RADVD_DEBUG_LEVEL|radvd.conf is not a regular file|failed to create radvd PID directory|must be at least|must be between|must be zero or between|must not be greater than|must be set with|must be greater than or equal to AdvPreferredLifetime|invalid prefix length|invalid route prefix length` [10m]
+            |~ `SIGHUP reload refused|exiting, failed to read config file|exiting, permissions on conf_file invalid|not found:|does not exist or is not set up properly \(setup_iface=|unable to drop root privileges|received icmpv6 RA packet with non-linklocal source address|invalid RADVD_DEBUG_LEVEL|radvd.conf is not a regular file|must be at least|must be between|must be zero or between|must not be greater than|must be set with|must be greater than or equal to AdvPreferredLifetime|invalid prefix length|invalid route prefix length` [10m]
           )) > 0
         for: 0m
         labels:
@@ -280,9 +280,8 @@ groups:
             the causes it cannot distinguish, and the `KILL` bullet under
             [Capabilities](#capabilities) covers the capability case. The
             pattern also matches the entrypoint's own fatal startup errors (an
-            invalid RADVD_DEBUG_LEVEL, a radvd.conf that is not a regular file,
-            a failed /run/radvd creation), which crash-loop the container before
-            radvd ever starts, and radvd's
+            invalid RADVD_DEBUG_LEVEL, a radvd.conf that is not a regular file),
+            which crash-loop the container before radvd ever starts, and radvd's
             `unable to drop root privileges`, which is not a config fault at
             all: the container was started without the SETUID and SETGID
             capabilities, so `--username=radvd` cannot take effect (see the hardened

@@ -20,8 +20,8 @@ The files with real logic are:
   `postUpgradeTasks` recompute the SHA256 from the release asset inside the same
   bump commit, so no manual step is needed.
 - `entrypoint.sh`: a POSIX `sh` script (runs on Alpine's BusyBox shell, not
-  bash) that checks a readable mounted `radvd.conf` is a regular file,
-  creates `/run/radvd`, and
+  bash) that checks the mounted `radvd.conf` is a regular file, warns when
+  its bounded read fails, and
   supervises radvd in the foreground as the non-root `radvd` user (`--username=radvd`):
   it turns `SIGHUP`
   into a config reload (refusing it, and keeping the running daemon, when the

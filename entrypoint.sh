@@ -200,12 +200,6 @@ check_config_node() {
 
 check_config_node
 
-# radvd refuses to start without the directory holding its --with-pidfile path.
-if ! mkdir -p /run/radvd; then
-  printf 'level=error msg="failed to create radvd PID directory; radvd cannot start" path="%s"\n' "/run/radvd" >&2
-  exit 1
-fi
-
 start_radvd() {
   # A shutdown latched while no radvd existed (preflight, or the reload gap
   # between reaping one generation and starting the next) is a stop that arrived

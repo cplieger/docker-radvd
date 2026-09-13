@@ -19,8 +19,8 @@ WORKDIR /build/radvd
 # The CycloneDX fragment is emitted from this same RUN so the URL is spelled once — the bytes fetched, the digest
 # verified and the published download_url cannot drift apart. CPE: the NVD dictionary carries exactly one
 # vendor:product for radvd, radvd.litech:radvd; the sometimes-guessed litech:router_advertisement_daemon has no entry.
-# --with-pidfile keeps radvd writing its PID to /run/radvd/radvd.pid, matching the directory entrypoint.sh creates —
-# a coupling neither file can state in code. `make gram.h` first works around a parallel-build race.
+# --with-pidfile spells upstream's own default path resolved (Alpine's /var/run is a symlink to /run), so the
+# file lands in a directory every Alpine image ships. `make gram.h` first works around a parallel-build race.
 RUN url="https://github.com/radvd-project/radvd/releases/download/${RADVD_VERSION}/radvd-${RADVD_VERSION#v}.tar.gz" \
     && tarball="${url##*/}" \
     && curl -fsSL --connect-timeout 10 --max-time 120 --retry 7 --retry-max-time 150 --retry-all-errors -o "$tarball" "$url" \
@@ -29,7 +29,7 @@ RUN url="https://github.com/radvd-project/radvd/releases/download/${RADVD_VERSIO
     && rm "$tarball" \
     && ./configure \
         --prefix=/usr \
-        --with-pidfile=/run/radvd/radvd.pid \
+        --with-pidfile=/run/radvd.pid \
     && make gram.h \
     && make -j"$(nproc)" \
     && strip radvd radvdump \

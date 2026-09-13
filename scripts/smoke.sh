@@ -169,10 +169,10 @@ done
 # of a root-owned one. Dropping `--username=radvd` from the entrypoint fails this by name.
 owners=$(docker exec "$C1" ps -o user,comm | awk '$2 ~ /radvd/ { print $1 }' | sort -u)
 grep -qx 'radvd' <<<"$owners" || fail "no radvd-owned radvd process; observed owners: $(tr '\n' ' ' <<<"$owners")"
-# The directory entrypoint.sh creates must be the one radvd's compiled-in
-# --with-pidfile writes into; nothing else reads that Dockerfile coupling.
-docker exec "$C1" test -f /run/radvd/radvd.pid \
-  || fail "radvd did not write its pid file to /run/radvd (Dockerfile --with-pidfile vs the entrypoint's mkdir)"
+# radvd's compiled-in --with-pidfile path must be one it can actually
+# write; nothing else in the image reads that Dockerfile setting.
+docker exec "$C1" test -f /run/radvd.pid \
+  || fail "radvd did not write its pid file to /run/radvd.pid (Dockerfile --with-pidfile)"
 printf '[smoke] PASS  startup: radvd up, healthcheck healthy, privileges dropped\n'
 
 # --- 2. HUP reload (world-readable config) -----------------------------------
@@ -419,21 +419,21 @@ printf '[smoke] PASS  refusal: a non-regular radvd.conf fails closed (exit 1, al
 # --- 8. read_only without a /run tmpfs fails closed ---------------------------
 # The README's hardened profile states this exact failure for an operator who
 # takes read_only: true without the tmpfs. Asserted here rather than only as a
-# grep of the shipped script, because the source
-# check cannot show the path is reachable or that the exit code is 1. No fixture:
-# the daemon refuses a `docker cp` into a read-only rootfs, and the absent config
-# only warns, so the boot still reaches the PID-directory fatal.
+# grep of the shipped script, because the source check cannot show the path is
+# reachable or that the status is 255. The fixture is required: radvd opens its
+# pid file only after parsing the config, so with no config it exits 1 on the
+# config instead and this scenario would prove nothing about /run.
 printf '[smoke] starting %s (read_only, no /run tmpfs)\n' "$C5"
-docker create --name "$C5" --network none --cap-add NET_RAW --read-only "$IMAGE" >/dev/null
+docker create --name "$C5" --network none --cap-add NET_RAW --read-only \
+  -v "$TMPDIR_FIXTURE:/etc/radvd:ro" "$IMAGE" >/dev/null
 docker start "$C5" >/dev/null
 wait_until_stopped "$C5" "container still running with a read-only /run"
 ec=$(docker inspect -f '{{.State.ExitCode}}' "$C5")
-[ "$ec" = "1" ] || fail "read-only /run exit code $ec, want 1"
-wait_for_log "$C5" 'failed to create radvd PID directory' "missing PID-directory fatal line"
-log_has_re "$C5" "$ALERT_RULE" \
-  || fail "the PID-directory fatal does not match the README's RadvdConfigError pattern"
-log_has "$C5" 'msg="starting radvd"' && fail "radvd was started despite a read-only /run"
-printf '[smoke] PASS  hardening: read_only without a /run tmpfs fails closed (exit 1)\n'
+[ "$ec" = "255" ] || fail "read-only /run exit code $ec, want 255"
+wait_for_log "$C5" 'unable to open pid file, /run/radvd.pid: Read-only file system' "missing pid-file fatal line"
+log_has "$C5" 'propagating exit for restart policy" status="255"' \
+  || fail "the supervisor did not propagate radvd's pid-file exit status"
+printf '[smoke] PASS  hardening: read_only without a /run tmpfs fails closed (exit 255)\n'
 
 # --- 9. the README's hardened profile boots AND keeps the signal contract ------
 # The README publishes this exact set, so it is read from one place here and any
