@@ -398,8 +398,9 @@ printf '[smoke] PASS  validation: invalid RADVD_DEBUG_LEVEL fails closed (exit 1
 # entrypoint refuses instead of degrading to a warning. This case uses a
 # DIRECTORY, whose refusal is deterministic in an assembled image; the
 # FIFO-with-no-writer variant — where radvd's open blocks while `pidof radvd`
-# keeps the healthcheck green — belongs to the bounded shell test
-# (tests/shell/config_node_test.sh).
+# keeps the healthcheck green — is the bounded shell test's subject
+# (tests/shell/config_node_test.sh), while the unreadable FIFO that startup
+# must still reach is this file's last scenario.
 printf '[smoke] starting %s (a directory where radvd.conf belongs)\n' "$C4"
 docker create --name "$C4" --network none --cap-add NET_RAW "$IMAGE" >/dev/null
 docker cp "$TMPDIR_NONFILE" "$C4:/etc/radvd" >/dev/null
@@ -418,7 +419,7 @@ printf '[smoke] PASS  refusal: a non-regular radvd.conf fails closed (exit 1, al
 # --- 8. read_only without a /run tmpfs fails closed ---------------------------
 # The README's hardened profile states this exact failure for an operator who
 # takes read_only: true without the tmpfs. Asserted here rather than only as a
-# grep of the shipped script (config_triage_test.sh case 4), because the source
+# grep of the shipped script, because the source
 # check cannot show the path is reachable or that the exit code is 1. No fixture:
 # the daemon refuses a `docker cp` into a read-only rootfs, and the absent config
 # only warns, so the boot still reaches the PID-directory fatal.
@@ -780,6 +781,38 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
   [ "$steady" -eq "$baseline" ] \
     || fail "reaping: process count grew from $baseline to $steady"
   printf '[smoke] PASS  reaping: ten reloads returned to the zombie-free process baseline (%s processes)\n' "$baseline"
+)
+
+(
+  C14="radvd-smoke-unreadable-node-$$"
+  node_dir=$(mktemp -d)
+  node="$node_dir/radvd.conf"
+  mkfifo "$node"
+  chmod 000 "$node"
+  # shellcheck disable=SC2317,SC2329  # invoked indirectly via trap
+  cleanup_unreadable_node() {
+    code=$?
+    if [ "$code" -ne 0 ] && docker inspect "$C14" >/dev/null 2>&1; then
+      printf -- '--- %s logs (tail) ---\n' "$C14" >&2
+      docker logs "$C14" 2>&1 | tail -25 >&2 || true
+    fi
+    docker rm -f "$C14" >/dev/null 2>&1 || true
+    rm -rf "$node_dir"
+  }
+  trap cleanup_unreadable_node EXIT
+
+  docker create --name "$C14" --network none --cap-drop ALL --cap-add NET_RAW \
+    -v "$node:/etc/radvd/radvd.conf:ro" "$IMAGE" >/dev/null
+  docker start "$C14" >/dev/null
+  wait_until_stopped "$C14" "container still running with an unreadable non-regular radvd.conf"
+  ec=$(docker inspect -f '{{.State.ExitCode}}' "$C14")
+  [ "$ec" = "1" ] || fail "unreadable non-regular radvd.conf exit code $ec, want 1"
+  wait_for_log "$C14" 'msg="radvd.conf is not a regular file' \
+    "startup bypassed the node checker for an unreadable non-regular config"
+  logs=$(docker logs "$C14" 2>&1)
+  grep -q 'msg="starting radvd"' <<<"$logs" \
+    && fail "radvd was started before the unreadable non-regular node was refused"
+  printf '[smoke] PASS  startup routing: unreadable non-regular radvd.conf was refused before radvd started\n'
 )
 
 printf '[smoke] OK — all signal-contract assertions passed for %s\n' "$IMAGE"

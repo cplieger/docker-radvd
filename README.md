@@ -121,12 +121,15 @@ case, run `docker exec radvd kill -HUP 1`. This sends the same reload signal fro
 inside the container and keeps the restart policy armed because the Docker API
 kill call, not the signal, disarms it.
 
-The entrypoint restarts the daemon so it re-reads the config. On reload it checks
-the config path again. It exits if the path is no longer a regular file, and it
-warns without stopping if it cannot read the node. A config removed after startup
-takes the warning path after radvd stops. This supervise-and-restart design (rather
-than `exec`-ing radvd) makes reload work regardless of the config file's ownership;
-see [CONTRIBUTING](CONTRIBUTING.md) for the rationale.
+The entrypoint restarts the daemon so it re-reads the config. A `SIGHUP`
+whose config is absent or not a regular file is refused before anything is
+stopped, so the running daemon keeps serving its last good config. After an
+accepted config test stops radvd, the entrypoint checks the path again before
+starting the replacement daemon. This re-check exits if the path is no longer a
+regular file and warns without stopping if the node cannot be read. This
+supervise-and-restart design (rather than `exec`-ing radvd) makes reload work
+regardless of the config file's ownership; see
+[CONTRIBUTING](CONTRIBUTING.md) for the rationale.
 
 Because the reload restarts the daemon, the outgoing radvd sends a final
 advertisement with Router Lifetime 0 on its way out (`sending stop adverts` in the
@@ -273,8 +276,8 @@ groups:
             emitting: every refused reload matches this rule through its own
             `SIGHUP reload refused` line — for all but one arm a rejected edit
             to fix, not an outage. The remaining arm reports that PID 1 could
-            not confirm the TERM reached radvd; its `pid` field says which
-            state it was in, and the `KILL` bullet under
+            not confirm the TERM reached radvd; the refusal line itself names
+            the causes it cannot distinguish, and the `KILL` bullet under
             [Capabilities](#capabilities) covers the capability case. The
             pattern also matches the entrypoint's own fatal startup errors (an
             invalid RADVD_DEBUG_LEVEL, a radvd.conf that is not a regular file,
@@ -308,8 +311,10 @@ groups:
           summary: "the entrypoint could not read the mounted radvd.conf, so RA output is unverified"
           description: >
             PID 1 could not read the mounted config within its 5s bound, or the
-            read failed outright. radvd runs and `pidof radvd` reports healthy,
-            but radvd's own open of the same node is unbounded. The warning
+            read failed outright. radvd either runs, with `pidof radvd`
+            reporting healthy while its own open of the same node is unbounded,
+            or exits on the same node, in which case `RadvdConfigError` fires
+            beside this warning and the container crash-loops. The warning
             predicts that radvd may block or fail on the node while nothing
             verifies that RAs are emitted. Confirm what reaches the LAN with
             `rdisc6`.

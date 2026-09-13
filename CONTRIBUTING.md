@@ -137,7 +137,8 @@ contract.
   one assertion that matches the emitted line against the rule extracted from
   the README rather than against a hand-copied string, so a reword on either
   side fails a test instead of silently switching the alert off. Copy an
-  existing extraction: `tests/shell/config_triage_test.sh`'s `ALERT_RULE` or
+  existing extraction: `tests/shell/alert_contract_test.sh`'s (unit, derived
+  from the published rules in both directions) or
   `tests/shell/debug_level_test.sh`'s (unit, against the captured output of the
   shipped block), or `scripts/smoke.sh`'s (runtime, against a real container's
   logs). Two further arms carry the same obligation and the same assertion
