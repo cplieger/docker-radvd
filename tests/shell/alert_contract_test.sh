@@ -68,11 +68,10 @@ else
   no "entrypoint fault alert coverage" "the rule or emitter derivation is invalid"
 fi
 
-if [ -x /usr/sbin/radvd ]; then
-  # Use binary rodata because adjacent C literals do not preserve the published source fragment.
-  # Use full format strings so a shared substring cannot satisfy an unrelated binding.
-  anchors=$(
-    cat <<'EOF'
+# Use binary rodata because adjacent C literals do not preserve the published source fragment.
+# Use full format strings so a shared substring cannot satisfy an unrelated binding.
+anchors=$(
+  cat <<'EOF'
 IPv6 forwarding seems to be disabled, but continuing anyway
 IPv6 forwarding on interface seems to be disabled, but continuing anyway
 received icmpv6 RA packet with non-linklocal source address
@@ -90,40 +89,51 @@ AdvValidLifetime for %s (%u) must be greater than or equal to AdvPreferredLifeti
 invalid prefix length in %s, line %d
 invalid route prefix length in %s, line %d
 EOF
-  )
+)
 
-  if [ "$rule_set_valid" -eq 1 ]; then
-    binding_failures=$(while IFS= read -r anchor; do
-      if ! grep -aFq "$anchor" /usr/sbin/radvd; then
-        printf 'shipped binary missing anchor: %s\n' "$anchor"
-      fi
-      if ! printf '%s\n' "$anchor" | grep -Eq -- "$union"; then
-        printf 'README patterns do not select anchor: %s\n' "$anchor"
-      fi
-    done <<<"$anchors")
-
-    fault_lines=$(grep -E 'printf .level=(error|warn) msg="' "$ENTRYPOINT" || true)
-    completeness_failures=$(printf '%s\n' "$union" | tr '|' '\n' | while IFS= read -r alternative; do
-      if printf '%s\n' "$anchors" | grep -Eq -- "$alternative"; then
-        continue
-      fi
-      if printf '%s\n' "$fault_lines" | grep -Eq -- "$alternative"; then
-        continue
-      fi
-      printf 'published alternative has no binary or entrypoint binding: %s\n' "$alternative"
-    done)
-
-    upstream_failures="${binding_failures}${binding_failures:+$'\n'}${completeness_failures}"
-    if [ -z "$upstream_failures" ]; then
-      ok "every published upstream alert pattern is bound to the shipped radvd binary"
-    else
-      no "published upstream alert binding" "$(printf '%s' "$upstream_failures" | tr '\n' '|')"
+# Both directions between the published rules and their bindings read only text, so
+# they run wherever the suite runs; only the anchors' presence in the binary needs the image.
+if [ "$rule_set_valid" -eq 1 ]; then
+  selection_failures=$(while IFS= read -r anchor; do
+    if ! printf '%s\n' "$anchor" | grep -Eq -- "$union"; then
+      printf 'README patterns do not select anchor: %s\n' "$anchor"
     fi
+  done <<<"$anchors")
+
+  fault_lines=$(grep -E 'printf .level=(error|warn) msg="' "$ENTRYPOINT" || true)
+  completeness_failures=$(printf '%s\n' "$union" | tr '|' '\n' | while IFS= read -r alternative; do
+    if printf '%s\n' "$anchors" | grep -Eq -- "$alternative"; then
+      continue
+    fi
+    if printf '%s\n' "$fault_lines" | grep -Eq -- "$alternative"; then
+      continue
+    fi
+    printf 'published alternative has no binary or entrypoint binding: %s\n' "$alternative"
+  done)
+
+  binding_failures="${selection_failures}${selection_failures:+$'\n'}${completeness_failures}"
+  if [ -z "$binding_failures" ]; then
+    ok "every published alert alternative is bound to a radvd anchor or an entrypoint emitter, and every anchor is selected"
   else
-    no "published upstream alert binding" "the published rule derivation is invalid"
+    no "published alert binding" "$(printf '%s' "$binding_failures" | tr '\n' '|')"
   fi
 else
-  skip "every published upstream alert pattern is bound to the shipped radvd binary" "/usr/sbin/radvd is absent outside the image build stage"
+  no "published alert binding" "the published rule derivation is invalid"
+fi
+
+if [ -x /usr/sbin/radvd ]; then
+  rodata_failures=$(while IFS= read -r anchor; do
+    if ! grep -aFq "$anchor" /usr/sbin/radvd; then
+      printf 'shipped binary missing anchor: %s\n' "$anchor"
+    fi
+  done <<<"$anchors")
+  if [ -z "$rodata_failures" ]; then
+    ok "every radvd anchor is present in the shipped radvd binary"
+  else
+    no "shipped radvd anchors" "$(printf '%s' "$rodata_failures" | tr '\n' '|')"
+  fi
+else
+  skip "every radvd anchor is present in the shipped radvd binary" "/usr/sbin/radvd is absent outside the image build stage"
 fi
 
 report

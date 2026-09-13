@@ -164,15 +164,15 @@ for _ in $(seq 1 12); do
   sleep 5
 done
 [ "$health" = "healthy" ] || fail "shipped HEALTHCHECK never reported healthy (last status: $health)"
-# The daemon runs as two processes (a root parent plus the dropped --username=radvd worker),
+# The daemon runs as two processes (the dropped --username=radvd worker plus its root privsep child),
 # so the drop is evidenced by the PRESENCE of a radvd-owned one, never by the absence
 # of a root-owned one. Dropping `--username=radvd` from the entrypoint fails this by name.
 owners=$(docker exec "$C1" ps -o user,comm | awk '$2 ~ /radvd/ { print $1 }' | sort -u)
 grep -qx 'radvd' <<<"$owners" || fail "no radvd-owned radvd process; observed owners: $(tr '\n' ' ' <<<"$owners")"
-# The directory entrypoint.sh creates must be the one radvd's compiled-in
-# --with-pidfile writes into; nothing else reads that Dockerfile coupling.
-docker exec "$C1" test -f /run/radvd/radvd.pid \
-  || fail "radvd did not write its pid file to /run/radvd (Dockerfile --with-pidfile vs the entrypoint's mkdir)"
+# radvd's compiled-in --with-pidfile path must be one it can actually
+# write; nothing else in the image reads that Dockerfile setting.
+docker exec "$C1" test -f /run/radvd.pid \
+  || fail "radvd did not write its pid file to /run/radvd.pid (Dockerfile --with-pidfile)"
 printf '[smoke] PASS  startup: radvd up, healthcheck healthy, privileges dropped\n'
 
 # --- 2. HUP reload (world-readable config) -----------------------------------
@@ -364,7 +364,7 @@ wait_for_log "$C2" 'SIGHUP reload refused' "the C2 malformed HUP replacement was
   || fail "C2 stopped after the refused reload"
 [ "$(docker exec "$C2" pidof radvd)" = "$pid_before" ] \
   || fail "C2 replaced radvd during the refused reload"
-# pidof returns both radvd pids (root parent + dropped -u worker); word
+# pidof returns both radvd pids (dropped -u worker + its root privsep child); word
 # splitting inside the container shell is deliberate so kill gets each pid.
 docker exec "$C2" sh -c 'kill -KILL $(pidof radvd)'
 wait_until_stopped "$C2" "C2 still running after radvd was SIGKILLed following a refused reload"
@@ -398,8 +398,9 @@ printf '[smoke] PASS  validation: invalid RADVD_DEBUG_LEVEL fails closed (exit 1
 # entrypoint refuses instead of degrading to a warning. This case uses a
 # DIRECTORY, whose refusal is deterministic in an assembled image; the
 # FIFO-with-no-writer variant — where radvd's open blocks while `pidof radvd`
-# keeps the healthcheck green — belongs to the bounded shell test
-# (tests/shell/config_node_test.sh).
+# keeps the healthcheck green — is the bounded shell test's subject
+# (tests/shell/config_node_test.sh), while the unreadable FIFO that startup
+# must still reach is this file's last scenario.
 printf '[smoke] starting %s (a directory where radvd.conf belongs)\n' "$C4"
 docker create --name "$C4" --network none --cap-add NET_RAW "$IMAGE" >/dev/null
 docker cp "$TMPDIR_NONFILE" "$C4:/etc/radvd" >/dev/null
@@ -418,21 +419,21 @@ printf '[smoke] PASS  refusal: a non-regular radvd.conf fails closed (exit 1, al
 # --- 8. read_only without a /run tmpfs fails closed ---------------------------
 # The README's hardened profile states this exact failure for an operator who
 # takes read_only: true without the tmpfs. Asserted here rather than only as a
-# grep of the shipped script (config_triage_test.sh case 4), because the source
-# check cannot show the path is reachable or that the exit code is 1. No fixture:
-# the daemon refuses a `docker cp` into a read-only rootfs, and the absent config
-# only warns, so the boot still reaches the PID-directory fatal.
+# grep of the shipped script, because the source check cannot show the path is
+# reachable or that the status is 255. The fixture is required: radvd opens its
+# pid file only after parsing the config, so with no config it exits 1 on the
+# config instead and this scenario would prove nothing about /run.
 printf '[smoke] starting %s (read_only, no /run tmpfs)\n' "$C5"
-docker create --name "$C5" --network none --cap-add NET_RAW --read-only "$IMAGE" >/dev/null
+docker create --name "$C5" --network none --cap-add NET_RAW --read-only \
+  -v "$TMPDIR_FIXTURE:/etc/radvd:ro" "$IMAGE" >/dev/null
 docker start "$C5" >/dev/null
 wait_until_stopped "$C5" "container still running with a read-only /run"
 ec=$(docker inspect -f '{{.State.ExitCode}}' "$C5")
-[ "$ec" = "1" ] || fail "read-only /run exit code $ec, want 1"
-wait_for_log "$C5" 'failed to create radvd PID directory' "missing PID-directory fatal line"
-log_has_re "$C5" "$ALERT_RULE" \
-  || fail "the PID-directory fatal does not match the README's RadvdConfigError pattern"
-log_has "$C5" 'msg="starting radvd"' && fail "radvd was started despite a read-only /run"
-printf '[smoke] PASS  hardening: read_only without a /run tmpfs fails closed (exit 1)\n'
+[ "$ec" = "255" ] || fail "read-only /run exit code $ec, want 255"
+wait_for_log "$C5" 'unable to open pid file, /run/radvd.pid: Read-only file system' "missing pid-file fatal line"
+wait_for_log "$C5" 'propagating exit for restart policy" status="255"' \
+  "the supervisor did not propagate radvd's pid-file exit status"
+printf '[smoke] PASS  hardening: read_only without a /run tmpfs fails closed (exit 255)\n'
 
 # --- 9. the README's hardened profile boots AND keeps the signal contract ------
 # The README publishes this exact set, so it is read from one place here and any
@@ -780,6 +781,38 @@ printf '[smoke] PASS  hardened caps: the published profile boots, drops privileg
   [ "$steady" -eq "$baseline" ] \
     || fail "reaping: process count grew from $baseline to $steady"
   printf '[smoke] PASS  reaping: ten reloads returned to the zombie-free process baseline (%s processes)\n' "$baseline"
+)
+
+(
+  C14="radvd-smoke-unreadable-node-$$"
+  node_dir=$(mktemp -d)
+  node="$node_dir/radvd.conf"
+  mkfifo "$node"
+  chmod 000 "$node"
+  # shellcheck disable=SC2317,SC2329  # invoked indirectly via trap
+  cleanup_unreadable_node() {
+    code=$?
+    if [ "$code" -ne 0 ] && docker inspect "$C14" >/dev/null 2>&1; then
+      printf -- '--- %s logs (tail) ---\n' "$C14" >&2
+      docker logs "$C14" 2>&1 | tail -25 >&2 || true
+    fi
+    docker rm -f "$C14" >/dev/null 2>&1 || true
+    rm -rf "$node_dir"
+  }
+  trap cleanup_unreadable_node EXIT
+
+  docker create --name "$C14" --network none --cap-drop ALL --cap-add NET_RAW \
+    -v "$node:/etc/radvd/radvd.conf:ro" "$IMAGE" >/dev/null
+  docker start "$C14" >/dev/null
+  wait_until_stopped "$C14" "container still running with an unreadable non-regular radvd.conf"
+  ec=$(docker inspect -f '{{.State.ExitCode}}' "$C14")
+  [ "$ec" = "1" ] || fail "unreadable non-regular radvd.conf exit code $ec, want 1"
+  wait_for_log "$C14" 'msg="radvd.conf is not a regular file' \
+    "startup bypassed the node checker for an unreadable non-regular config"
+  logs=$(docker logs "$C14" 2>&1)
+  grep -q 'msg="starting radvd"' <<<"$logs" \
+    && fail "radvd was started before the unreadable non-regular node was refused"
+  printf '[smoke] PASS  startup routing: unreadable non-regular radvd.conf was refused before radvd started\n'
 )
 
 printf '[smoke] OK — all signal-contract assertions passed for %s\n' "$IMAGE"

@@ -17,8 +17,7 @@ Run [radvd](https://radvd.litech.org/) (the Linux IPv6 Router Advertisement Daem
 This image is a minimal Alpine wrapper around upstream `radvd`, compiled from the pinned release tarball, plus a small POSIX entrypoint that:
 
 - **Checks the mounted `radvd.conf` node**: the entrypoint refuses a path that is not a regular file at startup or reload. It warns when its bounded node read fails, then leaves the config settings to radvd. A config radvd rejects outright, such as one defining no interface block, is left to radvd: radvd logs its own error and exits, and the entrypoint reports that exit.
-- **Creates `/run/radvd`** (radvd refuses to start without it)
-- **Drops privileges**: radvd opens its raw socket as root, then runs as the unprivileged `radvd` user (`--username=radvd`) for the rest of its lifetime
+- **Drops privileges**: radvd opens its raw socket as root, then runs its worker as the unprivileged `radvd` user (`--username=radvd`); a small root privsep helper stays beside it, so `ps` inside the container shows one radvd-owned process and one root-owned one
 - **Supervises radvd**: turns `SIGHUP` into a config reload, refusing the reload and keeping the running daemon when the config would not start; forwards `SIGTERM` for graceful shutdown. A stop that arrives before radvd has started wins immediately and exits 0 without starting it. An unexpected radvd exit propagates to Docker's restart policy. See [Reloading](#reloading-configuration) for the `docker kill` caveat.
 - **Logs to stderr** with structured key=value lines, captured by `docker logs`
 
@@ -121,12 +120,15 @@ case, run `docker exec radvd kill -HUP 1`. This sends the same reload signal fro
 inside the container and keeps the restart policy armed because the Docker API
 kill call, not the signal, disarms it.
 
-The entrypoint restarts the daemon so it re-reads the config. On reload it checks
-the config path again. It exits if the path is no longer a regular file, and it
-warns without stopping if it cannot read the node. A config removed after startup
-takes the warning path after radvd stops. This supervise-and-restart design (rather
-than `exec`-ing radvd) makes reload work regardless of the config file's ownership;
-see [CONTRIBUTING](CONTRIBUTING.md) for the rationale.
+The entrypoint restarts the daemon so it re-reads the config. A `SIGHUP`
+whose config is absent or not a regular file is refused before anything is
+stopped, so the running daemon keeps serving its last good config. After an
+accepted config test stops radvd, the entrypoint checks the path again before
+starting the replacement daemon. This re-check exits if the path is no longer a
+regular file and warns without stopping if the node cannot be read. This
+supervise-and-restart design (rather than `exec`-ing radvd) makes reload work
+regardless of the config file's ownership; see
+[CONTRIBUTING](CONTRIBUTING.md) for the rationale.
 
 Because the reload restarts the daemon, the outgoing radvd sends a final
 advertisement with Router Lifetime 0 on its way out (`sending stop adverts` in the
@@ -176,10 +178,11 @@ only controls how much radvd logs.
 #### Hardened profile
 
 Under `read_only: true`, `/run` must be a writable `tmpfs`: radvd writes its PID
-file to the compiled-in `/run/radvd/radvd.pid`, and the entrypoint creates that
-directory at startup, so without it the container exits 1 with
-`failed to create radvd PID directory` before radvd ever starts. Add to the
-service in the [Quick start](#quick-start) example:
+file to the compiled-in `/run/radvd.pid`. Without a writable `/run` radvd starts
+and then exits with `unable to open pid file, /run/radvd.pid: Read-only file
+system`, which the entrypoint propagates as `status="255"`; the
+`RadvdSupervisorFault` rule under [Alerting](#alerting) is the one that reports
+it. Add to the service in the [Quick start](#quick-start) example:
 
 ```yaml
     read_only: true
@@ -255,7 +258,7 @@ groups:
         expr: |
           sum by (hostname) (count_over_time(
             {container="radvd"}
-            |~ `SIGHUP reload refused|exiting, failed to read config file|exiting, permissions on conf_file invalid|not found:|does not exist or is not set up properly \(setup_iface=|unable to drop root privileges|received icmpv6 RA packet with non-linklocal source address|invalid RADVD_DEBUG_LEVEL|radvd.conf is not a regular file|failed to create radvd PID directory|must be at least|must be between|must be zero or between|must not be greater than|must be set with|must be greater than or equal to AdvPreferredLifetime|invalid prefix length|invalid route prefix length` [10m]
+            |~ `SIGHUP reload refused|exiting, failed to read config file|exiting, permissions on conf_file invalid|not found:|does not exist or is not set up properly \(setup_iface=|unable to drop root privileges|received icmpv6 RA packet with non-linklocal source address|invalid RADVD_DEBUG_LEVEL|radvd.conf is not a regular file|must be at least|must be between|must be zero or between|must not be greater than|must be set with|must be greater than or equal to AdvPreferredLifetime|invalid prefix length|invalid route prefix length` [10m]
           )) > 0
         for: 0m
         labels:
@@ -273,13 +276,12 @@ groups:
             emitting: every refused reload matches this rule through its own
             `SIGHUP reload refused` line — for all but one arm a rejected edit
             to fix, not an outage. The remaining arm reports that PID 1 could
-            not confirm the TERM reached radvd; its `pid` field says which
-            state it was in, and the `KILL` bullet under
+            not confirm the TERM reached radvd; the refusal line itself names
+            the causes it cannot distinguish, and the `KILL` bullet under
             [Capabilities](#capabilities) covers the capability case. The
             pattern also matches the entrypoint's own fatal startup errors (an
-            invalid RADVD_DEBUG_LEVEL, a radvd.conf that is not a regular file,
-            a failed /run/radvd creation), which crash-loop the container before
-            radvd ever starts, and radvd's
+            invalid RADVD_DEBUG_LEVEL, a radvd.conf that is not a regular file),
+            which crash-loop the container before radvd ever starts, and radvd's
             `unable to drop root privileges`, which is not a config fault at
             all: the container was started without the SETUID and SETGID
             capabilities, so `--username=radvd` cannot take effect (see the hardened
@@ -308,8 +310,10 @@ groups:
           summary: "the entrypoint could not read the mounted radvd.conf, so RA output is unverified"
           description: >
             PID 1 could not read the mounted config within its 5s bound, or the
-            read failed outright. radvd runs and `pidof radvd` reports healthy,
-            but radvd's own open of the same node is unbounded. The warning
+            read failed outright. radvd either runs, with `pidof radvd`
+            reporting healthy while its own open of the same node is unbounded,
+            or exits on the same node, in which case `RadvdConfigError` fires
+            beside this warning and the container crash-loops. The warning
             predicts that radvd may block or fail on the node while nothing
             verifies that RAs are emitted. Confirm what reaches the LAN with
             `rdisc6`.
@@ -387,7 +391,7 @@ labels your Alertmanager uses.
 
 ## Security
 
-radvd opens its raw ICMPv6 socket as root, then drops to the unprivileged `radvd` user for the rest of its lifetime; the config mount is read-only. CI lints the entrypoint with [shellcheck](https://www.shellcheck.net/) and the Dockerfile with [hadolint](https://github.com/hadolint/hadolint), scans for leaked secrets with [gitleaks](https://github.com/gitleaks/gitleaks), and scans the image with [trivy](https://trivy.dev/); current scan results live in the repository's Security tab.
+radvd opens its raw ICMPv6 socket as root, then drops its worker to the unprivileged `radvd` user, leaving only a small root privsep helper; the config mount is read-only. CI lints the entrypoint with [shellcheck](https://www.shellcheck.net/) and the Dockerfile with [hadolint](https://github.com/hadolint/hadolint), scans for leaked secrets with [gitleaks](https://github.com/gitleaks/gitleaks), and scans the image with [trivy](https://trivy.dev/); current scan results live in the repository's Security tab.
 
 The image is published with [cosign](https://github.com/sigstore/cosign) signatures and SBOM attestations. Verify a pull:
 

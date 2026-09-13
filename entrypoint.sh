@@ -58,15 +58,8 @@ on_term() {
   printf 'level=info msg="shutdown signal received; stopping radvd"\n' >&2
   if [ -z "$radvd_pid" ]; then
     term_pending=1
-  elif ! kill -TERM "$radvd_pid" 2>/dev/null; then
-    # A reaped child has no /proc entry; a live child PID 1 may not signal does. Only the
-    # second is a delivery failure -- the first is a stop that is already complete, and the
-    # loop's disposition arm reports it.
-    if [ -e "/proc/$radvd_pid" ]; then
-      printf 'level=error msg="failed to deliver TERM to radvd; the container may lack CAP_KILL" pid="%s"\n' "$radvd_pid" >&2
-      printf 'level=warn msg="the TERM could not be delivered to radvd; a graceful stop cannot be confirmed"\n' >&2
-      exit 0
-    fi
+  else
+    request_shutdown
   fi
 }
 
@@ -115,18 +108,24 @@ request_reload() {
     printf '%s\n' "$hup_ct" >&2
     return
   fi
-  # reload=1 promises the loop that an exit is coming, so only an observed
-  # delivery may arm it.
-  if [ -n "$radvd_pid" ] && kill -TERM "$radvd_pid" 2>/dev/null; then
+  # reload=1 promises the loop that an exit is coming, so only an observed delivery may
+  # arm it. Both kill sites are reached only with radvd_pid naming the current child (the
+  # loop head after start_radvd, and on_term's non-empty arm), and ash's builtin kill
+  # exits 0 on an empty operand, so that invariant, not a guard, is what keeps a reload
+  # from being armed without a delivery.
+  if kill -TERM "$radvd_pid" 2>/dev/null; then
     reload=1
     printf 'level=info msg="SIGHUP received; restarting radvd to reload config"\n' >&2
   else
-    printf 'level=error msg="SIGHUP reload refused: TERM delivery to radvd could not be confirmed; radvd may not be running yet, the child may already have been reaped, or the container may lack CAP_KILL" pid="%s"\n' "$radvd_pid" >&2
+    printf 'level=error msg="SIGHUP reload refused: TERM delivery to radvd could not be confirmed; the child may already have been reaped, or the container may lack CAP_KILL" pid="%s"\n' "$radvd_pid" >&2
   fi
 }
 
 request_shutdown() {
-  if [ -n "$radvd_pid" ] && ! kill -TERM "$radvd_pid" 2>/dev/null && [ -e "/proc/$radvd_pid" ]; then
+  # A reaped child has no /proc entry; a live child PID 1 may not signal does. Only the
+  # second is a delivery failure -- the first is a stop that is already complete, and the
+  # loop's disposition arm reports it.
+  if ! kill -TERM "$radvd_pid" 2>/dev/null && [ -e "/proc/$radvd_pid" ]; then
     signal_failed=1
     printf 'level=error msg="failed to deliver TERM to radvd; the container may lack CAP_KILL" pid="%s"\n' "$radvd_pid" >&2
   fi
@@ -199,15 +198,7 @@ check_config_node() {
   fi
 }
 
-if [ -r "$CONF" ]; then
-  check_config_node
-fi
-
-# radvd refuses to start without the directory holding its --with-pidfile path.
-if ! mkdir -p /run/radvd; then
-  printf 'level=error msg="failed to create radvd PID directory; radvd cannot start" path="%s"\n' "/run/radvd" >&2
-  exit 1
-fi
+check_config_node
 
 start_radvd() {
   # A shutdown latched while no radvd existed (preflight, or the reload gap
@@ -233,8 +224,9 @@ start_radvd
 
 while :; do
   drain_signals
-  # A shutdown latched before this loop whose TERM was refused has no exit still
-  # coming: there is nothing to wait for, so skip to the disposition below.
+  # A shutdown whose TERM was refused has no exit still coming, whether it latched
+  # before this loop or during it: there is nothing to wait for, so skip to the
+  # disposition below.
   if ! { [ "$shutdown" -eq 1 ] && [ "$signal_failed" -eq 1 ]; }; then
     # ash writes a bare job-status word to fd2 for a child killed BY a signal, which every
     # accepted reload produces; a per-command redirect never reaches the traps' own fd2.

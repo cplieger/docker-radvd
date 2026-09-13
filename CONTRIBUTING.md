@@ -20,8 +20,8 @@ The files with real logic are:
   `postUpgradeTasks` recompute the SHA256 from the release asset inside the same
   bump commit, so no manual step is needed.
 - `entrypoint.sh`: a POSIX `sh` script (runs on Alpine's BusyBox shell, not
-  bash) that checks a readable mounted `radvd.conf` is a regular file,
-  creates `/run/radvd`, and
+  bash) that checks the mounted `radvd.conf` is a regular file, warns when
+  its bounded read fails, and
   supervises radvd in the foreground as the non-root `radvd` user (`--username=radvd`):
   it turns `SIGHUP`
   into a config reload (refusing it, and keeping the running daemon, when the
@@ -137,7 +137,8 @@ contract.
   one assertion that matches the emitted line against the rule extracted from
   the README rather than against a hand-copied string, so a reword on either
   side fails a test instead of silently switching the alert off. Copy an
-  existing extraction: `tests/shell/config_triage_test.sh`'s `ALERT_RULE` or
+  existing extraction: `tests/shell/alert_contract_test.sh`'s (unit, derived
+  from the published rules in both directions) or
   `tests/shell/debug_level_test.sh`'s (unit, against the captured output of the
   shipped block), or `scripts/smoke.sh`'s (runtime, against a real container's
   logs). Two further arms carry the same obligation and the same assertion

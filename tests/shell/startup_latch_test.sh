@@ -137,10 +137,11 @@ stub_radvd 0
 
 # --- signal handlers with no child assigned --------------------------------------
 radvd_pid=""
-shutdown=0 reload=0 signal_failed=0 sig_seen=0
+shutdown=0 reload=0 signal_failed=0 sig_seen=0 term_pending=0
 : >"$SIGNALS"
 on_term 2>"$LOG"
-[ "$shutdown" -eq 1 ] && [ "$signal_failed" -eq 0 ] && [ "$sig_seen" -eq 1 ] && [ ! -s "$SIGNALS" ] \
+[ "$shutdown" -eq 1 ] && [ "$signal_failed" -eq 0 ] && [ "$sig_seen" -eq 1 ] \
+  && [ "$term_pending" -eq 1 ] && [ ! -s "$SIGNALS" ] \
   && grep -Fq 'msg="shutdown signal received; stopping radvd"' "$LOG" \
   && ! grep -Fq 'failed to deliver TERM to radvd' "$LOG" \
   && ok "TERM with no assigned child latches shutdown without reporting a delivery failure" \
@@ -174,12 +175,13 @@ wait "$radvd_pid"
 timeout 3 bash -c '
   set -u
   . "$1"
+  . "$3"
   radvd_pid=$2
   shutdown=0
   term_pending=0
   sig_seen=0
   on_term
-' _ "$WORK/on_term.sh" "$radvd_pid" 2>"$LOG"
+' _ "$WORK/on_term.sh" "$radvd_pid" "$WORK/request_shutdown.sh" 2>"$LOG"
 rc=$?
 [ "$rc" -eq 0 ] \
   && grep -Fq 'msg="shutdown signal received; stopping radvd"' "$LOG" \
