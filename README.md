@@ -3,8 +3,6 @@
 [![Image Size](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/docker-radvd/badges/size.json)](https://github.com/cplieger/docker-radvd/pkgs/container/docker-radvd)
 ![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-blue)
 ![base: Alpine](https://img.shields.io/badge/base-Alpine-0D597F?logo=alpinelinux)
-[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13207/badge)](https://www.bestpractices.dev/projects/13207)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/docker-radvd/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/docker-radvd)
 [![SBOM](https://img.shields.io/badge/SBOM-SPDX-1D4ED8)](https://github.com/cplieger/docker-radvd/releases)
 
 <!-- hub-overview BEGIN -->
@@ -397,7 +395,7 @@ The image is published with [cosign](https://github.com/sigstore/cosign) signatu
 
 ```bash
 cosign verify ghcr.io/cplieger/docker-radvd:latest \
-    --certificate-identity-regexp "https://github.com/cplieger/docker-radvd/.github/workflows/.*" \
+    --certificate-identity-regexp '^https://github\.com/cplieger/ci/\.github/workflows/docker-release\.yaml@' \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
