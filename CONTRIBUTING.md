@@ -195,7 +195,7 @@ restart policy. CI runs the same script on every PR via the repo-local
 
 ## Most CI workflows are not this repo's to edit
 
-`ci.yaml`, `release.yaml` and `scorecard.yml` carry a `Synced from cplieger/ci …
+`ci.yaml` and `release.yaml` carry a `Synced from cplieger/ci …
 — DO NOT EDIT` header: build, release, signing (cosign) and SBOM logic all live
 in that central repo, so changing pipeline behaviour means changing it there.
 `smoke.yml` is the one workflow this repo owns, and its own header says why it is
