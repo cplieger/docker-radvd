@@ -6,7 +6,7 @@ ARG RADVD_VERSION=v2.21
 # repin: dep=radvd-project/radvd url=https://github.com/radvd-project/radvd/releases/download/{version}/radvd-{version_nov}.tar.gz
 ARG RADVD_SHA256=09e5cf7712397463fd35ebca71f3c05f7d31cff9246513f12d03a359c40b089c
 
-FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS builder
+FROM alpine:3.24.2@sha256:3cf95fe0816180395592b8373f3ec60663f076127617bbacb4eacf9667afe2e9 AS builder
 
 SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
 
@@ -55,7 +55,7 @@ RUN url="https://github.com/radvd-project/radvd/releases/download/${RADVD_VERSIO
 }
 EOF
 
-FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS base
+FROM alpine:3.24.2@sha256:3cf95fe0816180395592b8373f3ec60663f076127617bbacb4eacf9667afe2e9 AS base
 
 ARG PKG_REFRESH=static
 # The `echo` is load-bearing: BuildKit keys a RUN on the args it CONSUMES, so dropping it
