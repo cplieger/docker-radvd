@@ -416,6 +416,52 @@ log_has_re "$C4" "$ALERT_RULE" \
 log_has "$C4" 'msg="starting radvd"' && fail "radvd was started despite a non-regular radvd.conf"
 printf '[smoke] PASS  refusal: a non-regular radvd.conf fails closed (exit 1, alert-matching)\n'
 
+# --- a malformed config at startup exits radvd and is reported as that ---------
+# The daemon's own read of the config, not configtest mode: tests/smoke.sh proves
+# `radvd -c` rejects this fixture, and the HUP scenarios above route the same file
+# through that check, but a `docker restart` onto a bad edit takes neither and the
+# README's RadvdConfigError rule names radvd's own startup line as its evidence.
+(
+  C15="radvd-smoke-bad-config-$$"
+  bad_dir=$(mktemp -d)
+  # shellcheck disable=SC2317,SC2329  # invoked indirectly via trap
+  cleanup_bad_config() {
+    code=$?
+    if [ "$code" -ne 0 ] && docker inspect "$C15" >/dev/null 2>&1; then
+      printf -- '--- %s logs (tail) ---\n' "$C15" >&2
+      docker logs "$C15" 2>&1 | tail -25 >&2 || true
+    fi
+    docker rm -f "$C15" >/dev/null 2>&1 || true
+    rm -rf "$bad_dir"
+  }
+  trap cleanup_bad_config EXIT
+
+  # Same modes as the valid fixture, so the only fault radvd can find is the syntax.
+  cp tests/radvd.bad.conf "$bad_dir/radvd.conf"
+  chmod 0755 "$bad_dir"
+  chmod 0644 "$bad_dir/radvd.conf"
+  printf '[smoke] starting %s (malformed radvd.conf at startup)\n' "$C15"
+  docker create --name "$C15" --network none --cap-add NET_RAW \
+    -v "$bad_dir:/etc/radvd:ro" "$IMAGE" >/dev/null
+  docker start "$C15" >/dev/null
+  wait_until_stopped "$C15" "container still running with a malformed radvd.conf"
+  ec=$(docker inspect -f '{{.State.ExitCode}}' "$C15")
+  [ "$ec" = "1" ] || fail "malformed radvd.conf at startup exit code $ec, want 1 (radvd's own config-read failure)"
+  wait_for_log "$C15" 'exiting, failed to read config file' \
+    "radvd's own rejection line did not reach the container log on the startup path"
+  wait_for_log "$C15" 'msg="radvd exited; propagating exit for restart policy" status="1"' \
+    "the supervisor did not report the malformed-config exit with radvd's status"
+  log_has_re "$C15" "$ALERT_RULE" \
+    || fail "the startup config rejection does not match the README's RadvdConfigError pattern"
+  # Absence assertions: single-shot on purpose, and safe here only because the
+  # wait_for_log calls above already proved this container's log is flushed.
+  log_has "$C15" 'SIGHUP reload refused' \
+    && fail "a startup config rejection was reported as a refused reload"
+  log_has "$C15" 'msg="reloading radvd (config re-read via restart)"' \
+    && fail "the supervisor restarted radvd after a malformed-config exit instead of propagating it"
+  printf '[smoke] PASS  malformed startup config: radvd exited 1 with its own rejection line, the supervisor propagated status 1 without a restart\n'
+)
+
 # --- 8. read_only without a /run tmpfs fails closed ---------------------------
 # The README's hardened profile states this exact failure for an operator who
 # takes read_only: true without the tmpfs. Asserted here rather than only as a

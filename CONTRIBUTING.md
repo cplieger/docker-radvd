@@ -29,12 +29,15 @@ The files with real logic are:
   shutdown, and propagates an unexpected radvd exit to Docker's restart policy.
 
 `compose.yaml` is the reference deployment. There is no build system and no
-application source beyond these files. Two smoke tests cover the two failure
+application source beyond these files. Three smoke tests cover three failure
 modes: a build-time test (`tests/smoke.sh`, run in the Dockerfile `test` stage)
-that configtests a valid and a malformed config, and a runtime signal-contract
+that configtests a valid and a malformed config, a runtime signal-contract
 test (`scripts/smoke.sh`, run against the assembled image by the repo-local
 `.github/workflows/smoke.yml`) that exercises the supervisor's lifecycle
-contract.
+contract, and a runtime emission test (`tests/image-smoke.conf`, run by the
+central `ci / validate` docker job through the synced `tests/image-smoke.sh`
+harness) that boots the image on an IPv6 network and reads its router
+advertisement back off the wire with `radvdump`.
 
 ## Design boundaries (please preserve)
 
@@ -190,8 +193,22 @@ interface absent, so no RA is ever emitted): startup and the shipped healthcheck
 the same reload with the config directory made root-only (where radvd's own
 in-process reread would fail, the field failure the supervisor exists to
 prevent), graceful SIGTERM shutdown, and unexpected-exit propagation to the
-restart policy. CI runs the same script on every PR via the repo-local
+restart policy, including a malformed `radvd.conf` at startup, which must exit
+the container with radvd's own status and rejection line rather than start
+anything. CI runs the same script on every PR via the repo-local
 `.github/workflows/smoke.yml` (not synced from `cplieger/ci`).
+
+The emission test needs a host whose kernel has IPv6 enabled, because it
+creates a user-defined `--ipv6` network and reads the advertisement back from a
+second container; no Docker daemon setting is required for a user-defined
+`--ipv6` network. Run it against the same local image:
+
+```sh
+sh tests/image-smoke.sh docker-radvd:smoke
+```
+
+Its assertions live in `tests/image-smoke.conf`; `tests/image-smoke.sh` is the
+shared harness synced from `cplieger/ci` and is not edited here.
 
 ## Most CI workflows are not this repo's to edit
 
