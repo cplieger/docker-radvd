@@ -35,6 +35,7 @@ RUN url="https://github.com/radvd-project/radvd/releases/download/${RADVD_VERSIO
     && strip radvd radvdump \
     && install -D -m 755 radvd /out/usr/sbin/radvd \
     && install -D -m 755 radvdump /out/usr/sbin/radvdump \
+    && install -D -m 644 COPYRIGHT /out/usr/share/licenses/radvd/COPYRIGHT \
     # Syft inventories the final image from Alpine's APK database only, so this
     # source-built payload is invisible to the signed release SBOM without it.
     && cat > /out/radvd.cdx.json <<EOF
@@ -55,6 +56,8 @@ RUN url="https://github.com/radvd-project/radvd/releases/download/${RADVD_VERSIO
 }
 EOF
 
+COPY --chmod=644 LICENSE NOTICE /out/usr/share/licenses/docker-radvd/
+
 FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS base
 
 ARG PKG_REFRESH=static
@@ -67,6 +70,7 @@ RUN echo "OS package refresh: ${PKG_REFRESH}" \
 
 COPY --from=builder /out/usr/sbin/ /usr/sbin/
 COPY --from=builder /out/radvd.cdx.json /usr/share/sbom/radvd.cdx.json
+COPY --from=builder /out/usr/share/licenses /usr/share/licenses
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 
 FROM base AS test
@@ -93,6 +97,7 @@ RUN apk add --no-cache bash \
 # COPY is what forces the test stage to build and pass first.
 FROM base AS final
 COPY --from=test /tests-passed /tests-passed
+COPY licenses/ /usr/share/licenses/
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \
     CMD ["pidof", "radvd"]

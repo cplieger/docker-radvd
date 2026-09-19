@@ -427,3 +427,7 @@ This project was built with AI-assisted tooling using [Claude](https://claude.co
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+The image carries the license text of every bundled component under `/usr/share/licenses/`. The Alpine packages in the image ship no license file upstream, so their license texts are kept under `licenses/` in this repository and copied in.
+
+It packages upstream [radvd](https://github.com/radvd-project/radvd), which carries its own BSD-style permissive license: the `COPYRIGHT` file from the release tarball, shipped at `/usr/share/licenses/radvd/COPYRIGHT`. The daemon is compiled from the release asset `https://github.com/radvd-project/radvd/releases/download/<version>/radvd-<version>.tar.gz`, at the version the `RADVD_VERSION` build argument pins and verified against the `RADVD_SHA256` pin before extraction. The build applies no patches, so this repository's [Dockerfile](Dockerfile) and that tarball are the complete recipe for the binary in the image.
