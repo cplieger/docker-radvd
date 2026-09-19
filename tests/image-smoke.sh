@@ -20,6 +20,7 @@ SMOKE_APP_NAME=""
 SMOKE_TIMEOUT=""
 SMOKE_RUN_ARGS=""
 SMOKE_LOG_PATTERN=""
+SMOKE_LICENSE_TREE=""
 # A .conf that creates host state overrides this. Defined BEFORE the source so the
 # EXIT trap can always call it.
 # shellcheck disable=SC2329  # invoked indirectly via the EXIT trap's cleanup()
@@ -46,6 +47,13 @@ case "$TIMEOUT" in
     exit 1
     ;;
 esac
+case "$SMOKE_LICENSE_TREE" in
+  '' | 0 | 1) ;;
+  *)
+    printf 'FAIL: SMOKE_LICENSE_TREE must be 1, 0 or unset, got "%s"\n' "$SMOKE_LICENSE_TREE" >&2
+    exit 1
+    ;;
+esac
 NAME="smoke-${APP}-$$"
 
 # shellcheck disable=SC2317,SC2329  # invoked indirectly via trap
@@ -57,7 +65,7 @@ cleanup() {
     # A shell-less image often logs nothing about its probe, so the HEALTHCHECK's own
     # output is the only evidence for an "unhealthy" verdict.
     printf '%s\n' "--- healthcheck probe log ---" >&2
-    docker inspect --format '{{ if .State.Health }}{{ range .State.Health.Log }}exit={{ .ExitCode }}: {{ .Output }}{{ end }}{{ end }}' "$NAME" 2>/dev/null >&2 || true
+    docker inspect --format '{{ if .State.Health }}{{ range .State.Health.Log }}exit={{ .ExitCode }}: {{ .Output }}{{ end }}{{ end }}' "$NAME" >&2 2>/dev/null || true
   fi
   docker rm -f "$NAME" >/dev/null 2>&1 || true
   # Fixture teardown, after the container that consumed it is gone; never allowed to
@@ -94,6 +102,29 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
       if [ -n "$SMOKE_LOG_PATTERN" ] && ! docker logs "$NAME" 2>&1 | grep -qF -- "$SMOKE_LOG_PATTERN"; then
         sleep 1
         continue
+      fi
+      # Read through `docker cp`, since a distroless image has no shell to exec.
+      if [ "$SMOKE_LICENSE_TREE" = 1 ]; then
+        tree=$(mktemp -d)
+        # The daemon's own message is the diagnosis (a missing path reads differently
+        # from a refused read), so it is kept, not swallowed.
+        if ! cp_err=$(docker cp "$NAME:/usr/share/licenses" "$tree/" 2>&1 >/dev/null); then
+          rm -rf "$tree"
+          printf 'FAIL: %s image has no readable /usr/share/licenses tree: %s\n' "$APP" "$cp_err" >&2
+          exit 1
+        fi
+        if [ ! -f "$tree/licenses/$APP/LICENSE" ]; then
+          rm -rf "$tree"
+          printf 'FAIL: %s image lacks /usr/share/licenses/%s/LICENSE\n' "$APP" "$APP" >&2
+          exit 1
+        fi
+        components=$(find "$tree/licenses" -mindepth 1 -maxdepth 1 -type d ! -name "$APP" | wc -l)
+        rm -rf "$tree"
+        if [ "$components" -lt 1 ]; then
+          printf 'FAIL: %s license tree holds only the image'\''s own files; no bundled component\n' "$APP" >&2
+          exit 1
+        fi
+        printf '%s license tree: own LICENSE plus %s bundled component(s)\n' "$APP" "$components"
       fi
       # A failure here is a verdict, not a retry: health said up, so anything
       # smoke_verify finds missing is missing from the image.
