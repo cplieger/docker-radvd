@@ -56,7 +56,10 @@ RUN url="https://github.com/radvd-project/radvd/releases/download/${RADVD_VERSIO
 }
 EOF
 
-COPY --chmod=644 LICENSE NOTICE /out/usr/share/licenses/docker-radvd/
+# No --chmod: BuildKit applies it to the destination DIRECTORY it creates as well as to
+# the files, so --chmod=644 shipped /usr/share/licenses/docker-radvd/ as drw-r--r-- and
+# only root could traverse it. Both files are already 0644 in git.
+COPY LICENSE NOTICE /out/usr/share/licenses/docker-radvd/
 
 FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS base
 
