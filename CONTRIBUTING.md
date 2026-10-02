@@ -31,13 +31,13 @@ The files with real logic are:
 `compose.yaml` is the reference deployment. There is no build system and no
 application source beyond these files. Three smoke tests cover three failure
 modes: a build-time test (`tests/smoke.sh`, run in the Dockerfile `test` stage)
-that configtests a valid and a malformed config, a runtime signal-contract
-test (`scripts/smoke.sh`, run against the assembled image by the repo-local
-`.github/workflows/smoke.yml`) that exercises the supervisor's lifecycle
-contract, and a runtime emission test (`tests/image-smoke.conf`, run by the
-central `ci / validate` docker job through the synced `tests/image-smoke.sh`
+that configtests a valid and a malformed config, a runtime emission test
+(`tests/image-smoke.conf`, run through the synced `tests/image-smoke.sh`
 harness) that boots the image on an IPv6 network and reads its router
-advertisement back off the wire with `radvdump`.
+advertisement back off the wire with `radvdump`, and a runtime signal-contract
+suite (`tests/image-test.sh`) that exercises the supervisor's lifecycle
+contract. The central `ci / validate` docker job runs both runtime tests
+against the image it builds, the harness first.
 
 ## Design boundaries (please preserve)
 
@@ -130,7 +130,7 @@ advertisement back off the wire with `radvdump`.
   `level=... msg="..."` shape so `docker logs` output stays greppable. One
   deliberate exception: `request_reload`'s refusal arm republishes radvd's captured
   stderr verbatim and unstructured, because the README's `RadvdConfigError` rule
-  matches those bytes and `scripts/smoke.sh` asserts it. Do not route that
+  matches those bytes and `tests/image-test.sh` asserts it. Do not route that
   through `sanitize_log_value`.
 - **A new emitted signal owes the README's alert rules an alternative.** Every
   `level=error` line the entrypoint exits non-zero on is an alternative of the
@@ -143,7 +143,7 @@ advertisement back off the wire with `radvdump`.
   existing extraction: `tests/shell/alert_contract_test.sh`'s (unit, derived
   from the published rules in both directions) or
   `tests/shell/debug_level_test.sh`'s (unit, against the captured output of the
-  shipped block), or `scripts/smoke.sh`'s (runtime, against a real container's
+  shipped block), or `tests/image-test.sh`'s (runtime, against a real container's
   logs). Two further arms carry the same obligation and the same assertion
   requirement. A new `level=warn` line that predicts, or leaves unknown, zero
   usable Router Advertisement output owes `RadvdAdvertisementsUnverified` an
@@ -179,12 +179,12 @@ Those two `--ignore` flags are what CI passes for every repo, so a bare
 The `Dockerfile` opens with `# check=error=true`, so BuildKit build checks are
 promoted to errors, so a build with check warnings fails.
 
-If you touch the entrypoint's signal handling, run the signal-contract smoke
-test against a locally built image:
+If you touch the entrypoint's signal handling, run the signal-contract suite
+against a locally built image:
 
 ```sh
 docker build -t docker-radvd:smoke .
-scripts/smoke.sh docker-radvd:smoke
+tests/image-test.sh docker-radvd:smoke
 ```
 
 It exercises the supervisor's whole lifecycle contract with no network
@@ -195,8 +195,11 @@ in-process reread would fail, the field failure the supervisor exists to
 prevent), graceful SIGTERM shutdown, and unexpected-exit propagation to the
 restart policy, including a malformed `radvd.conf` at startup, which must exit
 the container with radvd's own status and rejection line rather than start
-anything. CI runs the same script on every PR via the repo-local
-`.github/workflows/smoke.yml` (not synced from `cplieger/ci`).
+anything. The central `ci / validate` docker job runs the same suite on every
+PR, after the harness, against the image it builds. CI executes it directly, so
+it must stay tracked executable with its bash shebang;
+`tests/shell/ci_contract_test.sh` asserts both, and that no Dockerfile `COPY`
+or `ADD` can pull it into an image.
 
 The emission test needs a host whose kernel has IPv6 enabled, because it
 creates a user-defined `--ipv6` network and reads the advertisement back from a
@@ -210,16 +213,15 @@ sh tests/image-smoke.sh docker-radvd:smoke
 Its assertions live in `tests/image-smoke.conf`; `tests/image-smoke.sh` is the
 shared harness synced from `cplieger/ci` and is not edited here.
 
-## Most CI workflows are not this repo's to edit
+## The CI workflows are not this repo's to edit
 
 `ci.yaml` and `release.yaml` carry a `Synced from cplieger/ci …
 — DO NOT EDIT` header: build, release, signing (cosign) and SBOM logic all live
 in that central repo, so changing pipeline behaviour means changing it there.
-`smoke.yml` is the one workflow this repo owns, and its own header says why it is
-deliberately kept out of the synced template. `codeql.yml` and `security.yml`
-carry no header but are byte-identical across the fleet's image repos — they are
-uniform thin callers of `cplieger/ci` reusable workflows, so change them in
-`cplieger/ci` or fleet-wide rather than here.
+`codeql.yml` and `security.yml` carry no header but are byte-identical across
+the fleet's image repos — they are uniform thin callers of `cplieger/ci`
+reusable workflows, so change them in `cplieger/ci` or fleet-wide rather than
+here.
 
 ## Commits and PRs
 

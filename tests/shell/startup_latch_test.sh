@@ -104,7 +104,7 @@ rc=$?
 # A TERM to a child the reaping `wait` already took is a stop that is COMPLETE, not a
 # refused delivery: the /proc probe is the discriminator, so removing it makes this case
 # log the missing-capability line and arm signal_failed. The live-but-unsignalable half
-# needs a container without CAP_KILL and belongs to scripts/smoke.sh scenario 10.
+# needs a container without CAP_KILL and belongs to tests/image-test.sh scenario 10.
 signal_failed=0
 sleep 0.1 &
 radvd_pid=$!
@@ -148,7 +148,7 @@ on_term 2>"$LOG"
   || no "empty-pid TERM" "shutdown=$shutdown, signal_failed=$signal_failed, sig_seen=$sig_seen, signals=[$(tr '\n' ' ' <"$SIGNALS")], log: $(cat "$LOG")"
 
 # Bash cannot reproduce ash/dash's nested-signal corruption; this pins only the
-# decision to deliver immediately when a child is assigned. scripts/smoke.sh owns
+# decision to deliver immediately when a child is assigned. tests/image-test.sh owns
 # the real-container contract.
 load_function on_term
 TERM_WITNESS="$WORK/term-witness"
@@ -165,7 +165,7 @@ wait "$radvd_pid"
   || no "assigned-pid TERM" "signal_failed=$signal_failed, term_pending=$term_pending, witness=$([ -e "$TERM_WITNESS" ] && printf yes || printf no), log: $(cat "$LOG")"
 
 # Bash cannot reproduce ash/dash's nested-signal corruption; this pins only the
-# classification when the child is already gone. scripts/smoke.sh owns the
+# classification when the child is already gone. tests/image-test.sh owns the
 # real-container contract for a live child PID 1 may not signal.
 load_function on_term
 sleep 0.1 &
@@ -282,12 +282,11 @@ grep -Fq 'radvd stub: --configtest' "$ARGV_HUP" \
 # --- 6. a SIGHUP whose config check fails is REFUSED, and radvd keeps serving -----
 # The reload stops radvd before its replacement reads the config, so accepting a
 # bad edit costs the segment its RA emitter for nothing. Two arms, none
-# redundant: the refusal (no flag, no signal, child untouched), and the
-# absent-config arm an ordinary editing accident takes (an editor's write-rename
-# window, a mount hiccup) where there is no file for radvd to reject. Case 4 is
-# the control that keeps both honest against request_reload refusing every HUP;
-# recovery after a refusal — the operator fixes the config and reloads again — is
-# pinned against a real container by scripts/smoke.sh's malformed-reload scenario.
+# redundant: the refusal (no flag, no signal, child untouched), and the absent
+# config an editing accident leaves (a write-rename window, a mount hiccup).
+# Case 4 is the control against request_reload refusing every HUP; recovery
+# after a refusal is pinned on a real container by tests/image-test.sh's
+# malformed-reload scenario.
 printf 'interface eth0 { AdvSendAdvert on; };\n' >"$CONF"
 stub_radvd 1
 sleep 20 &
@@ -407,7 +406,7 @@ registered=$(bash -c '
 # on this comment line: `if [ "$shutdown" -eq 1 ]; then` also matches request_reload's
 # guard, and a sed range restarts, so that spelling emits both blocks and the subject
 # never runs. Both arms exit 0, so an inverted branch changes only which line is
-# logged; scripts/smoke.sh scenario 10 is the container-level witness (hardened
+# logged; tests/image-test.sh scenario 10 is the container-level witness (hardened
 # profile minus KILL), and these cases pin the arm without a container.
 ARM=$(extract_range '^    # Exit 0 either way' '^    exit 0$' "$WORK/shutdown_arm.sh") || exit 1
 WARN='msg="the TERM could not be delivered to radvd; a graceful stop cannot be confirmed"'

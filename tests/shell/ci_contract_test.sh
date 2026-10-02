@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The required Smoke check must run scripts/smoke.sh against its built image, and the Dockerfile must preserve its test-stage and package-refresh edges.
+# The signal suite must sit at CI's image-test slot (tracked executable, with a shebang, outside every image), and the Dockerfile must preserve its test-stage and package-refresh edges.
 # SC2015: lib.sh verdict helpers return 0. SC2016: the literal ${...} and backticked
 # strings ARE the assertion subjects -- they are patterns read out of the tree, not
 # expressions to expand.
@@ -10,33 +10,152 @@ set -u
 . "$(dirname -- "$0")/lib.sh"
 new_workdir >/dev/null
 
-WORKFLOW_DIR="$REPO_ROOT/.github/workflows"
-WORKFLOW="$WORKFLOW_DIR/smoke.yml"
+SUITE="$REPO_ROOT/tests/image-test.sh"
 DOCKERFILE="$REPO_ROOT/Dockerfile"
 
-if [ ! -d "$WORKFLOW_DIR" ]; then
-  skip "the Smoke workflow still runs scripts/smoke.sh against the image it builds" ".github/workflows is absent (the image build does not copy it)"
+if [ ! -f "$SUITE" ] && [ ! -f "$DOCKERFILE" ]; then
+  skip "the signal suite sits at CI's image-test slot, outside every image" "tests/image-test.sh and the Dockerfile are absent (the image build does not copy them)"
   report
   exit
 fi
 
-if [ ! -f "$WORKFLOW" ]; then
-  no "smoke workflow present" "$WORKFLOW is missing: the required Smoke check cannot run scripts/smoke.sh"
+if [ ! -f "$SUITE" ]; then
+  no "signal suite present" "$SUITE is missing: CI's Image test suite step would skip and the signal contract would go unexercised"
   report
   exit
 fi
 
-# Reject empty tags before comparing the build and smoke steps.
-build_tag=$(sed -n 's/.*docker build .*-t[[:space:]]\{1,\}\([^[:space:]]\{1,\}\).*/\1/p' "$WORKFLOW" | head -n 1)
-smoke_tag=$(sed -n 's|.*scripts/smoke\.sh[[:space:]]\{1,\}\([^[:space:]]\{1,\}\).*|\1|p' "$WORKFLOW" | head -n 1)
+# CI executes the suite directly, so the committed mode decides; outside a git
+# checkout the file's own mode is the closest evidence.
+fix="commit it executable: git update-index --chmod=+x tests/image-test.sh"
+if [ "$(git -C "$REPO_ROOT" rev-parse --show-toplevel 2>/dev/null)" = "$REPO_ROOT" ]; then
+  suite_mode=$(git -C "$REPO_ROOT" ls-files -s -- tests/image-test.sh | cut -d' ' -f1)
+  [ "$suite_mode" = "100755" ] \
+    && ok "tests/image-test.sh is tracked 100755" \
+    || no "signal suite tracked executable" "git records mode '$suite_mode'; CI's Image test suite step fails on a non-executable suite; $fix"
+else
+  [ -x "$SUITE" ] \
+    && ok "tests/image-test.sh is executable" \
+    || no "signal suite executable" "$SUITE is not executable; $fix"
+fi
 
-[ -n "$smoke_tag" ] \
-  && ok "the Smoke workflow still has a step running scripts/smoke.sh against an image" \
-  || no "smoke step present" "no step in $WORKFLOW invokes scripts/smoke.sh; the required check would stay green with the signal contract unexercised"
+[ "$(head -c 2 "$SUITE")" = '#!' ] \
+  && ok "tests/image-test.sh names its interpreter in a shebang" \
+  || no "signal suite shebang" "line 1 of $SUITE is not a shebang; CI executes it directly"
 
-[ -n "$build_tag" ] && [ -n "$smoke_tag" ] && [ "$build_tag" = "$smoke_tag" ] \
-  && ok "the Smoke workflow runs scripts/smoke.sh against the tag its build step creates ($build_tag)" \
-  || no "smoke tag agreement" "build step tags '$build_tag', smoke step runs against '$smoke_tag'"
+# One Dockerfile instruction per line: comment lines dropped, backslash
+# continuations joined, heredoc bodies skipped.
+dockerfile_instructions() {
+  local line trimmed joined="" rest word
+  local heredoc_re='<<-?["'\'']?([A-Za-z_][A-Za-z0-9_]*)["'\'']?(.*)$'
+  local -a ends=()
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%$'\r'}
+    if [ "${#ends[@]}" -gt 0 ]; then
+      trimmed=${line#"${line%%[![:space:]]*}"}
+      [ "$trimmed" = "${ends[0]}" ] && ends=("${ends[@]:1}")
+      continue
+    fi
+    trimmed=${line#"${line%%[![:space:]]*}"}
+    case "$trimmed" in '#'* | '') continue ;; esac
+    trimmed=${line%"${line##*[![:space:]]}"}
+    if [ "${trimmed%\\}" != "$trimmed" ]; then
+      joined+="${trimmed%\\} "
+      continue
+    fi
+    printf '%s\n' "$joined$line"
+    rest="$joined$line"
+    joined=""
+    while [[ $rest =~ $heredoc_re ]]; do
+      word=${BASH_REMATCH[1]}
+      rest=${BASH_REMATCH[2]}
+      ends+=("$word")
+    done
+  done <"$1"
+  [ -z "$joined" ] || printf '%s\n' "$joined"
+}
+
+# Every context source of one COPY/ADD, one per line, still escaped; nothing for
+# COPY --from. A malformed JSON form falls back to whitespace splitting, as
+# BuildKit does.
+copy_sources() {
+  local rest=$1 json word
+  local array_re='^\[(.*)\][[:space:]]*$'
+  local element_re='^[[:space:]]*"(([^"\]|\\.)*)"[[:space:]]*(,(.*))?$'
+  local -a args=()
+  read -r word rest <<<"$rest"
+  while [[ $rest == --* ]]; do
+    read -r word rest <<<"$rest"
+    [[ $word == --from=* ]] && return 0
+  done
+  json=$rest
+  if [[ $json =~ $array_re ]]; then
+    json=${BASH_REMATCH[1]}
+    while [[ $json =~ $element_re ]]; do
+      args+=("${BASH_REMATCH[1]}")
+      json=${BASH_REMATCH[4]}
+      [ -n "${BASH_REMATCH[3]}" ] || {
+        json=""
+        break
+      }
+    done
+    [[ $json =~ ^[[:space:]]*$ ]] || args=()
+  fi
+  [ "${#args[@]}" -gt 0 ] || read -r -a args <<<"$rest"
+  [ "${#args[@]}" -ge 2 ] || return 0
+  printf '%s\n' "${args[@]:0:${#args[@]}-1}"
+}
+
+# Can this source, after path cleaning and glob matching per path component,
+# name the suite, tests/ or the whole context? A variable, a quote or an escape
+# is not resolved here, so each counts as a match.
+source_reaches_suite() {
+  local src=$1 part i
+  local -a raw=() parts=() target=(tests image-test.sh)
+  case "$src" in '<<'* | *://* | git@*) return 1 ;; *[\$\"\'\\]*) return 0 ;; esac
+  IFS=/ read -r -a raw <<<"$src"
+  for part in "${raw[@]}"; do
+    case "$part" in
+      '' | .) ;;
+      ..) [ "${#parts[@]}" -eq 0 ] || unset 'parts[-1]' ;;
+      *) parts+=("$part") ;;
+    esac
+  done
+  [ "${#parts[@]}" -le "${#target[@]}" ] || return 1
+  for i in "${!parts[@]}"; do
+    # shellcheck disable=SC2053
+    [[ ${target[i]} == ${parts[i]} ]] || return 1
+  done
+  return 0
+}
+
+# The parse models the default `\` escape; a parser directive can change it.
+escape_char="\\"
+while IFS= read -r line; do
+  [[ ${line%$'\r'} =~ ^#[[:space:]]*([A-Za-z][A-Za-z0-9]*)[[:space:]]*=[[:space:]]*(.*[^[:space:]])[[:space:]]*$ ]] || break
+  [ "${BASH_REMATCH[1],,}" = escape ] && escape_char=${BASH_REMATCH[2]}
+done <"$DOCKERFILE"
+[ "$escape_char" = "\\" ] \
+  && ok "the Dockerfile keeps the default escape character the parse models" \
+  || no "Dockerfile escape directive" "escape=$escape_char; the COPY/ADD parse below models only the default backslash"
+
+image_copies=""
+context_sources=0
+while IFS= read -r instruction; do
+  read -r word _ <<<"$instruction"
+  case "${word^^}" in COPY | ADD) ;; *) continue ;; esac
+  while IFS= read -r src; do
+    context_sources=$((context_sources + 1))
+    source_reaches_suite "$src" && image_copies+="${image_copies:+, }$src"
+  done < <(copy_sources "$instruction")
+done < <(dockerfile_instructions "$DOCKERFILE")
+# Zero parsed sources would make the verdict below vacuous.
+[ "$context_sources" -gt 0 ] \
+  && ok "the Dockerfile parse found its context COPY/ADD sources ($context_sources)" \
+  || no "Dockerfile parse" "no context COPY or ADD source parsed out of $DOCKERFILE"
+[ -z "$image_copies" ] \
+  && ok "no Dockerfile COPY or ADD pulls tests/image-test.sh into a stage" \
+  || no "signal suite outside every image" "Dockerfile copies '$image_copies' from the context, which carries tests/image-test.sh"
 
 last_stage=$(awk '
   toupper($1) == "FROM" {
@@ -110,7 +229,7 @@ printf '%s\n' "$reload_section" | grep -Fq 'prefer `docker restart` where it mat
   || no "restart-policy caveat" "a published caveat phrase is missing from the Reloading section"
 
 # compose.yaml is not copied into the image test stage, so this assertion states its
-# own input instead of resting on the workflow guard at :15-19 exiting first. The two
+# own input instead of resting on the guard at the top of this file. The two
 # phrase checks above need no guard: README.md IS copied.
 if [ ! -f "$COMPOSE" ]; then
   skip "the published reload procedure leads with the command that preserves restart-policy recovery" "compose.yaml is absent (the image build does not copy it)"
