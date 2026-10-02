@@ -93,7 +93,7 @@ request_reload() {
     else
       printf 'level=error msg="SIGHUP reload refused: radvd rejected the mounted config" path="%s"\n' "$CONF" >&2
       # radvd's own text, verbatim and unstructured on purpose: README's
-      # RadvdConfigError rule matches these bytes and scripts/smoke.sh asserts it.
+      # RadvdConfigError rule matches these bytes and tests/image-test.sh asserts it.
       printf '%s\n' "$hup_ct" >&2
     fi
     return
