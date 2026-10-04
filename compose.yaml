@@ -1,4 +1,4 @@
-# Example compose for docker-radvd. See docs/configuration.md and docs/security.md for all configuration options and hardening.
+# Example compose for docker-radvd. See docs/configuration.md and docs/hardening.md for all configuration options and hardening.
 services:
   radvd:
     image: ghcr.io/cplieger/docker-radvd:latest

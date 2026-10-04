@@ -38,7 +38,7 @@ Without `NET_RAW`, radvd exits at startup with `open_icmpv6_socket: Operation no
 
 `NET_ADMIN` is not needed for sending advertisements, and it does nothing in a default container. Docker mounts `/proc/sys` read-only in every unprivileged container. So the writes radvd makes to `/proc/sys/net/ipv6/{conf,neigh}/*` for the kernel-applied directives `AdvLinkMTU`, `AdvCurHopLimit`, `AdvReachableTime` and `AdvRetransTimer` fail whether the capability is granted or not. It matters only if you make `/proc/sys` writable yourself. `read_only: true` is a different setting, which governs the container's own root filesystem.
 
-Under `cap_drop: ALL`, three more capabilities are required. [Security](security.md#hardened-profile) lists them.
+Under `cap_drop: ALL`, three more capabilities are required. [Security](hardening.md#hardened-profile) lists them.
 
 ## Networking
 
