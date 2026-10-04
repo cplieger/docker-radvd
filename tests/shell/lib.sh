@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# Shared harness for a repo's shell unit tests — CANONICAL COPY in cplieger/ci
-# (configs/shell/lib.sh), synced to each adopting repo's tests/shell/lib.sh
-# by scripts/classify-repos.py (a repo enrolls by committing a tests/shell/run.sh,
-# which is also what the shell-ci hook looks for). DO NOT edit the synced copy in
-# an app repo — change it here and let the sync land it.
+# Synced from cplieger/ci/configs/shell/lib.sh. Change it there.
+# Shared harness for a repo's shell unit tests. A repo enrolls by committing a
+# tests/shell/run.sh, which is also what the shell-ci hook looks for.
 #
 # WHY THESE SUITES EXIST, generically: an image smoke test proves the assembled
 # image boots, so it can only ever walk the paths a HEALTHY container takes. The
