@@ -23,10 +23,10 @@ if bad_out=$(radvd --configtest --config="$d/radvd.bad.conf" 2>&1); then
   fail=1
 fi
 
-# Verify the README alert regex against radvd's actual rejection text.
-RULE_SRC="$d/../README.md"
+# Verify the alerts/logql.yaml alert regex against radvd's actual rejection text.
+RULE_SRC="$d/../alerts/logql.yaml"
 if [ -r "$RULE_SRC" ] || [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
-  # The sed script matches the README's literal `|~ `pattern` [10m]` line, backticks
+  # The sed script matches the rule file's literal `|~ `pattern` [10m]` line, backticks
   # included, so the single quotes are required: nothing here may expand.
   # shellcheck disable=SC2016
   rule=$(sed -n '/alert: RadvdConfigError/,/^        for:/p' "$RULE_SRC" \
@@ -35,7 +35,7 @@ if [ -r "$RULE_SRC" ] || [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
     err "FAIL: could not extract the RadvdConfigError pattern from $RULE_SRC"
     fail=1
   elif ! printf '%s\n' "$bad_out" | grep -Eq "$rule"; then
-    err "FAIL: radvd's config-rejection output does not match the README's RadvdConfigError pattern"
+    err "FAIL: radvd's config-rejection output does not match the RadvdConfigError pattern in alerts/logql.yaml"
     err "$bad_out"
     fail=1
   fi
@@ -90,8 +90,8 @@ if [ -e "$SBOM" ] || [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
   fi
 fi
 
-# 5. Both sbin binaries ship: the README's HA and Healthcheck sections tell the
-#    operator to run radvdump. Forced in-image the way sections 3 and 4 are.
+# 5. Both sbin binaries ship: docs/high-availability.md and docs/monitoring.md
+#    tell the operator to run radvdump. Forced in-image the way sections 3 and 4 are.
 if [ -e /usr/sbin/radvdump ] || [ -n "${RADVD_EXPECTED_VERSION:-}" ]; then
   [ -x /usr/sbin/radvdump ] || {
     err "FAIL: radvdump is not executable at /usr/sbin/radvdump"

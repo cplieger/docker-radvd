@@ -1,0 +1,123 @@
+# Recommended LogQL alert rules for docker-radvd, for Loki's ruler.
+# Ship the container's logs to Loki and load this file into Loki's ruler.
+# Grafana Alloy's Docker log discovery ships them with no extra configuration.
+# Firing alerts go through your Alertmanager like any Prometheus alert.
+# Thresholds and severity labels are starting points. Change the container
+# selector to the label your log collector sets, and adjust or drop
+# `sum by (hostname)` to match your own labels.
+# Every pattern is a string the pinned radvd release or the entrypoint emits.
+# The parameter-bound fragments are radvd's own wording.
+# A later radvd release may reword these fragments and silently narrow a rule.
+# That causes a missed alert, never a false alert.
+groups:
+  - name: radvd
+    rules:
+      - alert: RadvdConfigError
+        expr: |
+          sum by (hostname) (count_over_time(
+            {container="radvd"}
+            |~ `SIGHUP reload refused|exiting, failed to read config file|exiting, permissions on conf_file invalid|not found:|does not exist or is not set up properly \(setup_iface=|unable to drop root privileges|received icmpv6 RA packet with non-linklocal source address|invalid RADVD_DEBUG_LEVEL|radvd.conf is not a regular file|must be at least|must be between|must be zero or between|must not be greater than|must be set with|must be greater than or equal to AdvPreferredLifetime|invalid prefix length|invalid route prefix length` [10m]
+          )) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "radvd rejected its config, or a peer is advertising from an invalid source address"
+          description: >
+            radvd logged a config parse or activation failure. Check your
+            radvd.conf. When the fault is present at startup, radvd exits, the
+            entrypoint propagates the exit and router advertisements stop until
+            the config is fixed. A `docker restart` starts again from the same
+            file, so the container restarts in a loop. When a later edit arrives
+            through a SIGHUP reload, the entrypoint checks the file first and
+            refuses the reload, so the running radvd keeps its last good config
+            and keeps advertising. Each refusal logs `SIGHUP reload refused`.
+            For all but one cause that is a rejected edit to fix, not an outage.
+            The remaining cause is a TERM to radvd whose delivery the entrypoint
+            could not confirm, usually a container without the KILL capability.
+            The pattern also matches the entrypoint's own fatal startup errors,
+            an invalid RADVD_DEBUG_LEVEL and a radvd.conf that is not a regular
+            file, which stop the container before radvd starts. It matches
+            `unable to drop root privileges`, which means the container lacks
+            the SETUID and SETGID capabilities rather than a config fault. It
+            also matches a peer on this segment that sends an advertisement from
+            a non-link-local address. Every host discards those, and radvd names
+            the sender and keeps running, so fix the sending node's
+            AdvRASrcAddress. Two groups pass the reload check because radvd
+            tests them only after parsing: the interface's presence, and the
+            parameter bounds such as the interval bounds, AdvDefaultLifetime and
+            MTU. With IgnoreIfMissing off the container restarts in a loop. With
+            it on, radvd's default, radvd stays running and healthy while this
+            alert is the only sign that the segment has no advertisement sender.
+            The `not found:` alternative names that case.
+      - alert: RadvdAdvertisementsUnverified
+        expr: |
+          sum by (hostname) (count_over_time(
+            {container="radvd"}
+            |~ `radvd.conf could not be read` [10m]
+          )) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "the entrypoint could not read the mounted radvd.conf, so advertisement output is unverified"
+          description: >
+            The entrypoint could not read the mounted config within its 5s bound,
+            or the read failed outright. radvd then either runs, with
+            `pidof radvd` reporting healthy while its own open of the same file
+            has no bound, or exits on the same file. In the second case
+            RadvdConfigError fires beside this warning and the container
+            restarts in a loop. Nothing confirms that advertisements are sent,
+            so check what reaches the LAN with `rdisc6`.
+      - alert: RadvdForwardingDisabled
+        expr: |
+          sum by (hostname) (count_over_time(
+            {container="radvd"}
+            |~ `seems to be disabled` [10m]
+          )) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "radvd is advertising a default route the host does not forward"
+          description: >
+            radvd read /proc/sys/net/ipv6/conf/all/forwarding and found a value
+            that is neither 1 nor 2, or read a per-interface forwarding value
+            below 1. It keeps advertising this node with its configured
+            AdvDefaultLifetime, so LAN hosts can install a default route through
+            a kernel that will not forward their traffic while `pidof radvd`
+            reports healthy. Fix the sysctl on the host. Under host networking,
+            compose cannot set it. radvd logs the global warning once per
+            process, so this alert clears after the window even if the state
+            persists. It logs the per-interface warning each time it sets an
+            interface up, at startup, on reload and on a netlink change event.
+            So neither line guarantees a firing alert. A node that sets
+            AdvDefaultLifetime 0 to advertise prefixes only matches this rule
+            legitimately. Confirm with `rdisc6` and the host sysctl rather than
+            from the alert alone.
+      - alert: RadvdSupervisorFault
+        expr: |
+          sum by (hostname) (count_over_time(
+            {container="radvd"}
+            |~ `failed to deliver TERM to radvd|the TERM could not be delivered to radvd|radvd exited; propagating exit for restart policy` [10m]
+          )) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "the radvd supervisor could not stop radvd, or radvd exited"
+          description: >
+            The entrypoint reported a fault of its own rather than a config
+            fault, for one of two causes. A refused TERM means the container
+            lacks the KILL capability, so `docker stop` leaves radvd running
+            while the entrypoint exits 0. The final zero-lifetime advertisement
+            is never sent, and LAN hosts keep this node as their default router
+            until the advertised lifetime expires. Grant KILL. The container's
+            own exit status is 0, so no restart policy reports this. An exit
+            propagation means radvd is gone and advertisements have stopped.
+            The `status` field carries radvd's own exit status, and your restart
+            policy decides whether the container returns, so a repeating record
+            is a restart loop. For a config fault, radvd's own line matches
+            RadvdConfigError too, and that is the one to read first. This rule
+            covers an exit whose cause radvd words differently, such as an
+            out-of-memory kill reported as `status="137"`.

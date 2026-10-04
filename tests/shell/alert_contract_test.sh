@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The alert contract lives outside ci_contract_test.sh because that file skips when
 # the image build stage has no .github directory.
-# SC2016: the backticked README pattern is the literal extraction subject.
+# SC2016: the backticked rule pattern is the literal extraction subject.
 # shellcheck disable=SC2016
 set -u
 
@@ -10,8 +10,8 @@ set -u
 new_workdir >/dev/null
 
 # Derive the set because alert rules can be added or removed without updating this test.
-patterns=$(sed -n 's/^[[:space:]]*|~ `\(.*\)` \[[0-9]\+[a-z]\]$/\1/p' "$REPO_ROOT/README.md")
-published_count=$(grep -c '^      - alert:' "$REPO_ROOT/README.md" || true)
+patterns=$(sed -n 's/^[[:space:]]*|~ `\(.*\)` \[[0-9]\+[a-z]\]$/\1/p' "$REPO_ROOT/alerts/logql.yaml")
+published_count=$(grep -c '^      - alert:' "$REPO_ROOT/alerts/logql.yaml" || true)
 pattern_count=$(printf '%s\n' "$patterns" | grep -c . || true)
 union=$(printf '%s\n' "$patterns" | tr '\n' '|')
 union=${union%|}
@@ -96,7 +96,7 @@ EOF
 if [ "$rule_set_valid" -eq 1 ]; then
   selection_failures=$(while IFS= read -r anchor; do
     if ! printf '%s\n' "$anchor" | grep -Eq -- "$union"; then
-      printf 'README patterns do not select anchor: %s\n' "$anchor"
+      printf 'alerts/logql.yaml patterns do not select anchor: %s\n' "$anchor"
     fi
   done <<<"$anchors")
 

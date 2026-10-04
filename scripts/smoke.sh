@@ -72,7 +72,7 @@ mkdir "$TMPDIR_NONFILE/radvd.conf"
 
 # Create + inject config + start; wait until radvd runs inside. Any argument after
 # the name is passed to `docker create` verbatim, which is how scenario 9 boots the
-# same container under the README's hardened profile; NET_RAW comes from the caller
+# same container under the docs/security.md hardened profile; NET_RAW comes from the caller
 # so a drop of it from that profile fails an assertion. A caller that mounts the
 # fixture itself (`:/etc/radvd:`, the only delivery a `--read-only` rootfs accepts)
 # is not also sent a `docker cp` copy.
@@ -250,11 +250,11 @@ ec=$(docker inspect -f '{{.State.ExitCode}}' "$C1")
 wait_for_log "$C1" 'radvd stopped on shutdown signal' "missing graceful shutdown log after the child was reaped"
 printf '[smoke] PASS  shutdown reap: a second trapped signal did not let PID 1 outlive its child\n'
 
-# Match the README alert rule against actual refusal output.
+# Match the alerts/logql.yaml rule against actual refusal output.
 # shellcheck disable=SC2016 # Literal backticks in the extraction pattern.
-ALERT_RULE=$(sed -n '/alert: RadvdConfigError/,/^        for:/p' README.md \
+ALERT_RULE=$(sed -n '/alert: RadvdConfigError/,/^        for:/p' alerts/logql.yaml \
   | sed -n 's/^[[:space:]]*|~ `\(.*\)` \[[0-9]\+[a-z]\]$/\1/p')
-[ -n "$ALERT_RULE" ] || fail "could not extract the RadvdConfigError pattern from README.md"
+[ -n "$ALERT_RULE" ] || fail "could not extract the RadvdConfigError pattern from alerts/logql.yaml"
 
 # --- a malformed replacement config on HUP is refused, and radvd keeps serving --
 # The reload stops radvd before its replacement reads the config, so accepting a
@@ -287,7 +287,7 @@ radvd_refusal=$(docker logs "$C1" 2>&1 | grep -F 'exiting, failed to read config
 [ -n "$radvd_refusal" ] \
   || fail "the refused reload did not carry radvd's own rejection text into the log"
 grep -Eq -- "$ALERT_RULE" <<<"$radvd_refusal" \
-  || fail "radvd's own rejection line does not match the README's RadvdConfigError pattern"
+  || fail "radvd's own rejection line does not match the RadvdConfigError pattern in alerts/logql.yaml"
 # Absence assertion: single-shot on purpose, and safe here only because the
 # wait_for_log above already proved this container's log is flushed.
 [ "$(docker logs "$C1" 2>&1 | grep -c 'msg="reloading radvd (config re-read via restart)"' || true)" -eq "$reload_before" ] \
@@ -410,7 +410,7 @@ ec=$(docker inspect -f '{{.State.ExitCode}}' "$C4")
 [ "$ec" = "1" ] || fail "non-regular radvd.conf exit code $ec, want 1"
 wait_for_log "$C4" 'msg="radvd.conf is not a regular file' "missing non-regular-config fatal line"
 log_has_re "$C4" "$ALERT_RULE" \
-  || fail "the non-regular-config fatal does not match the README's RadvdConfigError pattern"
+  || fail "the non-regular-config fatal does not match the RadvdConfigError pattern in alerts/logql.yaml"
 # Absence assertion: single-shot on purpose, and safe here only because the
 # wait_for_log above already proved this container's log is flushed.
 log_has "$C4" 'msg="starting radvd"' && fail "radvd was started despite a non-regular radvd.conf"
@@ -420,7 +420,7 @@ printf '[smoke] PASS  refusal: a non-regular radvd.conf fails closed (exit 1, al
 # The daemon's own read of the config, not configtest mode: tests/smoke.sh proves
 # `radvd -c` rejects this fixture, and the HUP scenarios above route the same file
 # through that check, but a `docker restart` onto a bad edit takes neither and the
-# README's RadvdConfigError rule names radvd's own startup line as its evidence.
+# RadvdConfigError rule in alerts/logql.yaml names radvd's own startup line as its evidence.
 (
   C15="radvd-smoke-bad-config-$$"
   bad_dir=$(mktemp -d)
@@ -452,7 +452,7 @@ printf '[smoke] PASS  refusal: a non-regular radvd.conf fails closed (exit 1, al
   wait_for_log "$C15" 'msg="radvd exited; propagating exit for restart policy" status="1"' \
     "the supervisor did not report the malformed-config exit with radvd's status"
   log_has_re "$C15" "$ALERT_RULE" \
-    || fail "the startup config rejection does not match the README's RadvdConfigError pattern"
+    || fail "the startup config rejection does not match the RadvdConfigError pattern in alerts/logql.yaml"
   # Absence assertions: single-shot on purpose, and safe here only because the
   # wait_for_log calls above already proved this container's log is flushed.
   log_has "$C15" 'SIGHUP reload refused' \
@@ -463,7 +463,7 @@ printf '[smoke] PASS  refusal: a non-regular radvd.conf fails closed (exit 1, al
 )
 
 # --- 8. read_only without a /run tmpfs fails closed ---------------------------
-# The README's hardened profile states this exact failure for an operator who
+# The docs/security.md hardened profile states this exact failure for an operator who
 # takes read_only: true without the tmpfs. Asserted here rather than only as a
 # grep of the shipped script, because the source check cannot show the path is
 # reachable or that the status is 255. The fixture is required: radvd opens its
@@ -481,14 +481,14 @@ wait_for_log "$C5" 'propagating exit for restart policy" status="255"' \
   "the supervisor did not propagate radvd's pid-file exit status"
 printf '[smoke] PASS  hardening: read_only without a /run tmpfs fails closed (exit 255)\n'
 
-# --- 9. the README's hardened profile boots AND keeps the signal contract ------
-# The README publishes this exact set, so it is read from one place here and any
+# --- 9. the docs/security.md hardened profile boots AND keeps the signal contract
+# docs/security.md publishes this exact set, so it is read from one place here and any
 # capability dropped from it must fail an assertion below; start_container grants
 # no capability of its own, so this array is the container's whole set, and
-# keeping the list verbatim is what makes it checkable against the README.
+# keeping the list verbatim is what makes it checkable against docs/security.md.
 HARDENED_FLAGS=(--cap-drop ALL --cap-add NET_RAW --cap-add SETUID --cap-add SETGID
   --cap-add KILL --read-only --tmpfs /run:size=1m --security-opt no-new-privileges)
-printf '[smoke] starting %s (README hardened profile: cap_drop ALL + the four documented caps)\n' "$C6"
+printf '[smoke] starting %s (docs/security.md hardened profile: cap_drop ALL + the four documented caps)\n' "$C6"
 # The fixture arrives as a `:ro` bind mount, not a `docker cp`: the daemon
 # refuses an extract into a read-only rootfs.
 start_container "$C6" "${HARDENED_FLAGS[@]}" -v "$TMPDIR_FIXTURE:/etc/radvd:ro"
