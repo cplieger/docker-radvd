@@ -72,7 +72,7 @@ mkdir "$TMPDIR_NONFILE/radvd.conf"
 
 # Create + inject config + start; wait until radvd runs inside. Any argument after
 # the name is passed to `docker create` verbatim, which is how scenario 9 boots the
-# same container under the docs/security.md hardened profile; NET_RAW comes from the caller
+# same container under the docs/hardening.md hardened profile; NET_RAW comes from the caller
 # so a drop of it from that profile fails an assertion. A caller that mounts the
 # fixture itself (`:/etc/radvd:`, the only delivery a `--read-only` rootfs accepts)
 # is not also sent a `docker cp` copy.
@@ -463,7 +463,7 @@ printf '[smoke] PASS  refusal: a non-regular radvd.conf fails closed (exit 1, al
 )
 
 # --- 8. read_only without a /run tmpfs fails closed ---------------------------
-# The docs/security.md hardened profile states this exact failure for an operator who
+# The docs/hardening.md hardened profile states this exact failure for an operator who
 # takes read_only: true without the tmpfs. Asserted here rather than only as a
 # grep of the shipped script, because the source check cannot show the path is
 # reachable or that the status is 255. The fixture is required: radvd opens its
@@ -481,14 +481,14 @@ wait_for_log "$C5" 'propagating exit for restart policy" status="255"' \
   "the supervisor did not propagate radvd's pid-file exit status"
 printf '[smoke] PASS  hardening: read_only without a /run tmpfs fails closed (exit 255)\n'
 
-# --- 9. the docs/security.md hardened profile boots AND keeps the signal contract
-# docs/security.md publishes this exact set, so it is read from one place here and any
+# --- 9. the docs/hardening.md hardened profile boots AND keeps the signal contract
+# docs/hardening.md publishes this exact set, so it is read from one place here and any
 # capability dropped from it must fail an assertion below; start_container grants
 # no capability of its own, so this array is the container's whole set, and
-# keeping the list verbatim is what makes it checkable against docs/security.md.
+# keeping the list verbatim is what makes it checkable against docs/hardening.md.
 HARDENED_FLAGS=(--cap-drop ALL --cap-add NET_RAW --cap-add SETUID --cap-add SETGID
   --cap-add KILL --read-only --tmpfs /run:size=1m --security-opt no-new-privileges)
-printf '[smoke] starting %s (docs/security.md hardened profile: cap_drop ALL + the four documented caps)\n' "$C6"
+printf '[smoke] starting %s (docs/hardening.md hardened profile: cap_drop ALL + the four documented caps)\n' "$C6"
 # The fixture arrives as a `:ro` bind mount, not a `docker cp`: the daemon
 # refuses an extract into a read-only rootfs.
 start_container "$C6" "${HARDENED_FLAGS[@]}" -v "$TMPDIR_FIXTURE:/etc/radvd:ro"

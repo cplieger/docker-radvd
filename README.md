@@ -120,7 +120,7 @@ radvd reads every setting from `radvd.conf`. The one environment variable sets h
 
 ## Security
 
-radvd opens its raw ICMPv6 socket as root, then runs its worker as the unprivileged `radvd` user, leaving a small root helper beside it. The config mount is read-only. The container needs host networking, so it reaches every interface on the host. It listens on no port. [Security](docs/security.md) covers a read-only hardened profile, how to verify the image signature, what the image contains and how it is kept up to date.
+radvd opens its raw ICMPv6 socket as root, then runs its worker as the unprivileged `radvd` user, leaving a small root helper beside it. The config mount is read-only. The container needs host networking, so it reaches every interface on the host. It listens on no port. [Security](docs/hardening.md) covers a read-only hardened profile, how to verify the image signature, what the image contains and how it is kept up to date.
 
 ## Troubleshooting
 
@@ -143,7 +143,7 @@ radvd and the entrypoint log to `docker logs`, and radvd has no metrics endpoint
 - [High availability](docs/high-availability.md) covers the keepalived pairing and how to check it.
 - [How docker-radvd works](docs/how-it-works.md) covers the entrypoint, reloads and the design.
 - [Monitoring and alerts](docs/monitoring.md) lists the alert rules and how to check the wire.
-- [Security](docs/security.md) covers the privilege model, the hardened profile, signatures and what the image contains.
+- [Security](docs/hardening.md) covers the privilege model, the hardened profile, signatures and what the image contains.
 
 ## Credits
 
