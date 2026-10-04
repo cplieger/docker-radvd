@@ -79,8 +79,10 @@ COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 FROM base AS test
 ARG RADVD_VERSION
 COPY tests/smoke.sh tests/radvd.conf tests/radvd.bad.conf /tmp/tests/
-# tests/smoke.sh matches radvd's malformed-config rejection against the README's
-# own alert-rule pattern, so that fatal path keeps matching the published rule.
+# tests/smoke.sh matches radvd's malformed-config rejection against the
+# RadvdConfigError pattern in alerts/logql.yaml, so that fatal path keeps matching
+# the published rule. startup_latch_test.sh and ci_contract_test.sh read README.md.
+COPY alerts/logql.yaml /tmp/alerts/logql.yaml
 COPY README.md /tmp/README.md
 COPY tests/shell /tmp/tests/shell
 # lib.sh puts REPO_ROOT at /tmp in the image and startup_latch_test.sh reads
