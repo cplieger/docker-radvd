@@ -14,12 +14,12 @@ A small POSIX shell entrypoint starts and supervises radvd.
 
 - It checks the mounted `radvd.conf` path. It refuses a path that is not a regular file, at startup and on reload, and warns when its bounded read of the file fails. It leaves the config's settings to radvd. A config radvd rejects outright, such as one with no interface block, is left to radvd too. radvd logs its own error and exits, and the entrypoint reports that exit.
 - It starts radvd with `--username=radvd`. radvd opens its raw socket as root, then runs its worker as the unprivileged `radvd` user. A small root privilege-separation helper stays beside it, so `ps` inside the container shows one radvd-owned process and one root-owned one.
-- It turns `SIGHUP` into a config reload and forwards `SIGTERM` and `SIGINT` for a graceful shutdown. A stop that arrives before radvd has started wins at once and exits 0 without starting it. An unexpected radvd exit is passed on to Docker's restart policy.
+- It turns `SIGHUP` into a config reload and forwards `SIGTERM`/`SIGINT` for a graceful shutdown. A stop that arrives before radvd has started wins at once and exits 0 without starting it. An unexpected radvd exit is passed on to Docker's restart policy.
 - It logs structured `key=value` lines to standard error, which `docker logs` captures. radvd's own lines pass through unchanged.
 
 ## Reloading
 
-On `SIGHUP`, the entrypoint restarts radvd so it reads the config again as root. radvd itself rereads its config as the unprivileged user on a reload. A config file only root can read would then make radvd's own reload fail and exit. Supervising and restarting the daemon, rather than replacing the entrypoint with radvd, makes the reload work whatever the file's ownership. [CONTRIBUTING](../CONTRIBUTING.md) has the rationale.
+On `SIGHUP`, the entrypoint restarts radvd so it reads the config again as root. radvd itself rereads its config as the unprivileged user on a reload. A config file only root can read would then make radvd's own reload fail and exit. Supervising and restarting the daemon, rather than replacing the entrypoint with radvd, makes the reload work whatever the file's ownership.
 
 Most bad edits are refused before anything stops, so the running radvd keeps serving its last good config. Five cases are refused, each logging `SIGHUP reload refused`:
 
