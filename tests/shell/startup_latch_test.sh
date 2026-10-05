@@ -375,7 +375,7 @@ reap "$radvd_pid"
 RADVD_DEBUG_LEVEL=0
 
 # --- 7. the trap maps BOTH published shutdown signals to on_term --------------------
-# CONTRIBUTING's "Design boundaries (please preserve)" promises SIGTERM/SIGINT and
+# docs/how-it-works.md's "The entrypoint" section promises SIGTERM/SIGINT and
 # nothing else reads either side, so deleting INT is invisible to the whole corpus.
 # All three reads happen at run time: the TERM registration is executed, the INT one
 # is read from the extracted trap line, and the promise is pulled out of the bullet
@@ -385,21 +385,21 @@ RADVD_DEBUG_LEVEL=0
 # while entrypoint.sh's trap line is unchanged. TERM is never ignored on entry,
 # so it stays an executed registration. The TRAPS extraction above is what makes
 # the signal list assertable as text — see its own comment.
-PROMISE=$(sed -n '/^- \*\*The entrypoint supervises radvd/,/^- \*\*/p' \
-  "$REPO_ROOT/CONTRIBUTING.md")
+PROMISE=$(sed -n '/^- It turns `SIGHUP`/,/^- /p' \
+  "$REPO_ROOT/docs/how-it-works.md")
 registered=$(bash -c '
   set -u
   . "$1"
   . "$2"
   trap -p TERM
 ' _ "$WORK/on_term.sh" "$TRAPS" 2>/dev/null)
-# The searched string is CONTRIBUTING's literal markdown, backticks included, so the
+# The searched string is the page's literal markdown, backticks included, so the
 # single quotes are required: expansion here would run `/` as a command substitution.
 # shellcheck disable=SC2016
 [ "$(grep -c 'on_term' <<<"$registered")" -eq 1 ] \
   && grep -q '^trap on_term TERM INT$' "$TRAPS" \
   && grep -q 'SIGTERM`/`SIGINT`' <<<"$PROMISE" \
-  && ok "both published shutdown signals are trapped to on_term, and CONTRIBUTING still promises both" \
+  && ok "both published shutdown signals are trapped to on_term, and docs/how-it-works.md still promises both" \
   || no "shutdown signal contract" "registered: $(tr '\n' ' ' <<<"$registered"), signal list: $(grep -c '^trap on_term TERM INT$' "$TRAPS"), promise found: $(grep -c 'SIGTERM`/`SIGINT`' <<<"$PROMISE")"
 
 # --- 8. the shutdown arm reports a refused TERM as unconfirmable ------------------

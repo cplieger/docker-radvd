@@ -86,9 +86,9 @@ COPY alerts/logql.yaml /tmp/alerts/logql.yaml
 COPY README.md /tmp/README.md
 COPY tests/shell /tmp/tests/shell
 # lib.sh puts REPO_ROOT at /tmp in the image and startup_latch_test.sh reads
-# $REPO_ROOT/CONTRIBUTING.md; without this COPY the suite exits 1 and no marker
+# $REPO_ROOT/docs/how-it-works.md; without this COPY the suite exits 1 and no marker
 # is written.
-COPY CONTRIBUTING.md /tmp/CONTRIBUTING.md
+COPY docs/how-it-works.md /tmp/docs/how-it-works.md
 # The suite's userland is the point: run.sh needs bash (installed here and discarded
 # with this stage) while awk, sed, grep and tr are the image's BusyBox applets — a
 # host-only run can be green while BusyBox fails.
