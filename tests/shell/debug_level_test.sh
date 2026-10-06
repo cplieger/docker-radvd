@@ -97,7 +97,7 @@ run_level '9\bogus'
 
 # The two classes a control-character pass cannot see, each arriving as a
 # multi-byte sequence rather than as a C0 byte: C1 (U+0085 NEL, two bytes) and
-# Bidi_Control (U+202E, three bytes). runesafe's README is the fleet's written
+# Bidi_Control (U+202E, three bytes). runesafe's README is the written
 # policy on what must not survive the trip to a log sink; this tier applies it with
 # a printable-ASCII range map, so each byte of the sequence becomes one space.
 run_level "$(printf '9\302\205bogus')"

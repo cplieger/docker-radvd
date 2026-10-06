@@ -45,7 +45,7 @@ services:
     # If this host is the default router, set net.ipv6.conf.all.forwarding=1 on the host first.
     network_mode: host
     cap_add:
-      - NET_RAW  # required: the raw ICMPv6 socket radvd sends advertisements on
+      - NET_RAW  # required for the raw ICMPv6 socket radvd sends advertisements on
 
     # Put your radvd.conf in ./radvd before the first start, or radvd exits.
     volumes:
