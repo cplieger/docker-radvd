@@ -25,7 +25,7 @@ Under `read_only: true`, `/run` must be a writable `tmpfs`, because radvd writes
       - no-new-privileges:true
 ```
 
-All four capabilities are already in Docker's default set, so this profile grants nothing the quick start example lacks. `cap_drop: ALL` is what makes listing them necessary. None of the four can be dropped further.
+[Hardening a compose file](https://github.com/cplieger/docs/blob/main/docs/hardening.md) explains each setting. All four capabilities are already in Docker's default set, so this profile grants nothing the quick start example lacks. `cap_drop: ALL` is what makes listing them necessary. None of the four can be dropped further.
 
 - `NET_RAW` opens the raw ICMPv6 socket radvd sends advertisements on. Without it radvd exits at startup with `open_icmpv6_socket: Operation not permitted`.
 - `SETUID` and `SETGID` let radvd drop to the non-root `radvd` user. Without them radvd logs `unable to drop root privileges` and exits 1, which the quick start's `restart: unless-stopped` turns into a restart loop.
@@ -33,13 +33,7 @@ All four capabilities are already in Docker's default set, so this profile grant
 
 ## Verifying the image
 
-The image is published with [cosign](https://github.com/sigstore/cosign) signatures and SBOM attestations. Verify a pull:
-
-```bash
-cosign verify ghcr.io/cplieger/docker-radvd:latest \
-    --certificate-identity-regexp '^https://github\.com/cplieger/ci/\.github/workflows/docker-release\.yaml@' \
-    --certificate-oidc-issuer https://token.actions.githubusercontent.com
-```
+The image is signed with cosign and carries a signed software bill of materials. [Checking a signature](https://github.com/cplieger/docs/blob/main/docs/images.md#checking-a-signature) and [Reading the software bill of materials](https://github.com/cplieger/docs/blob/main/docs/images.md#reading-the-software-bill-of-materials) show how to check both, with `docker-radvd` as the app name.
 
 CI lints the entrypoint with [shellcheck](https://www.shellcheck.net/) and the Dockerfile with [hadolint](https://github.com/hadolint/hadolint), scans for leaked secrets with [gitleaks](https://github.com/gitleaks/gitleaks), and scans the image with [trivy](https://trivy.dev/). Current scan results are in the repository's Security tab.
 
