@@ -455,8 +455,8 @@ grep -Fq 'a graceful stop cannot be confirmed' "$REPO_ROOT/README.md" \
 SKIP=$(extract_range '^  if ! { \[ "\$shutdown" -eq 1 \] && \[ "\$signal_failed" -eq 1 \]; }; then$' \
   '^  fi$' "$WORK/wait_skip.sh") || exit 1
 # Bounded, so a reverted skip fails this case instead of hanging the file; the child
-# outlives the bound on purpose. BusyBox `timeout` reports 143 where GNU reports 124
-# (shell.md), so the blocking arm asserts only "non-zero".
+# outlives the bound on purpose. BusyBox `timeout` reports 143 where GNU reports 124,
+# so the blocking arm asserts only "non-zero".
 # The inner script is the CHILD shell's, so its `$1`/`$2` must not expand here.
 # Note that shellcheck reads a `bash -c` string as a nested script only when
 # `bash` is the command word, and the bound in front of it is not optional —
