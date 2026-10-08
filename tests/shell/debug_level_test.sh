@@ -36,7 +36,7 @@ logged() {
 }
 
 # Match the specific alert rule so drift on either side fails.
-ALERT_RULE=$(sed -n '/alert: RadvdConfigError/,/^        for:/p' "$REPO_ROOT/README.md" \
+ALERT_RULE=$(sed -n '/alert: RadvdConfigError/,/^        for:/p' "$REPO_ROOT/alerts/logql.yaml" \
   | sed -n 's/^[[:space:]]*|~ `\(.*\)` \[[0-9]\+[a-z]\]$/\1/p')
 
 # --- 1. unset defaults to 0, the quiet level -------------------------------------
@@ -81,7 +81,7 @@ run_level '9"bogus'
   && ok "a quote in the value is neutralized to ? rather than closing the field" \
   || no "quote neutralized" "rc=$_rc, log: $(cat "$LOG")"
 [ -n "$ALERT_RULE" ] && grep -Eq "$ALERT_RULE" "$LOG" \
-  && ok "the invalid-level fatal line matches the README's RadvdConfigError alert pattern" \
+  && ok "the invalid-level fatal line matches the RadvdConfigError pattern in alerts/logql.yaml" \
   || no "alert contract (invalid level)" "rule='$ALERT_RULE', log: $(cat "$LOG")"
 
 run_level '9
@@ -97,7 +97,7 @@ run_level '9\bogus'
 
 # The two classes a control-character pass cannot see, each arriving as a
 # multi-byte sequence rather than as a C0 byte: C1 (U+0085 NEL, two bytes) and
-# Bidi_Control (U+202E, three bytes). runesafe's README is the fleet's written
+# Bidi_Control (U+202E, three bytes). runesafe's README is the written
 # policy on what must not survive the trip to a log sink; this tier applies it with
 # a printable-ASCII range map, so each byte of the sequence becomes one space.
 run_level "$(printf '9\302\205bogus')"

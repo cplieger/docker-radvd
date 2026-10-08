@@ -41,7 +41,7 @@ warn_count() {
 }
 
 # Match the specific alert rule so drift on either side fails.
-UNVERIFIED_RULE=$(sed -n '/alert: RadvdAdvertisementsUnverified/,/^        for:/p' "$REPO_ROOT/README.md" \
+UNVERIFIED_RULE=$(sed -n '/alert: RadvdAdvertisementsUnverified/,/^        for:/p' "$REPO_ROOT/alerts/logql.yaml" \
   | sed -n 's/^[[:space:]]*|~ `\(.*\)` \[[0-9]\+[a-z]\+\]$/\1/p')
 
 alert_matched() {
@@ -84,7 +84,7 @@ run_check
   || no "absent config degraded" "rc=$_rc, log: $(cat "$LOG")"
 
 alert_matched \
-  && ok "the unreadable node warning matches the README's RadvdAdvertisementsUnverified pattern" \
+  && ok "the unreadable node warning matches the RadvdAdvertisementsUnverified pattern in alerts/logql.yaml" \
   || no "alert contract (unreadable node)" "rule='$UNVERIFIED_RULE', log: $(cat "$LOG")"
 
 # The unreadable-file arm of the same guard reaches the READ, not the -f probe —

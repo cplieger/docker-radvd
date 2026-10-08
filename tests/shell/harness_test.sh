@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# CANONICAL COPY in cplieger/ci (configs/shell/harness_test.sh), synced to each
-# adopting repo's tests/shell/ alongside lib.sh. Never edit the synced copy in an
-# app repo — change it here and let the sync land it.
+# Synced from cplieger/ci/configs/shell/harness_test.sh. Change it there.
 #
 # SC2015: `cond && ok || no` cannot mis-fire, because lib.sh's ok/no/skip return 0
 # unconditionally by design.

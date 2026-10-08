@@ -92,8 +92,9 @@ request_reload() {
       printf 'level=error msg="SIGHUP reload refused: the config check did not finish within 5s" path="%s"\n' "$CONF" >&2
     else
       printf 'level=error msg="SIGHUP reload refused: radvd rejected the mounted config" path="%s"\n' "$CONF" >&2
-      # radvd's own text, verbatim and unstructured on purpose: README's
-      # RadvdConfigError rule matches these bytes and tests/image-test.sh asserts it.
+      # radvd's own text, verbatim and unstructured on purpose: the
+      # RadvdConfigError rule in alerts/logql.yaml matches these bytes, and
+      # tests/image-test.sh asserts it.
       printf '%s\n' "$hup_ct" >&2
     fi
     return

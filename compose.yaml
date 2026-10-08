@@ -1,16 +1,16 @@
-# Example compose for docker-radvd. See the README for all configuration options and hardening.
+# Example compose for docker-radvd. See docs/configuration.md and docs/hardening.md for all configuration options and hardening.
 services:
   radvd:
     image: ghcr.io/cplieger/docker-radvd:latest
     container_name: radvd
     restart: unless-stopped
 
-    # RAs are ICMPv6 on a real LAN interface, so radvd needs host networking (or a macvlan).
-    # Advertising a default route also needs the host's net.ipv6.conf.all.forwarding at
-    # 1 or 2, which compose cannot set; AdvDefaultLifetime 0 does not. See the README.
+    # Advertisements go out on a real LAN interface, so radvd needs host networking.
+    # If this host is the default router, set net.ipv6.conf.all.forwarding=1 on the host first.
     network_mode: host
     cap_add:
-      - NET_RAW  # required: raw ICMPv6 socket to emit RAs
+      - NET_RAW  # required for the raw ICMPv6 socket radvd sends advertisements on
 
+    # Put your radvd.conf in ./radvd before the first start, or radvd exits.
     volumes:
-      - "./radvd:/etc/radvd:ro"  # provide your radvd.conf here
+      - "./radvd:/etc/radvd:ro"
