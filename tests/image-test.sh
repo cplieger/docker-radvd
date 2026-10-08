@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Exercises the assembled image's signal contract without emitting RAs.
-# Usage: scripts/smoke.sh [IMAGE] (default: docker-radvd:smoke)
+# Usage: tests/image-test.sh [IMAGE] (default: docker-radvd:smoke)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

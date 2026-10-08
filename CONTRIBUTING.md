@@ -21,9 +21,9 @@ After you change `entrypoint.sh` or a test under `tests/shell/`, also run `docke
 
 A test that reads another file of the repository needs that file copied into the `Dockerfile` `test` stage, or the suite fails inside the build.
 
-The shared local checks leave out the Smoke workflow. After you change the signal handling or the supervisor loop in `entrypoint.sh`, run it yourself with Docker:
+The shared local checks leave out the signal-contract suite, which the central `ci / validate` docker job runs against the image it builds. After you change the signal handling or the supervisor loop in `entrypoint.sh`, run it yourself with Docker:
 
 ```sh
 docker build -t docker-radvd:smoke .
-scripts/smoke.sh docker-radvd:smoke
+tests/image-test.sh docker-radvd:smoke
 ```
