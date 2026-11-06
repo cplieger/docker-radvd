@@ -40,12 +40,17 @@ fi
 ok "docs/monitoring.md shows a yaml example under Checking advertisements continuously"
 
 series='corerad_monitor_messages_received_total{message="router advertisement", host="[^"]*"}'
+# CoreRAD creates the series only when an advertisement arrives, so after a monitor
+# restart it is missing until the next one. The uptime guard and absent_over_time keep
+# a restart from paging; plain absent() would fire until radvd's next advertisement.
 grep -q "increase($series\[[0-9]*m\]) == 0" "$rule" \
-  && ok "the example rule fires when a known router's advertisements stop" \
-  || no "stopped-advertisements arm" "no increase(${series}[<n>m]) == 0 in the example rule"
-grep -q "absent($series)" "$rule" \
-  && ok "the example rule fires when the monitor has never seen the router" \
-  || no "absent arm" "no absent($series) in the example rule"
+  && grep -Eq '^ *and on\(instance, job\) \(time\(\) - process_start_time_seconds\) > [0-9]+$' "$rule" \
+  && ok "the example rule fires when a known router's advertisements stop, once the monitor has run a full window" \
+  || no "stopped-advertisements arm" "no increase(${series}[<n>m]) == 0 guarded by and on(instance, job) (time() - process_start_time_seconds) > <s>"
+grep -q "absent_over_time($series\[[0-9]*m\])" "$rule" \
+  && ! grep -q "absent($series)" "$rule" \
+  && ok "the example rule fires when no advertisement from the router reached the monitor in the window" \
+  || no "absent arm" "no absent_over_time(${series}[<n>m]), or a plain absent() that pages on every monitor restart"
 
 if [ -n "${PROMTOOL:-}" ]; then
   "$PROMTOOL" check rules "$rule" >"$WORK/promtool.out" 2>&1

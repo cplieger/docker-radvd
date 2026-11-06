@@ -6,9 +6,9 @@ This page covers what radvd and the entrypoint log, how to check what reaches th
 
 | You run | You get | You set up |
 | --- | --- | --- |
-| Prometheus, Mimir or VictoriaMetrics, with Alertmanager (the monitoring guide's starting stack adds Loki) | No image rule, since radvd has no metrics page. With the setup here, an alert when advertisements stop reaching the LAN, and the forwarding state | A CoreRAD monitor on another LAN host with the [example rule](#checking-advertisements-continuously), and node_exporter with its `sysctl` collector |
+| Prometheus, Mimir or VictoriaMetrics, with Alertmanager (the monitoring guide's starting stack adds Loki) | From a metric store alone, no image rule, since radvd has no metrics page. The starting stack also runs Loki, so it gets the four rules in the next row. With the setup here, an alert when advertisements stop reaching the LAN, and the forwarding state | A CoreRAD monitor on another LAN host with the [example rule](#checking-advertisements-continuously), and node_exporter with its `sysctl` collector |
 | Loki and Alertmanager, no metric store | All four alert rules | A log collector for the container, and [`alerts/logql.yaml`](../alerts/logql.yaml) loaded into Loki's ruler |
-| Docker or Unraid only | The restart policy, Docker health, `docker logs`, and `rdisc6` by hand | Nothing |
+| Docker or Unraid only | The restart policy, `docker logs`, and `rdisc6` by hand | Nothing |
 
 ## Logs
 
@@ -45,7 +45,7 @@ address = ":9430"
 prometheus = true
 ```
 
-Scrape port 9430 at `/metrics`. The series `corerad_monitor_messages_received_total` counts advertisements by `host`, the sender's link-local address. This rule fires when one sender's advertisements stop, or when the monitor has never seen it:
+Scrape port 9430 at `/metrics`. The series `corerad_monitor_messages_received_total` counts advertisements by `host`, the sender's link-local address. This rule fires when no advertisement from one sender reached the monitor in 30 minutes. CoreRAD creates the series only when an advertisement arrives, so after a monitor restart it is missing until the next one. The uptime guard and `absent_over_time` keep that restart from paging:
 
 ```yaml
 groups:
@@ -54,7 +54,8 @@ groups:
       - alert: RadvdAdvertisementsMissing
         expr: |
           increase(corerad_monitor_messages_received_total{message="router advertisement", host="fe80::1"}[30m]) == 0
-          or absent(corerad_monitor_messages_received_total{message="router advertisement", host="fe80::1"})
+            and on(instance, job) (time() - process_start_time_seconds) > 1800
+          or absent_over_time(corerad_monitor_messages_received_total{message="router advertisement", host="fe80::1"}[30m])
         for: 0m
         labels:
           severity: warning
@@ -62,11 +63,12 @@ groups:
           summary: "No router advertisement from fe80::1 reached the LAN in 30 minutes"
           description: >
             The CoreRAD monitor received no advertisement from this router. radvd
-            may have stopped, its host may be down, or radvd runs but sends
-            nothing. Check the container and the interface, then confirm with `rdisc6`.
+            may have stopped, its host may be down, radvd may run but send
+            nothing, or the monitor itself is down. Check the container and the
+            interface, then confirm with `rdisc6`.
 ```
 
-Replace `fe80::1` with your node's link-local source address. On a pair of nodes, use the shared `AdvRASrcAddress`, so the rule follows whichever node advertises. Keep the window at three times your `MaxRtrAdvInterval` or more. radvd's default of 600 seconds gives 30 minutes.
+Replace `fe80::1` with your node's link-local source address. On a pair of nodes, use the shared `AdvRASrcAddress`, so the rule follows whichever node advertises. Keep the window at three times your `MaxRtrAdvInterval` or more, and the uptime guard at the same length in seconds. radvd's default of 600 seconds gives 30 minutes.
 
 For the forwarding state, start node_exporter with `--collector.sysctl --collector.sysctl.include=net.ipv6.conf.all.forwarding`. It reports `node_sysctl_net_ipv6_conf_all_forwarding`, which reads 0 while forwarding is off. A rule on it reports the same fault as `RadvdForwardingDisabled`, so keep one of the two.
 
@@ -134,7 +136,7 @@ radvd opens no port, so nothing outside the container can probe it. Watch Docker
 | You run | radvd crashes | The container stays stopped, or the host is down | radvd runs but sends nothing |
 | --- | --- | --- | --- |
 | Loki with this image's rules | `RadvdSupervisorFault`, from the exit line | Nobody, because a stopped container logs nothing | Nobody, unless radvd logged a config fault |
-| The monitoring guide's container rules | `ContainerRestarting`, once the restarts repeat | Nobody | Nobody |
+| The monitoring guide's container rules | `ContainerRestarting`, once the restarts repeat. It can miss a loop in which radvd exits within a second of each start, as on a config fault, which `RadvdConfigError` reports for a Loki user | Nobody | Nobody |
 | A CoreRAD monitor with the example rule | `RadvdAdvertisementsMissing`, if no restart brings advertisements back within the window | `RadvdAdvertisementsMissing` | `RadvdAdvertisementsMissing` |
 | Docker or Unraid only | The restart policy restarts it, and nobody is told | Nobody | Nobody |
 
