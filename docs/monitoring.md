@@ -45,7 +45,7 @@ address = ":9430"
 prometheus = true
 ```
 
-Scrape port 9430 at `/metrics`. The series `corerad_monitor_messages_received_total` counts advertisements by `host`, the sender's link-local address. This rule fires when no advertisement from one sender reached the monitor in 30 minutes. CoreRAD creates the series only when an advertisement arrives, so after a monitor restart it is missing until the next one. The uptime guard and `absent_over_time` keep that restart from paging:
+Scrape port 9430 at `/metrics`. The series `corerad_monitor_messages_received_total` counts advertisements by `host`, the sender's link-local address. This rule fires when no advertisement from one sender reached the monitor in 30 minutes. CoreRAD creates the series only when an advertisement arrives, so after a monitor restart it is missing until the next one. The uptime guard and `absent_over_time` keep that restart from paging. The rule also fires from a new monitor's first start until the first advertisement reaches it:
 
 ```yaml
 groups:
