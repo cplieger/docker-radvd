@@ -1,8 +1,16 @@
 # Monitoring and alerts
 
-This page covers what radvd and the entrypoint log, how to check what reaches the LAN, and the alert rules. It is for operators who watch the container from Loki and Alertmanager.
+This page covers what radvd and the entrypoint log, how to check what reaches the LAN, and the alert rules. The image ships log alert rules, because radvd has no metrics page and reports a fault only in its log. Only another host can see whether advertisements reach the LAN. [Checking advertisements continuously](#checking-advertisements-continuously) shows a monitor that alerts when they stop.
 
-## What it logs
+## What you get
+
+| You run | You get | You set up |
+| --- | --- | --- |
+| Prometheus, Mimir or VictoriaMetrics, with Alertmanager (the monitoring guide's starting stack adds Loki) | No image rule, since radvd has no metrics page. With the setup here, an alert when advertisements stop reaching the LAN, and the forwarding state | A CoreRAD monitor on another LAN host with the [example rule](#checking-advertisements-continuously), and node_exporter with its `sysctl` collector |
+| Loki and Alertmanager, no metric store | All four alert rules | A log collector for the container, and [`alerts/logql.yaml`](../alerts/logql.yaml) loaded into Loki's ruler |
+| Docker or Unraid only | The restart policy, Docker health, `docker logs`, and `rdisc6` by hand | Nothing |
+
+## Logs
 
 radvd has no metrics endpoint, and its state is in its logs. The entrypoint writes structured `level=... msg="..."` lines to standard error, and radvd writes its own lines there unchanged. `docker logs radvd` shows both.
 
@@ -23,6 +31,45 @@ sudo rdisc6 eth0
 
 An advertisement from your radvd source address within a few seconds means it works.
 
+## Checking advertisements continuously
+
+Consider [CoreRAD](https://github.com/mdlayher/corerad)'s monitor mode on another LAN host if you want an alert when advertisements stop reaching the segment. In that mode CoreRAD sends nothing. It counts each router advertisement it receives and serves the counts as Prometheus metrics. Run it on a host that does not run radvd, with this `corerad.toml`:
+
+```toml
+[[interfaces]]
+name = "eth0"
+monitor = true
+
+[debug]
+address = ":9430"
+prometheus = true
+```
+
+Scrape port 9430 at `/metrics`. The series `corerad_monitor_messages_received_total` counts advertisements by `host`, the sender's link-local address. This rule fires when one sender's advertisements stop, or when the monitor has never seen it:
+
+```yaml
+groups:
+  - name: radvd-wire
+    rules:
+      - alert: RadvdAdvertisementsMissing
+        expr: |
+          increase(corerad_monitor_messages_received_total{message="router advertisement", host="fe80::1"}[30m]) == 0
+          or absent(corerad_monitor_messages_received_total{message="router advertisement", host="fe80::1"})
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No router advertisement from fe80::1 reached the LAN in 30 minutes"
+          description: >
+            The CoreRAD monitor received no advertisement from this router. radvd
+            may have stopped, its host may be down, or radvd runs but sends
+            nothing. Check the container and the interface, then confirm with `rdisc6`.
+```
+
+Replace `fe80::1` with your node's link-local source address. On a pair of nodes, use the shared `AdvRASrcAddress`, so the rule follows whichever node advertises. Keep the window at three times your `MaxRtrAdvInterval` or more. radvd's default of 600 seconds gives 30 minutes.
+
+For the forwarding state, start node_exporter with `--collector.sysctl --collector.sysctl.include=net.ipv6.conf.all.forwarding`. It reports `node_sysctl_net_ipv6_conf_all_forwarding`, which reads 0 while forwarding is off. A rule on it reports the same fault as `RadvdForwardingDisabled`, so keep one of the two.
+
 ## Alerting
 
 Load the rules in [`alerts/logql.yaml`](../alerts/logql.yaml) into Loki's ruler, as [Loading an app's alert rules](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#loading-an-apps-alert-rules) shows. They cover:
@@ -34,7 +81,7 @@ Load the rules in [`alerts/logql.yaml`](../alerts/logql.yaml) into Loki's ruler,
 | `RadvdForwardingDisabled` | radvd advertises a default route while IPv6 forwarding is off on the host | warning |
 | `RadvdSupervisorFault` | the entrypoint cannot stop radvd, or radvd exits unexpectedly | warning |
 
-radvd's lines arrive only on a config error or an event, with no periodic heartbeat, so the rules are fault rules only. The healthcheck covers a dead process.
+radvd's lines arrive only on a config error or an event, with no periodic heartbeat, so the rules are fault rules only. A crash stops the container within a second, before the healthcheck runs. The `RadvdSupervisorFault` exit line and your restart policy report it, and a container that stays stopped reports nothing.
 
 Every pattern is a string radvd or the entrypoint emits, checked against radvd's source at the pinned version. `properly \(setup_iface=` is anchored on the opening parenthesis so it matches only the fatal form, not the normal `ignoring the interface (setup_iface=` form above. The parameter-bound fragments are radvd's wording at the pinned version, so a reword in a later release narrows a rule silently. That costs a missed alert, never a false one.
 
@@ -60,7 +107,7 @@ The entrypoint reads the mounted config within a 5s bound. This alert fires when
 
 radvd reads `/proc/sys/net/ipv6/conf/all/forwarding` and warns when the value is neither 1 nor 2. It also warns when a per-interface forwarding value is below 1. It keeps advertising this node with its configured `AdvDefaultLifetime`, so LAN hosts can install a default route through a kernel that will not forward their traffic. `pidof radvd` reports healthy throughout. Fix the sysctl on the host. Under host networking, compose cannot set it.
 
-radvd logs the global warning once per process, so this alert clears after the window even if the state persists. It logs the per-interface warning each time it sets an interface up, at startup, on reload and on a netlink change event. So neither line guarantees a firing alert. A node that sets `AdvDefaultLifetime 0` to advertise prefixes only matches this rule legitimately. Confirm with `rdisc6` and the host sysctl rather than from the alert alone.
+radvd logs the global warning once per process, so this alert clears after the window even if the state persists. It logs the per-interface warning each time it sets an interface up, at startup, on reload and on a netlink change event. So neither line guarantees a firing alert. A node that sets `AdvDefaultLifetime 0` to advertise prefixes only matches this rule legitimately. Confirm with `rdisc6` and the host sysctl rather than from the alert alone. node_exporter's `sysctl` collector reports the state continuously, as [Checking advertisements continuously](#checking-advertisements-continuously) shows.
 
 ### RadvdSupervisorFault
 
@@ -73,3 +120,22 @@ An exit propagation means radvd is gone and advertisements have stopped. The `st
 ### Adapting the rules
 
 Thresholds and the `severity` labels are starting points. Change the `container` selector to the label your log collector sets. The rules group by `container`, so each container alerts on its own. For a pair of nodes, add the label your collector sets for the host, as in `sum by (container, host)`, so each node alerts on its own.
+
+## Knowing the app is alive
+
+radvd opens no port, so nothing outside the container can probe it. Watch Docker health, and watch the LAN for its advertisements.
+
+**What healthy means.** The container is healthy while a radvd process runs. A radvd that runs but sends nothing stays healthy too. That covers a BACKUP node by design, an interface that never came up, and a config whose interface radvd ignores.
+
+**Docker health.** The image checks itself every 30 seconds with `pidof radvd`. Docker marks the container unhealthy after 3 failures, and allows 15 seconds after a start. A crash stops the container within a second, before the healthcheck runs, so your restart policy reacts to it rather than Docker health. Docker's health status notifies nobody on its own, and Docker does not restart an unhealthy container.
+
+**Who is told.**
+
+| You run | radvd crashes | The container stays stopped, or the host is down | radvd runs but sends nothing |
+| --- | --- | --- | --- |
+| Loki with this image's rules | `RadvdSupervisorFault`, from the exit line | Nobody, because a stopped container logs nothing | Nobody, unless radvd logged a config fault |
+| The monitoring guide's container rules | `ContainerRestarting`, once the restarts repeat | Nobody | Nobody |
+| A CoreRAD monitor with the example rule | `RadvdAdvertisementsMissing`, if no restart brings advertisements back within the window | `RadvdAdvertisementsMissing` | `RadvdAdvertisementsMissing` |
+| Docker or Unraid only | The restart policy restarts it, and nobody is told | Nobody | Nobody |
+
+Only a monitor on the wire sees a radvd that runs but sends nothing.

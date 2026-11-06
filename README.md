@@ -124,7 +124,7 @@ radvd opens its raw ICMPv6 socket as root, then runs its worker as the unprivile
 
 ## Troubleshooting
 
-The healthcheck runs `pidof radvd` every 30 seconds, so the container is healthy while radvd runs. When radvd exits, the entrypoint passes its exit status on and the container stops within a second, so your `restart` policy handles a crash. The probe does not see a radvd that runs but sends nothing, such as a BACKUP node by design, so check the wire with `rdisc6`.
+The healthcheck runs `pidof radvd` every 30 seconds, so the container is healthy while radvd runs. When radvd exits, the entrypoint passes its exit status on and the container stops within a second, so your `restart` policy handles a crash. The probe does not see a radvd that runs but sends nothing, such as a BACKUP node by design, so check the wire with `rdisc6`. Nothing tells you about a stopped or unhealthy container on its own. [Monitoring and alerts](docs/monitoring.md#knowing-the-app-is-alive) says what does.
 
 - `open_icmpv6_socket: Operation not permitted`. The container lacks `NET_RAW`. Add it to `cap_add`.
 - `exiting, permissions on conf_file invalid`. `radvd.conf` is writable by others or by the `radvd` user. Run `sudo chown root:root radvd/radvd.conf` and `sudo chmod 644 radvd/radvd.conf`.
@@ -135,14 +135,14 @@ The healthcheck runs `pidof radvd` every 30 seconds, so the container is healthy
 
 ## Monitoring
 
-radvd and the entrypoint log to `docker logs`, and radvd has no metrics endpoint. Four Loki alert rules ship in [`alerts/logql.yaml`](alerts/logql.yaml). [Monitoring and alerts](docs/monitoring.md) lists them and shows how to load them.
+radvd and the entrypoint log to `docker logs`, and radvd has no metrics endpoint. Four Loki alert rules ship in [`alerts/logql.yaml`](alerts/logql.yaml). [Monitoring and alerts](docs/monitoring.md) lists them, shows how to load them, and says what tells you that advertisements stopped. The image has a Docker healthcheck. [Knowing the app is alive](docs/monitoring.md#knowing-the-app-is-alive) says what it proves and who is told.
 
 ## Documentation
 
 - [Configuration](docs/configuration.md) covers debug levels, capabilities, networking and file permissions.
 - [High availability](docs/high-availability.md) covers the keepalived pairing and how to check it.
 - [How docker-radvd works](docs/how-it-works.md) covers the entrypoint, reloads and the design.
-- [Monitoring and alerts](docs/monitoring.md) lists the alert rules and how to check the wire.
+- [Monitoring and alerts](docs/monitoring.md) lists the alert rules, how to check the wire, and how to watch advertisements continuously.
 - [Security](docs/hardening.md) covers the privilege model, the hardened profile, signatures and what the image contains.
 
 ## Credits
