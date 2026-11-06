@@ -1,10 +1,10 @@
 # Recommended LogQL alert rules for docker-radvd, for Loki's ruler.
-# Ship the container's logs to Loki and load this file into Loki's ruler.
-# Grafana Alloy's Docker log discovery ships them with no extra configuration.
-# Firing alerts go through your Alertmanager like any Prometheus alert.
+# radvd has no metrics page, so this is the image's only rule file. Ship the
+# container's logs to Loki, for example with Grafana Alloy's Docker log discovery,
+# and load this file into Loki's ruler. Firing alerts go through your Alertmanager.
 # Thresholds and severity labels are starting points. Change the container
-# selector to the label your log collector sets, and adjust or drop
-# `sum by (hostname)` to match your own labels.
+# selector to the label your log collector sets. The rules group by container,
+# so on a pair of nodes add the label your collector sets for the host.
 # Every pattern is a string the pinned radvd release or the entrypoint emits.
 # A later radvd release may reword a fragment and silently narrow a rule.
 groups:
@@ -12,7 +12,7 @@ groups:
     rules:
       - alert: RadvdConfigError
         expr: |
-          sum by (hostname) (count_over_time(
+          sum by (container) (count_over_time(
             {container="radvd"}
             |~ `SIGHUP reload refused|exiting, failed to read config file|exiting, permissions on conf_file invalid|not found:|does not exist or is not set up properly \(setup_iface=|unable to drop root privileges|received icmpv6 RA packet with non-linklocal source address|invalid RADVD_DEBUG_LEVEL|radvd.conf is not a regular file|must be at least|must be between|must be zero or between|must not be greater than|must be set with|must be greater than or equal to AdvPreferredLifetime|invalid prefix length|invalid route prefix length` [10m]
           )) > 0
@@ -28,7 +28,7 @@ groups:
             line names the cause.
       - alert: RadvdAdvertisementsUnverified
         expr: |
-          sum by (hostname) (count_over_time(
+          sum by (container) (count_over_time(
             {container="radvd"}
             |~ `radvd.conf could not be read` [10m]
           )) > 0
@@ -44,7 +44,7 @@ groups:
             check the LAN with `rdisc6`.
       - alert: RadvdForwardingDisabled
         expr: |
-          sum by (hostname) (count_over_time(
+          sum by (container) (count_over_time(
             {container="radvd"}
             |~ `seems to be disabled` [10m]
           )) > 0
@@ -59,7 +59,7 @@ groups:
             will not forward their traffic. Fix the host sysctl, then confirm with `rdisc6`.
       - alert: RadvdSupervisorFault
         expr: |
-          sum by (hostname) (count_over_time(
+          sum by (container) (count_over_time(
             {container="radvd"}
             |~ `failed to deliver TERM to radvd|the TERM could not be delivered to radvd|radvd exited; propagating exit for restart policy` [10m]
           )) > 0

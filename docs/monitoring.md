@@ -72,4 +72,4 @@ An exit propagation means radvd is gone and advertisements have stopped. The `st
 
 ### Adapting the rules
 
-Thresholds and the `severity` label are starting points. The `container` selector and the `hostname` grouping label depend on your log collector. Alloy's Docker discovery provides `container`, while `hostname` comes from your own labeling, so adjust or drop `sum by (hostname)` to match. Route by whatever labels your Alertmanager uses.
+Thresholds and the `severity` labels are starting points. Change the `container` selector to the label your log collector sets. The rules group by `container`, so each container alerts on its own. For a pair of nodes, add the label your collector sets for the host, as in `sum by (container, host)`, so each node alerts on its own.
