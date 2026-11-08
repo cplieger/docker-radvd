@@ -6,7 +6,7 @@ ARG RADVD_VERSION=v2.21
 # repin: dep=radvd-project/radvd url=https://github.com/radvd-project/radvd/releases/download/{version}/radvd-{version_nov}.tar.gz
 ARG RADVD_SHA256=09e5cf7712397463fd35ebca71f3c05f7d31cff9246513f12d03a359c40b089c
 
-FROM alpine:3.24.4@sha256:93b41ef40b1677fce8fcc64ff4af09daddfacf5040afde618bc46c1e2d1cc7d4 AS builder
+FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS builder
 
 SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
 
@@ -61,7 +61,7 @@ EOF
 # only root could traverse it. Both files are already 0644 in git.
 COPY LICENSE NOTICE /out/usr/share/licenses/docker-radvd/
 
-FROM alpine:3.24.4@sha256:93b41ef40b1677fce8fcc64ff4af09daddfacf5040afde618bc46c1e2d1cc7d4 AS base
+FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS base
 
 ARG PKG_REFRESH=static
 # The `echo` is load-bearing: BuildKit keys a RUN on the args it CONSUMES, so dropping it
