@@ -6,7 +6,7 @@ This page covers what radvd and the entrypoint log, how to check what reaches th
 
 | You run | You get | You set up |
 | --- | --- | --- |
-| Prometheus, Mimir or VictoriaMetrics, with Alertmanager (the monitoring guide's starting stack adds Loki) | From a metric store alone, no image rule, since radvd has no metrics page. The starting stack also runs Loki, so it gets the four rules in the next row. With the setup here, an alert when advertisements stop reaching the LAN, and the forwarding state | A CoreRAD monitor on another LAN host with the [example rule](#checking-advertisements-continuously), and node_exporter with its `sysctl` collector |
+| Prometheus, Mimir or VictoriaMetrics, with Alertmanager (the monitoring guide's starting stack adds Loki) | The four log rules, only with Loki added. With the setup here, an alert when advertisements stop reaching the LAN, and the forwarding state | A CoreRAD monitor on another LAN host with the [example rule](#checking-advertisements-continuously), and node_exporter with its `sysctl` collector |
 | Loki and Alertmanager, no metric store | All four alert rules | A log collector for the container, and [`alerts/logql.yaml`](../alerts/logql.yaml) loaded into Loki's ruler |
 | Docker or Unraid only | The restart policy, `docker logs`, and `rdisc6` by hand | Nothing |
 
@@ -136,7 +136,7 @@ radvd opens no port, so nothing outside the container can probe it. Watch Docker
 | You run | radvd crashes | The container stays stopped, or the host is down | radvd runs but sends nothing |
 | --- | --- | --- | --- |
 | Loki with this image's rules | `RadvdSupervisorFault`, from the exit line | Nobody, because a stopped container logs nothing | Nobody, unless radvd logged a config fault |
-| The monitoring guide's container rules | `ContainerRestarting`, once the restarts repeat. It can miss a loop in which radvd exits within a second of each start, as on a config fault, which `RadvdConfigError` reports for a Loki user | Nobody | Nobody |
+| The monitoring guide's container rules | `ContainerRestarting`, once restarts repeat. It can miss radvd exiting within a second of each start, as on a config fault. `RadvdConfigError` reports that on Loki | Nobody | Nobody |
 | A CoreRAD monitor with the example rule | `RadvdAdvertisementsMissing`, if no restart brings advertisements back within the window | `RadvdAdvertisementsMissing` | `RadvdAdvertisementsMissing` |
 | Docker or Unraid only | The restart policy restarts it, and nobody is told | Nobody | Nobody |
 

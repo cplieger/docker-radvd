@@ -6,7 +6,7 @@ This page covers every setting the image reads beyond the compose example, and t
 
 | Variable | Description | Default |
 | --- | --- | --- |
-| `RADVD_DEBUG_LEVEL` | radvd's `--debug` level, `0` to `5`. `0` still logs every warning and error. Any other value stops the container at startup | `0` |
+| `RADVD_DEBUG_LEVEL` | radvd's `--debug` level. `0` logs warnings and errors. Anything other than a whole number from `0` to `5` stops the container at startup | `0` |
 
 Everything else about the daemon comes from the mounted `radvd.conf`. This variable only controls how much radvd logs.
 
@@ -32,7 +32,7 @@ At `RADVD_DEBUG_LEVEL=0`, radvd refuses to start when `radvd.conf` is writable b
 | Capability | Why it is needed |
 | --- | --- |
 | `NET_RAW` | Required. Opens the raw ICMPv6 socket radvd sends advertisements on. Without it radvd exits at startup |
-| `NET_ADMIN` | Not needed. Docker keeps `/proc/sys` read-only, so radvd's interface parameter writes fail either way |
+| `NET_ADMIN` | Not needed. Docker keeps `/proc/sys` read-only, so radvd's writes of interface settings there fail with or without it |
 
 Without `NET_RAW`, radvd exits at startup with `open_icmpv6_socket: Operation not permitted`.
 
@@ -44,7 +44,9 @@ Under `cap_drop: ALL`, three more capabilities are required. [Security](hardenin
 
 | Setting | Value | Reason |
 | --- | --- | --- |
-| `network_mode` | `host` (or `macvlan`) | Advertisements go out on a real LAN interface, which a container network would isolate |
+| `network_mode` | `host`, or a `macvlan` network on the LAN interface | Advertisements go out on a real LAN interface, which a container network would isolate |
 | `net.ipv6.conf.all.forwarding` | `1` (or `2`) on the host, when this node advertises a default route | Compose cannot set it under host networking. A config with `AdvDefaultLifetime 0` advertises no default route and needs no forwarding |
 
 With a non-zero `AdvDefaultLifetime`, radvd advertises this node as a default router whatever the sysctl says. With forwarding off, hosts then install a default route through a node that drops their off-segment traffic. radvd logs `IPv6 forwarding seems to be disabled, but continuing anyway` once at startup either way, with a per-interface variant beside it.
+
+radvd counts both `1` and `2` as forwarding on. `2` is the value some routers use to keep sending router solicitations on their WAN link.
