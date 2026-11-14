@@ -13,7 +13,7 @@ This page explains what the image adds around radvd, how a reload works and why 
 A small POSIX shell entrypoint starts and supervises radvd.
 
 - It checks the mounted `radvd.conf` path. It refuses a path that is not a regular file, at startup and on reload, and warns when its bounded read of the file fails. It leaves the config's settings to radvd. A config radvd rejects outright, such as one with no interface block, is left to radvd too. radvd logs its own error and exits, and the entrypoint reports that exit.
-- It starts radvd with `--username=radvd`. radvd opens its raw socket as root, then runs its worker as the unprivileged `radvd` user. A small root privilege-separation helper stays beside it, so `ps` inside the container shows one radvd-owned process and one root-owned one.
+- It starts radvd with `--username=radvd`. radvd opens its raw socket as root, then runs its worker as the unprivileged `radvd` user. A small root privilege-separation helper stays beside it. So `ps` inside the container shows the radvd-owned worker, the root helper and the root entrypoint.
 - It turns `SIGHUP` into a config reload and forwards `SIGTERM`/`SIGINT` for a graceful shutdown. A stop that arrives before radvd has started wins at once and exits 0 without starting it. An unexpected radvd exit is passed on to Docker's restart policy.
 - It logs structured `key=value` lines to standard error, which `docker logs` captures. radvd's own lines pass through unchanged.
 

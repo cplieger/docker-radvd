@@ -4,7 +4,7 @@ This page covers the privilege model, a read-only hardened profile, how to check
 
 ## Privilege model
 
-radvd opens its raw ICMPv6 socket as root, then runs its worker as the unprivileged `radvd` user, leaving only a small root privilege-separation helper. The config mount is read-only. The container needs host networking and `NET_RAW`, both in [Configuration](configuration.md#capabilities).
+radvd opens its raw ICMPv6 socket as root, then runs its worker as the unprivileged `radvd` user. radvd's small privilege-separation helper stays root, and so does the entrypoint that supervises radvd. The config mount is read-only. The container needs host networking and `NET_RAW`, both in [Configuration](configuration.md#capabilities).
 
 ## Hardened profile
 
