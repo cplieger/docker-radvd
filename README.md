@@ -32,7 +32,7 @@ docker-radvd is free software under the Apache-2.0 license. radvd is under a BSD
 
 ## Quick start
 
-The image is on GitHub Container Registry and Docker Hub, for `amd64` and `arm64`. This is the [`compose.yaml`](compose.yaml) in this repository. Besides `latest`, each release is tagged with its full, minor and major version, such as `v3.1.1`, `v3.1` and `v3`. These are the image's own version numbers, separate from the radvd version inside it. Each image's [software bill of materials](https://github.com/cplieger/docs/blob/main/docs/images.md#reading-the-software-bill-of-materials) names the radvd version it contains.
+The image is on GitHub Container Registry and on Docker Hub as `cplieger/docker-radvd`, for `amd64` and `arm64`. This is the [`compose.yaml`](compose.yaml) in this repository. Besides `latest`, each release is tagged with its full, minor and major version, such as `v3.1.1`, `v3.1` and `v3`. These are the image's own version numbers, separate from the radvd version inside it. Each image's [software bill of materials](https://github.com/cplieger/docs/blob/main/docs/images.md#reading-the-software-bill-of-materials) names the radvd version it contains.
 
 ```yaml
 services:
